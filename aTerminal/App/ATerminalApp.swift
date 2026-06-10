@@ -22,6 +22,9 @@ struct ATerminalApp: App {
         _keys = State(initialValue: keys)
         _settings = State(initialValue: settings)
         _sessions = State(initialValue: SessionManager(keyStore: keys, serverStore: servers, settings: settings))
+        #if DEBUG
+        TestSeed.applyIfRequested(servers: servers, keys: keys)
+        #endif
     }
 
     var body: some Scene {
