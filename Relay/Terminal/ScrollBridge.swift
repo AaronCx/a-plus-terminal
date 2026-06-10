@@ -94,6 +94,9 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
         pan.delegate = self
         pan.maximumNumberOfTouches = 1
         view.addGestureRecognizer(pan)
+        // Existing pans yield to the bridge; `priorityPan` makes pans that
+        // SwiftTerm registers later (mouse-mode pan) yield too.
+        view.priorityPan = pan
         for existing in view.gestureRecognizers ?? [] where existing !== pan {
             if existing is UIPanGestureRecognizer {
                 existing.require(toFail: pan)

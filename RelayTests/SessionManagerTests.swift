@@ -29,9 +29,14 @@ final class TmuxIntegrationTests: XCTestCase {
 final class RecordingShell: ShellDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var _received = ""
+    private var _windowSizes: [(cols: Int, rows: Int)] = []
 
     var received: String {
         lock.withLock { _received }
+    }
+
+    var windowSizes: [(cols: Int, rows: Int)] {
+        lock.withLock { _windowSizes }
     }
 
     func startShell(
@@ -40,6 +45,12 @@ final class RecordingShell: ShellDelegate, @unchecked Sendable {
         context: SSHShellContext
     ) async throws {
         outbound.write("RELAY-TEST-READY\n")
+        let windowTask = Task { [lock] in
+            for await size in context.windowSize {
+                lock.withLock { self._windowSizes.append((size.columns, size.rows)) }
+            }
+        }
+        defer { windowTask.cancel() }
         for await event in inbound {
             if case .stdin(let buffer) = event {
                 let text = String(buffer: buffer)
@@ -176,6 +187,18 @@ final class SessionManagerTests: XCTestCase {
         session.sendInput(Data("DROP-CHANNEL\n".utf8))
         try await waitFor("session to reconnect without user input", timeout: 30) {
             session.state == .connected && shell.received.components(separatedBy: "tmux attach -t 'main'").count > 2
+        }
+    }
+
+    func testWindowSizeReplayedAfterConnect() async throws {
+        // Regression: a resize that lands before the PTY exists must not be
+        // lost — the server otherwise renders at the 80x25 default and the
+        // phone shows wrapped/doubled lines.
+        let session = manager.open(server: makeServer())
+        session.resize(cols: 101, rows: 42)
+        try await waitFor("session to connect") { session.state == .connected }
+        try await waitFor("window size to reach the shell") {
+            self.shell.windowSizes.contains { $0.cols == 101 && $0.rows == 42 }
         }
     }
 

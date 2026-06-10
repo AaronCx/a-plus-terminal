@@ -5,10 +5,23 @@ import SwiftTerm
 /// turn the next typed character into a control byte.
 final class RelayTerminalView: TerminalView {
     var interceptInsert: ((String) -> Bool)?
+    /// ScrollBridge's pan recognizer. SwiftTerm registers its press/drag mouse
+    /// pan lazily — the moment an app enables mouse reporting (tmux `mouse on`)
+    /// — which is after ScrollBridge attached. Any pan added later must yield
+    /// to the wheel bridge or drags become copy-mode selections.
+    weak var priorityPan: UIPanGestureRecognizer?
 
     override func insertText(_ text: String) {
         if interceptInsert?(text) == true { return }
         super.insertText(text)
+    }
+
+    override func addGestureRecognizer(_ gestureRecognizer: UIGestureRecognizer) {
+        super.addGestureRecognizer(gestureRecognizer)
+        if let priorityPan, gestureRecognizer !== priorityPan,
+           gestureRecognizer is UIPanGestureRecognizer {
+            gestureRecognizer.require(toFail: priorityPan)
+        }
     }
 }
 

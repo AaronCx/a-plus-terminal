@@ -48,6 +48,7 @@ final class TerminalSession: Identifiable, Hashable {
     private var io: SessionIO?
     private var scrollBridge: ScrollBridge?
     private var pumpTask: Task<Void, Never>?
+    private(set) var lastRequestedSize: (cols: Int, rows: Int)?
 
     init(server: Server, keyStore: KeyStore, serverStore: ServerStore, settings: AppSettings) {
         self.server = server
@@ -86,6 +87,11 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     func resize(cols: Int, rows: Int) {
+        // Remember the size even when not connected yet — the PTY may open
+        // before the view lays out, and a dropped resize leaves the server
+        // rendering 80 columns into a phone-width screen (wrapped/doubled
+        // text). `syncWindowSize` replays this after every (re)connect.
+        lastRequestedSize = (cols, rows)
         let connection = connection
         Task { try? await connection.resize(cols: cols, rows: rows) }
     }
@@ -135,6 +141,9 @@ final class TerminalSession: Identifiable, Hashable {
                 try await establish()
                 state = .connected
                 lastError = nil
+                // Make the PTY match the on-screen size before anything
+                // (especially tmux attach) draws into it.
+                await syncWindowSize()
                 if settings.autoReattachTmux, let target = server.lastTmuxTarget {
                     try? await connection.send(TmuxIntegration.attachCommand(target: target))
                 }
@@ -161,15 +170,15 @@ final class TerminalSession: Identifiable, Hashable {
         await connection.disconnect()
 
         let fresh = SSHConnection()
-        let terminal = terminalView.getTerminal()
+        let size = currentWindowSize()
         try await fresh.connect(SSHConnection.Configuration(
             host: server.host,
             port: server.port,
             username: server.username,
             privateKey: privateKey,
             knownHostKey: server.knownHostKey,
-            cols: max(2, terminal.cols),
-            rows: max(2, terminal.rows)
+            cols: size.cols,
+            rows: size.rows
         ))
         connection = fresh
 
@@ -179,6 +188,22 @@ final class TerminalSession: Identifiable, Hashable {
             serverStore.update(server)
         }
         startPump(reading: fresh)
+    }
+
+    /// Best-known terminal dimensions: what the layout last reported, falling
+    /// back to the emulator's current grid.
+    private func currentWindowSize() -> (cols: Int, rows: Int) {
+        if let lastRequestedSize {
+            return (max(2, lastRequestedSize.cols), max(2, lastRequestedSize.rows))
+        }
+        let terminal = terminalView.getTerminal()
+        return (max(2, terminal.cols), max(2, terminal.rows))
+    }
+
+    /// Replays the real window size after connecting (§4.2 SIGWINCH contract).
+    private func syncWindowSize() async {
+        let size = currentWindowSize()
+        try? await connection.resize(cols: size.cols, rows: size.rows)
     }
 
     private func startPump(reading connection: SSHConnection) {

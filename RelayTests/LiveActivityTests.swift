@@ -55,3 +55,24 @@ final class DeepLinkRouterTests: XCTestCase {
         XCTAssertNil(router.targetSessionID)
     }
 }
+
+@MainActor
+final class SessionActivityControllerTests: XCTestCase {
+    private func summary() -> SessionActivityAttributes.SessionSummary {
+        SessionActivityAttributes.SessionSummary(
+            id: UUID(), name: "mini", host: "100.0.0.1", state: "connected", startedAt: .now
+        )
+    }
+
+    func testZeroSessionsPushesEmptyContent() {
+        // Regression: closing the last session left the Island showing the
+        // stale "1 session" state for the whole 5-minute grace window.
+        let controller = SessionActivityController()
+        controller.update(with: [summary()])
+        XCTAssertEqual(controller.lastPushedState?.activeCount, 1)
+
+        controller.update(with: [])
+        XCTAssertEqual(controller.lastPushedState?.activeCount, 0, "grace window must show zero sessions")
+        XCTAssertEqual(controller.lastPushedState?.sessions.isEmpty, true)
+    }
+}

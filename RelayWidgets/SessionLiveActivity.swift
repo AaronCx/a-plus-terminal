@@ -27,6 +27,11 @@ struct SessionLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 6) {
+                        if context.state.sessions.isEmpty {
+                            Text("All sessions closed")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                         ForEach(context.state.sessions) { session in
                             Link(destination: .relaySession(id: session.id)) {
                                 SessionActivityRow(session: session)
@@ -83,6 +88,11 @@ struct LockScreenSessionsView: View {
                 Text(state.activeCount == 1 ? "1 active session" : "\(state.activeCount) active sessions")
                     .font(.headline)
                 Spacer()
+            }
+            if state.sessions.isEmpty {
+                Text("All sessions closed")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
             ForEach(state.sessions) { session in
                 Link(destination: .relaySession(id: session.id)) {

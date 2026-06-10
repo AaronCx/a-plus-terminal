@@ -10,14 +10,17 @@ final class SessionActivityController {
 
     private var activity: Activity<SessionActivityAttributes>?
     private var graceTask: Task<Void, Never>?
+    /// Last content pushed to ActivityKit — also the regression-test seam.
+    private(set) var lastPushedState: SessionActivityAttributes.ContentState?
 
     func update(with summaries: [SessionActivityAttributes.SessionSummary]) {
         let state = SessionActivityAttributes.ContentState.make(from: summaries)
+        lastPushedState = state
+        let content = ActivityContent(state: state, staleDate: nil)
 
         if state.activeCount > 0 {
             graceTask?.cancel()
             graceTask = nil
-            let content = ActivityContent(state: state, staleDate: nil)
             if let activity {
                 Task { await activity.update(content) }
             } else if ActivityAuthorizationInfo().areActivitiesEnabled {
@@ -27,11 +30,16 @@ final class SessionActivityController {
                     // No pushType: local-only, zero-data posture.
                 )
             }
-        } else if activity != nil, graceTask == nil {
-            graceTask = Task { [weak self] in
-                try? await Task.sleep(for: Self.graceWindow)
-                guard !Task.isCancelled else { return }
-                await self?.endNow()
+        } else if let activity {
+            // The Island must tell the truth during the grace window: zero
+            // sessions, not the last live state.
+            Task { await activity.update(content) }
+            if graceTask == nil {
+                graceTask = Task { [weak self] in
+                    try? await Task.sleep(for: Self.graceWindow)
+                    guard !Task.isCancelled else { return }
+                    await self?.endNow()
+                }
             }
         }
     }
