@@ -103,6 +103,10 @@ final class TerminalBridge {
     /// Sticky-Ctrl chord: consumes one typed character and sends its control
     /// byte instead (tap ctrl, tap C → 0x03 — Claude Code interrupt, §4.2).
     func handleInsert(_ text: String) -> Bool {
+        // Chords apply to single keystrokes only. Multi-character inserts
+        // (keyboard dictation results, autocomplete) must pass through
+        // untouched — and must not consume an armed chord.
+        guard text.count == 1 else { return false }
         let prefix = consumePrefixBytes()
         if ctrlActive {
             ctrlActive = false
