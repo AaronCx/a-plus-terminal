@@ -3,11 +3,15 @@ import SwiftUI
 @main
 struct RelayApp: App {
     @State private var theme = ThemeStore()
+    @State private var servers = ServerStore()
+    @State private var keys = KeyStore()
 
     var body: some Scene {
         WindowGroup {
             RootTabView()
                 .environment(theme)
+                .environment(servers)
+                .environment(keys)
                 .preferredColorScheme(theme.theme.colorScheme)
                 .onOpenURL { url in
                     DeepLinkRouter.shared.handle(url)
@@ -19,7 +23,7 @@ struct RelayApp: App {
 struct RootTabView: View {
     var body: some View {
         TabView {
-            TerminalTabPlaceholder()
+            TerminalTabView()
                 .tabItem {
                     Label("Terminal", systemImage: "terminal")
                 }
@@ -27,20 +31,6 @@ struct RootTabView: View {
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
-        }
-    }
-}
-
-/// Placeholder until PR 4 lands TerminalScreen and the session/server lists.
-struct TerminalTabPlaceholder: View {
-    var body: some View {
-        NavigationStack {
-            ContentUnavailableView(
-                "No Sessions",
-                systemImage: "terminal",
-                description: Text("Add a server to start a session.")
-            )
-            .navigationTitle("Terminal")
         }
     }
 }
