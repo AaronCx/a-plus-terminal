@@ -57,6 +57,31 @@ final class TerminalBridgeTests: XCTestCase {
         XCTAssertTrue(sent().isEmpty)
     }
 
+    func testStickyPrefixPrependsToTypedKey() {
+        let (bridge, sent) = makeBridge()
+        bridge.prefixActive = true
+        XCTAssertTrue(bridge.handleInsert("c"), "prefix chord must consume the keystroke")
+        XCTAssertEqual(sent(), [Data([0x02, 0x63])], "C-b then c — new tmux window")
+        XCTAssertFalse(bridge.prefixActive, "prefix disarms after one use")
+        XCTAssertFalse(bridge.handleInsert("c"), "next keystroke passes through")
+    }
+
+    func testPrefixCombinesWithCtrlChord() {
+        let (bridge, sent) = makeBridge()
+        bridge.prefixActive = true
+        bridge.ctrlActive = true
+        XCTAssertTrue(bridge.handleInsert("c"))
+        XCTAssertEqual(sent(), [Data([0x02, 0x03])], "C-b + Ctrl-C")
+    }
+
+    func testPrefixAppliesToAccessoryArrows() {
+        let (bridge, sent) = makeBridge()
+        bridge.prefixActive = true
+        bridge.sendKey(.up)
+        XCTAssertEqual(sent(), [Data([0x02, 0x1B, 0x5B, 0x41])], "C-b + Up — tmux pane navigation")
+        XCTAssertFalse(bridge.prefixActive)
+    }
+
     func testArrowKeysHonorApplicationCursorMode() {
         XCTAssertEqual(TerminalKey.up.bytes(applicationCursor: false), [0x1B, 0x5B, 0x41])  // ESC [ A
         XCTAssertEqual(TerminalKey.up.bytes(applicationCursor: true), [0x1B, 0x4F, 0x41])   // ESC O A

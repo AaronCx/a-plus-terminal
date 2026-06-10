@@ -5,8 +5,18 @@ struct ServerEditView: View {
     @Environment(ServerStore.self) private var serverStore
     @Environment(KeyStore.self) private var keyStore
 
+    @Environment(PasswordStore.self) private var passwords
+
+    enum AuthMode: String, CaseIterable, Identifiable {
+        case key = "SSH Key"
+        case password = "Password"
+        var id: String { rawValue }
+    }
+
     @State private var server: Server
     @State private var portText: String
+    @State private var authMode: AuthMode
+    @State private var passwordText = ""
     @State private var showKeyImport = false
     @State private var errorMessage: String?
 
@@ -16,6 +26,7 @@ struct ServerEditView: View {
         let initial = server ?? Server(name: "", host: "", username: "")
         _server = State(initialValue: initial)
         _portText = State(initialValue: String(initial.port))
+        _authMode = State(initialValue: initial.passwordRef != nil && initial.keyID == nil ? .password : .key)
         isNew = server == nil
     }
 
@@ -37,22 +48,38 @@ struct ServerEditView: View {
                 }
 
                 Section {
-                    Picker("Key", selection: $server.keyID) {
-                        Text("None").tag(UUID?.none)
-                        ForEach(keyStore.keys) { key in
-                            Text(key.name).tag(UUID?.some(key.id))
+                    Picker("Method", selection: $authMode) {
+                        ForEach(AuthMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
                         }
                     }
-                    Button("Generate New Key") {
-                        generateKey()
-                    }
-                    Button("Import Key…") {
-                        showKeyImport = true
+                    .pickerStyle(.segmented)
+
+                    if authMode == .key {
+                        Picker("Key", selection: $server.keyID) {
+                            Text("None").tag(UUID?.none)
+                            ForEach(keyStore.keys) { key in
+                                Text(key.name).tag(UUID?.some(key.id))
+                            }
+                        }
+                        Button("Generate New Key") {
+                            generateKey()
+                        }
+                        Button("Import Key…") {
+                            showKeyImport = true
+                        }
+                    } else {
+                        SecureField(
+                            server.passwordRef != nil ? "Password (saved — leave blank to keep)" : "Password",
+                            text: $passwordText
+                        )
                     }
                 } header: {
                     Text("Authentication")
                 } footer: {
-                    Text("Keys are stored in the Keychain on this device only and never leave it. Export the public key from the Keys screen and add it to the server's authorized_keys.")
+                    Text(authMode == .key
+                        ? "Keys are stored in the Keychain on this device only and never leave it. Export the public key and add it to the server's authorized_keys."
+                        : "The password is stored in this device's Keychain only — never in the server list, never synced.")
                 }
 
                 if let keyID = server.keyID, let key = keyStore.key(for: keyID) {
@@ -91,6 +118,7 @@ struct ServerEditView: View {
             && !server.host.trimmingCharacters(in: .whitespaces).isEmpty
             && !server.username.trimmingCharacters(in: .whitespaces).isEmpty
             && Int(portText).map { (1...65535).contains($0) } == true
+            && (authMode == .key || !passwordText.isEmpty || server.passwordRef != nil)
     }
 
     private func generateKey() {
@@ -105,6 +133,22 @@ struct ServerEditView: View {
 
     private func save() {
         server.port = Int(portText) ?? 22
+        if authMode == .password {
+            server.keyID = nil
+            let ref = server.passwordRef ?? UUID()
+            if !passwordText.isEmpty {
+                do {
+                    try passwords.setPassword(passwordText, for: ref)
+                } catch {
+                    errorMessage = error.localizedDescription
+                    return
+                }
+            }
+            server.passwordRef = ref
+        } else if let ref = server.passwordRef {
+            passwords.removePassword(for: ref)
+            server.passwordRef = nil
+        }
         if isNew {
             serverStore.add(server)
         } else {

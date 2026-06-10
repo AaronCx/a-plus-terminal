@@ -7,7 +7,9 @@ import NIOSSH
 
 /// Accepts public-key auth for exactly one allowed key.
 final class SingleKeyAuthDelegate: NIOSSHServerUserAuthenticationDelegate {
-    let supportedAuthenticationMethods: NIOSSHAvailableUserAuthenticationMethods = .publicKey
+    static let acceptedPassword = "open-sesame"
+
+    let supportedAuthenticationMethods: NIOSSHAvailableUserAuthenticationMethods = [.publicKey, .password]
     let allowedKey: NIOSSHPublicKey
 
     init(allowedKey: NIOSSHPublicKey) {
@@ -18,9 +20,12 @@ final class SingleKeyAuthDelegate: NIOSSHServerUserAuthenticationDelegate {
         request: NIOSSHUserAuthenticationRequest,
         responsePromise: EventLoopPromise<NIOSSHUserAuthenticationOutcome>
     ) {
-        if case .publicKey(let key) = request.request, key.publicKey == allowedKey {
+        switch request.request {
+        case .publicKey(let key) where key.publicKey == allowedKey:
             responsePromise.succeed(.success)
-        } else {
+        case .password(let password) where password.password == Self.acceptedPassword:
+            responsePromise.succeed(.success)
+        default:
             responsePromise.succeed(.failure)
         }
     }
@@ -92,7 +97,7 @@ final class SSHConnectionTests: XCTestCase {
             host: "127.0.0.1",
             port: port,
             username: "aterminal-test",
-            privateKey: clientKey,
+            auth: .privateKey(clientKey),
             knownHostKey: knownHostKey
         )
     }
@@ -176,6 +181,25 @@ final class SSHConnectionTests: XCTestCase {
         }
     }
 
+    func testPasswordAuthConnects() async throws {
+        let connection = SSHConnection()
+        try await connection.connect(makeConfig().with(password: SingleKeyAuthDelegate.acceptedPassword))
+        try await connection.send("hello\n")
+        let output = await collectOutput(connection, until: "echo:hello")
+        XCTAssertTrue(output.contains("echo:hello"), "echo missing in: \(output)")
+        await connection.disconnect()
+    }
+
+    func testWrongPasswordRejected() async throws {
+        let connection = SSHConnection()
+        do {
+            try await connection.connect(makeConfig().with(password: "wrong"))
+            XCTFail("connect should have failed with a wrong password")
+        } catch {
+            XCTAssertFalse(error is SSHConnectionError)
+        }
+    }
+
     func testSendBeforeConnectThrows() async throws {
         let connection = SSHConnection()
         do {
@@ -192,7 +216,13 @@ final class SSHConnectionTests: XCTestCase {
 private extension SSHConnection.Configuration {
     func with(privateKey: Curve25519.Signing.PrivateKey) -> Self {
         var copy = self
-        copy.privateKey = privateKey
+        copy.auth = .privateKey(privateKey)
+        return copy
+    }
+
+    func with(password: String) -> Self {
+        var copy = self
+        copy.auth = .password(password)
         return copy
     }
 }

@@ -74,11 +74,16 @@ final class TOFUHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unc
 /// public-key auth → PTY (`xterm-256color`) → shell. Output is delivered on
 /// `output`; input goes through `send`.
 actor SSHConnection {
+    enum AuthMethod {
+        case privateKey(Curve25519.Signing.PrivateKey)
+        case password(String)
+    }
+
     struct Configuration {
         var host: String
         var port: Int = 22
         var username: String
-        var privateKey: Curve25519.Signing.PrivateKey
+        var auth: AuthMethod
         /// Pinned host key (OpenSSH line) from a previous connection, nil on first use.
         var knownHostKey: String?
         var terminal: String = "xterm-256color"
@@ -114,8 +119,13 @@ actor SSHConnection {
         let settings = SSHClientSettings(
             host: config.host,
             port: config.port,
-            authenticationMethod: { [privateKey = config.privateKey, username = config.username] in
-                .ed25519(username: username, privateKey: privateKey)
+            authenticationMethod: { [auth = config.auth, username = config.username] in
+                switch auth {
+                case .privateKey(let key):
+                    return .ed25519(username: username, privateKey: key)
+                case .password(let password):
+                    return .passwordBased(username: username, password: password)
+                }
             },
             hostKeyValidator: .custom(validator)
         )

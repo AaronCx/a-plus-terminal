@@ -10,6 +10,7 @@ struct ATerminalApp: App {
     @State private var theme: ThemeStore
     @State private var servers: ServerStore
     @State private var keys: KeyStore
+    @State private var passwords = PasswordStore()
     @State private var settings: AppSettings
     @State private var sessions: SessionManager
     @State private var router = DeepLinkRouter()
@@ -24,7 +25,9 @@ struct ATerminalApp: App {
         _servers = State(initialValue: servers)
         _keys = State(initialValue: keys)
         _settings = State(initialValue: settings)
-        _sessions = State(initialValue: SessionManager(keyStore: keys, serverStore: servers, settings: settings))
+        let passwords = PasswordStore()
+        _passwords = State(initialValue: passwords)
+        _sessions = State(initialValue: SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings))
         #if DEBUG
         TestSeed.applyIfRequested(servers: servers, keys: keys)
         #endif
@@ -36,6 +39,7 @@ struct ATerminalApp: App {
             .environment(theme)
             .environment(servers)
             .environment(keys)
+            .environment(passwords)
             .environment(settings)
             .environment(sessions)
             .environment(router)

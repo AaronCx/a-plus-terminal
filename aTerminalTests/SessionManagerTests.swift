@@ -94,7 +94,12 @@ final class SessionManagerTests: XCTestCase {
         )
         let defaults = UserDefaults(suiteName: "SessionManagerTests-\(suffix)")!
         settings = AppSettings(defaults: defaults)
-        manager = SessionManager(keyStore: keyStore, serverStore: serverStore, settings: settings)
+        manager = SessionManager(
+            keyStore: keyStore,
+            serverStore: serverStore,
+            passwords: PasswordStore(secrets: InMemorySecretStore()),
+            settings: settings
+        )
 
         // Seed a key whose private bytes are the test client key.
         storedKey = try keyStore.importKey(

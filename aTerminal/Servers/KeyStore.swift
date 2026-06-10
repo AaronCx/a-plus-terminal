@@ -87,6 +87,31 @@ final class KeychainSecretStore: SecretStore {
     }
 }
 
+/// Server login passwords: Keychain-only (`WhenUnlockedThisDeviceOnly`), keyed
+/// by a per-server reference UUID. Same zero-export posture as private keys —
+/// the server list JSON never contains them.
+@Observable
+final class PasswordStore {
+    private let secrets: SecretStore
+
+    init(secrets: SecretStore = KeychainSecretStore(service: "com.aaroncx.relay.passwords")) {
+        self.secrets = secrets
+    }
+
+    func setPassword(_ password: String, for ref: UUID) throws {
+        try secrets.setSecret(Data(password.utf8), for: ref.uuidString)
+    }
+
+    func password(for ref: UUID) -> String? {
+        guard let data = try? secrets.secret(for: ref.uuidString) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    func removePassword(for ref: UUID) {
+        try? secrets.removeSecret(for: ref.uuidString)
+    }
+}
+
 /// ed25519 key management: in-app generation, OpenSSH import, public-key export.
 /// Metadata (names, public keys) lives in a JSON file; private key bytes live
 /// only in the Keychain.

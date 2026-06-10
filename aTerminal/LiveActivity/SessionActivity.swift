@@ -14,6 +14,10 @@ import Foundation
 @MainActor
 final class SessionActivityController {
     static let graceWindow: TimeInterval = 300
+    /// Force-killing the app leaves the Activity orphaned with no way to end
+    /// it (iOS gives no on-kill hook). Content older than this renders as
+    /// stale in the widget instead of pretending sessions are still live.
+    static let staleWindow: TimeInterval = 600
 
     private var activity: Activity<SessionActivityAttributes>?
     /// Last content pushed to ActivityKit — also the regression-test seam.
@@ -30,7 +34,10 @@ final class SessionActivityController {
     func update(with summaries: [SessionActivityAttributes.SessionSummary]) {
         let state = SessionActivityAttributes.ContentState.make(from: summaries)
         lastPushedState = state
-        let content = ActivityContent(state: state, staleDate: nil)
+        let content = ActivityContent(
+            state: state,
+            staleDate: Date(timeIntervalSinceNow: Self.staleWindow)
+        )
 
         if state.activeCount > 0 {
             if let activity {

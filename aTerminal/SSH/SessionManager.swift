@@ -47,6 +47,7 @@ final class TerminalSession: Identifiable, Hashable {
     private(set) var connection = SSHConnection()
     private let keyStore: KeyStore
     private let serverStore: ServerStore
+    private let passwords: PasswordStore
     private let settings: AppSettings
     private var io: SessionIO?
     private var scrollBridge: ScrollBridge?
@@ -69,10 +70,11 @@ final class TerminalSession: Identifiable, Hashable {
     private let outboxContinuation: AsyncStream<Outbound>.Continuation
     private var outboxTask: Task<Void, Never>?
 
-    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, settings: AppSettings) {
+    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings) {
         self.server = server
         self.keyStore = keyStore
         self.serverStore = serverStore
+        self.passwords = passwords
         self.settings = settings
         (outboxStream, outboxContinuation) = AsyncStream.makeStream(of: Outbound.self)
         startOutbox()
@@ -194,8 +196,13 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     private func establish() async throws {
-        guard let keyID = server.keyID, let privateKey = try? keyStore.privateKey(for: keyID) else {
-            throw SessionError.noKeyAssigned
+        let auth: SSHConnection.AuthMethod
+        if let keyID = server.keyID, let privateKey = try? keyStore.privateKey(for: keyID) {
+            auth = .privateKey(privateKey)
+        } else if let ref = server.passwordRef, let password = passwords.password(for: ref) {
+            auth = .password(password)
+        } else {
+            throw SessionError.noCredentials
         }
         pumpTask?.cancel()
         await connection.disconnect()
@@ -206,7 +213,7 @@ final class TerminalSession: Identifiable, Hashable {
             host: server.host,
             port: server.port,
             username: server.username,
-            privateKey: privateKey,
+            auth: auth,
             knownHostKey: server.knownHostKey,
             cols: size.cols,
             rows: size.rows
@@ -292,10 +299,10 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     enum SessionError: LocalizedError {
-        case noKeyAssigned
+        case noCredentials
 
         var errorDescription: String? {
-            "No key is assigned to this server. Edit the server and pick or generate a key, then add its public key to the server's authorized_keys."
+            "No credentials are set for this server. Edit the server and pick a key or set a password."
         }
     }
 }
@@ -346,14 +353,16 @@ final class SessionManager {
 
     private let keyStore: KeyStore
     private let serverStore: ServerStore
+    private let passwords: PasswordStore
     private let settings: AppSettings
     private let activityController = SessionActivityController()
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
-    init(keyStore: KeyStore, serverStore: ServerStore, settings: AppSettings) {
+    init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings) {
         self.keyStore = keyStore
         self.serverStore = serverStore
+        self.passwords = passwords
         self.settings = settings
         // A surviving Live Activity from a previous launch must reflect this
         // process's truth (no sessions yet) instead of stale ones (§4.5).
@@ -366,6 +375,7 @@ final class SessionManager {
             server: server,
             keyStore: keyStore,
             serverStore: serverStore,
+            passwords: passwords,
             settings: settings
         )
         session.onStateChange = { [weak self] in
@@ -446,6 +456,9 @@ final class SessionManager {
         graceTask?.cancel()
         graceTask = nil
         endBackgroundTask()
+        // Push the Activity's stale horizon out — content only goes stale
+        // when the process is killed or frozen long enough to stop updating.
+        refreshActivity()
         for session in sessions where session.state == .suspended {
             Task { await session.reconnect() }
         }
