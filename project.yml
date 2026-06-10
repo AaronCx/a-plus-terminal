@@ -13,6 +13,9 @@ packages:
   Citadel:
     url: https://github.com/orlandos-nl/Citadel.git
     from: "0.12.1"
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm.git
+    from: "1.13.0"
 targets:
   Relay:
     type: application
@@ -22,6 +25,7 @@ targets:
     dependencies:
       - target: RelayWidgets
       - package: Citadel
+      - package: SwiftTerm
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.relay

@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-struct Server: Codable, Identifiable, Equatable {
+struct Server: Codable, Identifiable, Equatable, Hashable {
     var id = UUID()
     var name: String
     var host: String
@@ -11,8 +11,9 @@ struct Server: Codable, Identifiable, Equatable {
     var keyID: UUID?
     /// Last tmux session attached on this server (for auto-reattach, §4.1).
     var lastTmuxTarget: String?
-    /// TOFU host key fingerprint, recorded on first connect (§4.1, PR 3).
-    var hostKeyFingerprint: String?
+    /// TOFU-pinned host public key (OpenSSH line), recorded on first connect.
+    /// Public information — display via `HostKeyFingerprint.fingerprint`.
+    var knownHostKey: String?
 
     var displayAddress: String {
         port == 22 ? host : "\(host):\(port)"

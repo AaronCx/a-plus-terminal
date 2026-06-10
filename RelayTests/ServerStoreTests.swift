@@ -34,12 +34,12 @@ final class ServerStoreTests: XCTestCase {
         store.add(server)
 
         server.lastTmuxTarget = "main"
-        server.hostKeyFingerprint = "SHA256:abc"
+        server.knownHostKey = "ssh-ed25519 AAAAexample"
         store.update(server)
 
         let reloaded = ServerStore(fileURL: fileURL)
         XCTAssertEqual(reloaded.servers.first?.lastTmuxTarget, "main")
-        XCTAssertEqual(reloaded.servers.first?.hostKeyFingerprint, "SHA256:abc")
+        XCTAssertEqual(reloaded.servers.first?.knownHostKey, "ssh-ed25519 AAAAexample")
     }
 
     func testRemoveDeletesServer() {

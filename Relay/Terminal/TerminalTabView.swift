@@ -6,6 +6,7 @@ struct TerminalTabView: View {
 
     @State private var editingServer: Server?
     @State private var addingServer = false
+    @State private var openServer: Server?
 
     var body: some View {
         NavigationStack {
@@ -22,19 +23,29 @@ struct TerminalTabView: View {
                             ServerRow(server: server)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
-                                    // Opens a session from PR 4 on; edit for now.
-                                    editingServer = server
+                                    openServer = server
                                 }
-                        }
-                        .onDelete { offsets in
-                            for offset in offsets {
-                                serverStore.remove(id: serverStore.servers[offset].id)
-                            }
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button(role: .destructive) {
+                                        serverStore.remove(id: server.id)
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                    Button {
+                                        editingServer = server
+                                    } label: {
+                                        Label("Edit", systemImage: "pencil")
+                                    }
+                                    .tint(.blue)
+                                }
                         }
                     }
                 }
             }
             .navigationTitle("Terminal")
+            .navigationDestination(item: $openServer) { server in
+                TerminalScreen(server: server)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
