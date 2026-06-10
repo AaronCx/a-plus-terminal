@@ -29,9 +29,7 @@ struct ATerminalApp: App {
 
     var body: some Scene {
         WindowGroup {
-            AppLockGate {
-                RootTabView()
-            }
+            RootTabView()
             .environment(theme)
             .environment(servers)
             .environment(keys)

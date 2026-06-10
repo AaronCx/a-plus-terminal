@@ -42,7 +42,6 @@ tip jar — and a supporter badge if you subscribe. Nothing is paywalled, ever.
 - Trust-on-first-use host key pinning with hard mismatch failures
 - Sticky Ctrl key, Esc/Tab/arrows accessory bar
 - Multiple simultaneous sessions
-- Face ID app protection
 - Light, dark, and follow-system themes
 
 ## Keywords

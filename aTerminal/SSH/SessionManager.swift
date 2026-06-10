@@ -338,6 +338,9 @@ final class SessionManager {
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.settings = settings
+        // A surviving Live Activity from a previous launch must reflect this
+        // process's truth (no sessions yet) instead of stale ones (§4.5).
+        refreshActivity()
     }
 
     @discardableResult
