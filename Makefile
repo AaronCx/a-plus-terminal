@@ -6,7 +6,7 @@ export DEVELOPER_DIR
 SIM_NAME ?= $(shell DEVELOPER_DIR=$(DEVELOPER_DIR) xcrun simctl list devices available | grep -oE 'iPhone [A-Za-z0-9 ]+' | head -1 | sed 's/ *$$//')
 DEST := platform=iOS Simulator,name=$(SIM_NAME)
 
-XCBUILD := xcodebuild -project aTerminal.xcodeproj -scheme aTerminal -destination '$(DEST)' CODE_SIGNING_ALLOWED=NO
+XCBUILD := xcodebuild -project aTerminal.xcodeproj -scheme aTerminal -destination '$(DEST)'
 
 .PHONY: generate build test clean
 

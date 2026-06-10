@@ -51,11 +51,28 @@ final class TerminalSession: Identifiable, Hashable {
     private var reconnectLoop: Task<Void, Never>?
     private(set) var lastRequestedSize: (cols: Int, rows: Int)?
 
+    /// Outbound writes (keystrokes, resizes) flow through one FIFO stream
+    /// consumed by a single task. Spawning a Task per keystroke gives no
+    /// ordering guarantee: fast typing transposes bytes, and the resize burst
+    /// during the keyboard-show animation can land out of order, leaving the
+    /// server painting an intermediate geometry — corrupted rendering that
+    /// starts "the second you type".
+    private enum Outbound {
+        case data(Data)
+        case resize(cols: Int, rows: Int)
+    }
+
+    private let outboxStream: AsyncStream<Outbound>
+    private let outboxContinuation: AsyncStream<Outbound>.Continuation
+    private var outboxTask: Task<Void, Never>?
+
     init(server: Server, keyStore: KeyStore, serverStore: ServerStore, settings: AppSettings) {
         self.server = server
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.settings = settings
+        (outboxStream, outboxContinuation) = AsyncStream.makeStream(of: Outbound.self)
+        startOutbox()
 
         let io = SessionIO(session: self)
         self.io = io
@@ -83,8 +100,7 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     func sendInput(_ data: Data) {
-        let connection = connection
-        Task { try? await connection.send(data) }
+        outboxContinuation.yield(.data(data))
     }
 
     func resize(cols: Int, rows: Int) {
@@ -93,8 +109,7 @@ final class TerminalSession: Identifiable, Hashable {
         // rendering 80 columns into a phone-width screen (wrapped/doubled
         // text). `syncWindowSize` replays this after every (re)connect.
         lastRequestedSize = (cols, rows)
-        let connection = connection
-        Task { try? await connection.resize(cols: cols, rows: rows) }
+        outboxContinuation.yield(.resize(cols: cols, rows: rows))
     }
 
     /// Initial connection; also the retry path for a failed first connect.
@@ -141,6 +156,8 @@ final class TerminalSession: Identifiable, Hashable {
     func close() async {
         pumpTask?.cancel()
         pumpTask = nil
+        outboxTask?.cancel()
+        outboxContinuation.finish()
         state = .closed
         await connection.disconnect()
     }
@@ -218,6 +235,24 @@ final class TerminalSession: Identifiable, Hashable {
     private func syncWindowSize() async {
         let size = currentWindowSize()
         try? await connection.resize(cols: size.cols, rows: size.rows)
+    }
+
+    /// Single consumer for all outbound traffic — strict FIFO per session,
+    /// always targeting the current connection.
+    private func startOutbox() {
+        outboxTask = Task { [weak self] in
+            guard let self else { return }
+            for await item in self.outboxStream {
+                guard !Task.isCancelled else { return }
+                let connection = self.connection
+                switch item {
+                case .data(let data):
+                    try? await connection.send(data)
+                case .resize(let cols, let rows):
+                    try? await connection.resize(cols: cols, rows: rows)
+                }
+            }
+        }
     }
 
     private func startPump(reading connection: SSHConnection) {

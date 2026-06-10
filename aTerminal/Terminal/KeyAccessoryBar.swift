@@ -69,14 +69,14 @@ struct KeyAccessoryBar: View {
             }
             .accessibilityLabel("Dictate")
             Button {
-                bridge.dismissKeyboard()
+                bridge.toggleKeyboard()
             } label: {
-                Image(systemName: "keyboard.chevron.compact.down")
+                Image(systemName: "keyboard")
                     .font(.system(size: 15))
                     .padding(.trailing, 10)
                     .padding(.vertical, 7)
             }
-            .accessibilityLabel("Dismiss Keyboard")
+            .accessibilityLabel("Toggle Keyboard")
         }
         .padding(.vertical, 4)
         .background(.bar)
