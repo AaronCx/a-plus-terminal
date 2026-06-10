@@ -9,6 +9,10 @@ settings:
     SWIFT_VERSION: "5.10"
     TARGETED_DEVICE_FAMILY: "1"
     CODE_SIGN_STYLE: Automatic
+packages:
+  Citadel:
+    url: https://github.com/orlandos-nl/Citadel.git
+    from: "0.12.1"
 targets:
   Relay:
     type: application
@@ -17,6 +21,7 @@ targets:
       - Relay
     dependencies:
       - target: RelayWidgets
+      - package: Citadel
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.relay
@@ -61,6 +66,10 @@ targets:
       - RelayTests
     dependencies:
       - target: Relay
+      # Compile against Citadel but resolve symbols from the host app binary
+      # at run time — linking the package twice breaks the test bundle link.
+      - package: Citadel
+        link: false
 schemes:
   Relay:
     build:
