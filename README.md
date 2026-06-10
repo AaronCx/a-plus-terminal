@@ -12,7 +12,7 @@ Free, donation-supported. No features are paywalled, ever.
 
 ## Development
 
-Requires Xcode 16+, [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
+Requires Xcode 26+ (iOS 26 SDK), [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
 
 ```sh
 make generate   # regenerate Relay.xcodeproj from project.yml

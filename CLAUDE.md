@@ -13,4 +13,4 @@ Privacy-first iOS SSH terminal. Spec: `~/Documents/github/relay-ios-terminal-spe
 
 - Dependency policy: SwiftTerm, Citadel, swift-crypto, XcodeGen (build-time) — nothing else.
 - Zero data collection: no analytics, no crash SDKs, no third-party network calls. Only user-initiated SSH traffic and on-device dictation.
-- iOS 17.0+, iPhone only.
+- iOS 26.0+, iPhone only.
