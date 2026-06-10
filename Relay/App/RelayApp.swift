@@ -25,17 +25,20 @@ struct RelayApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootTabView()
-                .environment(theme)
-                .environment(servers)
-                .environment(keys)
-                .environment(settings)
-                .environment(sessions)
-                .environment(router)
-                .preferredColorScheme(theme.theme.colorScheme)
-                .onOpenURL { url in
-                    router.handle(url)
-                }
+            AppLockGate {
+                RootTabView()
+            }
+            .environment(theme)
+            .environment(servers)
+            .environment(keys)
+            .environment(settings)
+            .environment(sessions)
+            .environment(router)
+            .preferredColorScheme(theme.theme.colorScheme)
+            .dynamicTypeSize(theme.appTypeSize)
+            .onOpenURL { url in
+                router.handle(url)
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -57,48 +60,10 @@ struct RootTabView: View {
                 .tabItem {
                     Label("Terminal", systemImage: "terminal")
                 }
-            SettingsTabPlaceholder()
+            SettingsScreen()
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
-        }
-    }
-}
-
-/// Placeholder until PR 9 lands the full settings build-out.
-struct SettingsTabPlaceholder: View {
-    @Environment(ThemeStore.self) private var theme
-    @Environment(AppSettings.self) private var settings
-
-    var body: some View {
-        @Bindable var theme = theme
-        @Bindable var settings = settings
-        NavigationStack {
-            Form {
-                Section("Theme") {
-                    Picker("Appearance", selection: $theme.theme) {
-                        ForEach(AppTheme.allCases) { option in
-                            Text(option.label).tag(option)
-                        }
-                    }
-                }
-                Section {
-                    Toggle("Send scroll as mouse wheel in full-screen apps", isOn: $settings.scrollWheelBridge)
-                    Toggle("Auto-reattach tmux", isOn: $settings.autoReattachTmux)
-                } header: {
-                    Text("Scrolling")
-                } footer: {
-                    Text("Swipes scroll tmux and Claude Code history natively when the app requests mouse reporting. After reconnecting, automatically attach to the tmux session you were in.")
-                }
-                Section {
-                    Toggle("Auto-send after 1.5s silence", isOn: $settings.autoSendDictation)
-                } header: {
-                    Text("Dictation")
-                } footer: {
-                    Text("Dictation is processed entirely on this device and never sent to a server.")
-                }
-            }
-            .navigationTitle("Settings")
         }
     }
 }
