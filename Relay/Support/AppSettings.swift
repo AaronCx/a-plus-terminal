@@ -27,6 +27,11 @@ final class AppSettings {
         didSet { defaults.set(autoSendDictation, forKey: Keys.autoSendDictation) }
     }
 
+    /// §4.6 — Face ID/Touch ID lock on launch and on foreground after 60s.
+    var appProtection: Bool {
+        didSet { defaults.set(appProtection, forKey: Keys.appProtection) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -35,6 +40,7 @@ final class AppSettings {
         self.scrollWheelBridge = defaults.object(forKey: Keys.scrollWheelBridge) as? Bool ?? true
         self.tmuxMouseHintShown = defaults.bool(forKey: Keys.tmuxMouseHintShown)
         self.autoSendDictation = defaults.bool(forKey: Keys.autoSendDictation)
+        self.appProtection = defaults.bool(forKey: Keys.appProtection)
     }
 
     private enum Keys {
@@ -42,5 +48,6 @@ final class AppSettings {
         static let scrollWheelBridge = "scrollWheelBridge"
         static let tmuxMouseHintShown = "tmuxMouseHintShown"
         static let autoSendDictation = "autoSendDictation"
+        static let appProtection = "appProtection"
     }
 }

@@ -22,6 +22,8 @@ targets:
     platform: iOS
     sources:
       - Relay
+      - path: Resources
+        buildPhase: resources
     dependencies:
       - target: RelayWidgets
       - package: Citadel
@@ -45,6 +47,7 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         NSMicrophoneUsageDescription: "Relay uses the microphone for voice dictation into your terminal. Audio is processed entirely on this device and never uploaded anywhere."
         NSSpeechRecognitionUsageDescription: "Relay transcribes dictation on-device only. Your speech never leaves this iPhone — Relay never falls back to server-based recognition."
+        NSFaceIDUsageDescription: "Relay uses Face ID to unlock the app when App Protection is enabled."
         CFBundleURLTypes:
           - CFBundleURLName: com.aaroncx.relay
             CFBundleURLSchemes:
