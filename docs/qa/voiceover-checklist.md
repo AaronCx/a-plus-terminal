@@ -7,7 +7,7 @@ Status from the PR 12 audit. Re-verify on device with VoiceOver on
 
 | Element | Label | Where |
 |---|---|---|
-| Add server / new session `+` | "New Session or Server" | TerminalTabView toolbar |
+| Add server `+` | "Add Server" | TerminalTabView toolbar |
 | Session close ✕ | "Close Session" | SessionRow |
 | Ctrl sticky key | "Control" + selected trait when armed | KeyAccessoryBar |
 | Paste key | "Paste" | KeyAccessoryBar |

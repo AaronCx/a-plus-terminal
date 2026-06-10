@@ -9,10 +9,13 @@ struct TerminalTabView: View {
 
     @State private var editingServer: Server?
     @State private var addingServer = false
-    @State private var openSession: TerminalSession?
+    /// Path-based navigation: replacing the path swaps the visible session
+    /// atomically — `navigationDestination(item:)` ignores item changes while
+    /// a screen is already pushed (Island switching between sessions).
+    @State private var path: [TerminalSession] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 if !sessionManager.sessions.isEmpty {
                     Section("Sessions") {
@@ -22,7 +25,7 @@ struct TerminalTabView: View {
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                openSession = session
+                                path = [session]
                             }
                         }
                     }
@@ -40,7 +43,7 @@ struct TerminalTabView: View {
                             ServerRow(server: server)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
-                                    openSession = sessionManager.open(server: server)
+                                    path = [sessionManager.open(server: server)]
                                 }
                                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                     Button(role: .destructive) {
@@ -62,8 +65,8 @@ struct TerminalTabView: View {
             .navigationTitle("Terminal")
             // Explicit restore: relying on the pushed screen's `.hidden` alone
             // sometimes leaves the tab bar gone after popping back.
-            .toolbar(openSession == nil ? .visible : .hidden, for: .tabBar)
-            .navigationDestination(item: $openSession) { session in
+            .toolbar(path.isEmpty ? .visible : .hidden, for: .tabBar)
+            .navigationDestination(for: TerminalSession.self) { session in
                 TerminalScreen(session: session)
             }
             .onChange(of: router.targetSessionID) { _, _ in
@@ -76,23 +79,12 @@ struct TerminalTabView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Menu {
-                        Section("New Session") {
-                            ForEach(serverStore.servers) { server in
-                                Button(server.name) {
-                                    openSession = sessionManager.open(server: server)
-                                }
-                            }
-                        }
-                        Button {
-                            addingServer = true
-                        } label: {
-                            Label("Add Server…", systemImage: "server.rack")
-                        }
+                    Button {
+                        addingServer = true
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .accessibilityLabel("New Session or Server")
+                    .accessibilityLabel("Add Server")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     if !sessionManager.sessions.isEmpty {
@@ -118,7 +110,7 @@ struct TerminalTabView: View {
         guard let target = router.targetSessionID else { return }
         router.targetSessionID = nil
         guard let session = sessionManager.session(for: target) else { return }
-        openSession = session
+        path = [session]
     }
 }
 
