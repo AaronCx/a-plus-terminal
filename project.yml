@@ -45,6 +45,8 @@ targets:
       path: aTerminal/Info.plist
       properties:
         CFBundleDisplayName: a-Terminal
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -77,6 +79,8 @@ targets:
       path: aTerminalWidgets/Info.plist
       properties:
         CFBundleDisplayName: a-Terminal Widgets
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
   aTerminalTests:
