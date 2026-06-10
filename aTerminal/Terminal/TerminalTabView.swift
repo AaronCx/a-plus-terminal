@@ -60,15 +60,19 @@ struct TerminalTabView: View {
                 }
             }
             .navigationTitle("Terminal")
+            // Explicit restore: relying on the pushed screen's `.hidden` alone
+            // sometimes leaves the tab bar gone after popping back.
+            .toolbar(openSession == nil ? .visible : .hidden, for: .tabBar)
             .navigationDestination(item: $openSession) { session in
                 TerminalScreen(session: session)
             }
-            .onChange(of: router.targetSessionID) { _, target in
-                // Live Activity tap: land inside the session; the reconnect
-                // contract fires via scene-phase foregrounding (§4.5).
-                guard let target, let session = sessionManager.session(for: target) else { return }
-                router.targetSessionID = nil
-                openSession = session
+            .onChange(of: router.targetSessionID) { _, _ in
+                consumeDeepLink()
+            }
+            .onAppear {
+                // A cold-launch deep link can land before this view observes
+                // changes — consume whatever is already pending.
+                consumeDeepLink()
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -105,6 +109,16 @@ struct TerminalTabView: View {
                 ServerEditView(server: server)
             }
         }
+    }
+
+    /// Live Activity tap → land inside the session (§4.5). After an app
+    /// relaunch the tapped session no longer exists — clear the target so a
+    /// stale ID can't hijack navigation later; the user just lands in the app.
+    private func consumeDeepLink() {
+        guard let target = router.targetSessionID else { return }
+        router.targetSessionID = nil
+        guard let session = sessionManager.session(for: target) else { return }
+        openSession = session
     }
 }
 

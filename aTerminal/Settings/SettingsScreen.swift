@@ -44,13 +44,6 @@ struct SettingsScreen: View {
                     Text("Terminal")
                 }
 
-                Section {
-                    Toggle("Require Face ID / Touch ID", isOn: $settings.appProtection)
-                } header: {
-                    Text("App Protection")
-                } footer: {
-                    Text("Locks a-Terminal on launch and when returning after 60 seconds in the background. Uses your device passcode as fallback.")
-                }
 
                 Section("Theme") {
                     Picker("Appearance", selection: $theme.theme) {
