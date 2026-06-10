@@ -20,19 +20,58 @@ final class InMemorySecretStore: SecretStore {
     }
 }
 
-final class KeyStoreTests: XCTestCase {
-    // Generated with: ssh-keygen -t ed25519 -N '' -C 'fixture@relay'
-    static let fixturePrivateKey = """
-    -----BEGIN OPENSSH PRIVATE KEY-----
-    b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-    QyNTUxOQAAACB39ZuotaGOAhEaVFbL0+EmyaWSyRaurOBy2bLJ77EjYQAAAJCUBHnglAR5
-    4AAAAAtzc2gtZWQyNTUxOQAAACB39ZuotaGOAhEaVFbL0+EmyaWSyRaurOBy2bLJ77EjYQ
-    AAAEA/vbO0468kCpXgr8gEQTze1W4a9qZvqCZ5LuP+WglozXf1m6i1oY4CERpUVsvT4SbJ
-    pZLJFq6s4HLZssnvsSNhAAAADWZpeHR1cmVAcmVsYXk=
-    -----END OPENSSH PRIVATE KEY-----
-    """
-    static let fixturePublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHf1m6i1oY4CERpUVsvT4SbJpZLJFq6s4HLZssnvsSNh"
+/// Test-side encoder for the openssh-key-v1 container, so tests can exercise
+/// the import parser without embedding any literal key material in the repo.
+/// Layout mirrors what `ssh-keygen -t ed25519` produces (unencrypted).
+enum OpenSSHFixture {
+    static let pemHeader = "-----BEGIN OPENSSH PRIVATE KEY-----" // lastgate-ignore
+    static let pemFooter = "-----END OPENSSH PRIVATE KEY-----" // lastgate-ignore
 
+    static func pem(blob: Data) -> String {
+        var lines = [pemHeader]
+        let base64 = blob.base64EncodedString()
+        var index = base64.startIndex
+        while index < base64.endIndex {
+            let end = base64.index(index, offsetBy: 70, limitedBy: base64.endIndex) ?? base64.endIndex
+            lines.append(String(base64[index..<end]))
+            index = end
+        }
+        lines.append(pemFooter)
+        return lines.joined(separator: "\n")
+    }
+
+    static func privateKeyPEM(for key: Curve25519.Signing.PrivateKey, comment: String = "test@relay") -> String {
+        var publicBlob = Data()
+        publicBlob.appendSSHString(Data("ssh-ed25519".utf8))
+        publicBlob.appendSSHString(key.publicKey.rawRepresentation)
+
+        var privateBlock = Data()
+        var check = UInt32(0x52656C61).bigEndian
+        privateBlock.append(Data(bytes: &check, count: 4))
+        privateBlock.append(Data(bytes: &check, count: 4))
+        privateBlock.appendSSHString(Data("ssh-ed25519".utf8))
+        privateBlock.appendSSHString(key.publicKey.rawRepresentation)
+        privateBlock.appendSSHString(key.rawRepresentation + key.publicKey.rawRepresentation)
+        privateBlock.appendSSHString(Data(comment.utf8))
+        var pad: UInt8 = 1
+        while privateBlock.count % 8 != 0 {
+            privateBlock.append(pad)
+            pad += 1
+        }
+
+        var blob = Data("openssh-key-v1\0".utf8)
+        blob.appendSSHString(Data("none".utf8))
+        blob.appendSSHString(Data("none".utf8))
+        blob.appendSSHString(Data())
+        var one = UInt32(1).bigEndian
+        blob.append(Data(bytes: &one, count: 4))
+        blob.appendSSHString(publicBlob)
+        blob.appendSSHString(privateBlock)
+        return pem(blob: blob)
+    }
+}
+
+final class KeyStoreTests: XCTestCase {
     private var secrets: InMemorySecretStore!
     private var metadataURL: URL!
 
@@ -78,10 +117,16 @@ final class KeyStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.keys, [key])
     }
 
-    func testImportFixtureKeyProducesMatchingPublicKey() throws {
+    func testImportedKeyRoundTripsThroughPEM() throws {
+        let original = Curve25519.Signing.PrivateKey()
+        let pem = OpenSSHFixture.privateKeyPEM(for: original)
+
         let store = makeStore()
-        let key = try store.importKey(named: "imported", openSSHPrivateKey: Self.fixturePrivateKey)
-        XCTAssertTrue(key.publicKeyLine.hasPrefix(Self.fixturePublicKey))
+        let key = try store.importKey(named: "imported", openSSHPrivateKey: pem)
+
+        let expectedLine = OpenSSHKey.publicKeyLine(original.publicKey, comment: "relay-imported")
+        XCTAssertEqual(key.publicKeyLine, expectedLine)
+        XCTAssertEqual(try store.privateKey(for: key.id).rawRepresentation, original.rawRepresentation)
     }
 
     func testDeleteRemovesSecretAndMetadata() throws {
@@ -96,10 +141,18 @@ final class KeyStoreTests: XCTestCase {
 }
 
 final class OpenSSHKeyTests: XCTestCase {
-    func testParseFixturePrivateKey() throws {
-        let key = try OpenSSHKey.parsePrivateKey(KeyStoreTests.fixturePrivateKey)
-        let line = OpenSSHKey.publicKeyLine(key.publicKey, comment: "fixture@relay")
-        XCTAssertEqual(line, KeyStoreTests.fixturePublicKey + " fixture@relay")
+    func testParseRecoversGeneratedKey() throws {
+        let original = Curve25519.Signing.PrivateKey()
+        let parsed = try OpenSSHKey.parsePrivateKey(OpenSSHFixture.privateKeyPEM(for: original))
+        XCTAssertEqual(parsed.rawRepresentation, original.rawRepresentation)
+        XCTAssertEqual(parsed.publicKey.rawRepresentation, original.publicKey.rawRepresentation)
+    }
+
+    func testParseToleratesSurroundingWhitespace() throws {
+        let original = Curve25519.Signing.PrivateKey()
+        let pem = "\n  \(OpenSSHFixture.privateKeyPEM(for: original))\n\n"
+        let parsed = try OpenSSHKey.parsePrivateKey(pem)
+        XCTAssertEqual(parsed.rawRepresentation, original.rawRepresentation)
     }
 
     func testParseRejectsGarbage() {
@@ -109,8 +162,7 @@ final class OpenSSHKeyTests: XCTestCase {
     }
 
     func testParseRejectsRSAKeyType() throws {
-        // An RSA key in openssh-key-v1 format should fail with a clear error,
-        // not crash. Build a minimal blob with an RSA type marker.
+        // An RSA marker inside the container should fail with a clear error.
         var privBlock = Data()
         var check = UInt32(7).bigEndian
         privBlock.append(Data(bytes: &check, count: 4))
@@ -126,12 +178,7 @@ final class OpenSSHKeyTests: XCTestCase {
         blob.appendSSHString(Data("stub".utf8))
         blob.appendSSHString(privBlock)
 
-        let pem = """
-        -----BEGIN OPENSSH PRIVATE KEY-----
-        \(blob.base64EncodedString())
-        -----END OPENSSH PRIVATE KEY-----
-        """
-        XCTAssertThrowsError(try OpenSSHKey.parsePrivateKey(pem)) { error in
+        XCTAssertThrowsError(try OpenSSHKey.parsePrivateKey(OpenSSHFixture.pem(blob: blob))) { error in
             XCTAssertEqual(error as? OpenSSHKey.ParseError, .unsupportedKeyType("ssh-rsa"))
         }
     }
@@ -144,12 +191,7 @@ final class OpenSSHKeyTests: XCTestCase {
         var one = UInt32(1).bigEndian
         blob.append(Data(bytes: &one, count: 4))
 
-        let pem = """
-        -----BEGIN OPENSSH PRIVATE KEY-----
-        \(blob.base64EncodedString())
-        -----END OPENSSH PRIVATE KEY-----
-        """
-        XCTAssertThrowsError(try OpenSSHKey.parsePrivateKey(pem)) { error in
+        XCTAssertThrowsError(try OpenSSHKey.parsePrivateKey(OpenSSHFixture.pem(blob: blob))) { error in
             XCTAssertEqual(error as? OpenSSHKey.ParseError, .encryptedKeyUnsupported)
         }
     }
