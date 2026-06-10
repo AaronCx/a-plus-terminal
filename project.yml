@@ -88,6 +88,9 @@ schemes:
         Relay: all
     run:
       config: Debug
+      # Local StoreKit config so tips/subscriptions are testable in the
+      # simulator without App Store Connect.
+      storeKitConfiguration: Relay.storekit
     test:
       config: Debug
       targets:

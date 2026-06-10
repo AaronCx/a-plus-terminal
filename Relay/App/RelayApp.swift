@@ -10,6 +10,7 @@ struct RelayApp: App {
     @State private var settings: AppSettings
     @State private var sessions: SessionManager
     @State private var router = DeepLinkRouter()
+    @State private var tipStore = TipStore()
 
     init() {
         let theme = ThemeStore()
@@ -34,6 +35,7 @@ struct RelayApp: App {
             .environment(settings)
             .environment(sessions)
             .environment(router)
+            .environment(tipStore)
             .preferredColorScheme(theme.theme.colorScheme)
             .dynamicTypeSize(theme.appTypeSize)
             .onOpenURL { url in

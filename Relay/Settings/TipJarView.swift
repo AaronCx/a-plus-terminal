@@ -1,8 +1,10 @@
 import SwiftUI
+import StoreKit
 
-/// Tip Jar card (§4.6 card 1). StoreKit 2 products land in PR 10 — until
-/// then the card explains the model without offering anything fake.
+/// Tip Jar card (§4.6 card 1): consumable tips via StoreKit 2.
 struct TipJarView: View {
+    @Environment(TipStore.self) private var store
+
     var body: some View {
         Section {
             VStack(alignment: .leading, spacing: 6) {
@@ -14,23 +16,109 @@ struct TipJarView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
+
+            switch store.loadState {
+            case .loading:
+                HStack {
+                    ProgressView()
+                    Text("Loading tips…").foregroundStyle(.secondary)
+                }
+            case .failed(let message):
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Try Again") {
+                    Task { await store.load() }
+                }
+            case .loaded:
+                ForEach(store.tipProducts) { product in
+                    Button {
+                        Task { await store.purchase(product) }
+                    } label: {
+                        HStack {
+                            Text(product.displayName)
+                            Spacer()
+                            Text(product.displayPrice)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                if store.lastTipThanked {
+                    Label("Thank you for the tip!", systemImage: "sparkles")
+                        .font(.subheadline)
+                        .foregroundStyle(.pink)
+                }
+            }
         }
     }
 }
 
-/// Supporter card (§4.6 card 2). Subscription products land in PR 10.
+/// Supporter card (§4.6 card 2): auto-renewing subscription. Gratitude and a
+/// badge — no features are paywalled, ever.
 struct SupporterView: View {
+    @Environment(TipStore.self) private var store
+
     var body: some View {
         Section {
             VStack(alignment: .leading, spacing: 6) {
-                Label("Supporter", systemImage: "star.fill")
-                    .font(.headline)
-                    .foregroundStyle(.yellow)
+                HStack {
+                    Label("Supporter", systemImage: "star.fill")
+                        .font(.headline)
+                        .foregroundStyle(.yellow)
+                    if store.isSupporter {
+                        SupporterBadge()
+                    }
+                }
                 Text("A small recurring thank-you. Supporters get a badge here — and our gratitude. No features are paywalled, ever.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
+
+            if store.loadState == .loaded {
+                ForEach(store.subscriptionProducts) { product in
+                    Button {
+                        Task { await store.purchase(product) }
+                    } label: {
+                        HStack {
+                            Text(product.displayName)
+                            Spacer()
+                            Text(subscriptionPriceLabel(for: product))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                }
+            }
+
+            Button("Restore Purchases") {
+                Task { await store.restorePurchases() }
+            }
+            .font(.subheadline)
         }
+    }
+
+    private func subscriptionPriceLabel(for product: Product) -> String {
+        guard let period = product.subscription?.subscriptionPeriod else {
+            return product.displayPrice
+        }
+        switch period.unit {
+        case .month: return "\(product.displayPrice)/mo"
+        case .year: return "\(product.displayPrice)/yr"
+        default: return product.displayPrice
+        }
+    }
+}
+
+struct SupporterBadge: View {
+    var body: some View {
+        Text("SUPPORTER")
+            .font(.caption2.weight(.bold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(.yellow.opacity(0.25), in: Capsule())
+            .foregroundStyle(.orange)
+            .accessibilityLabel("Supporter badge")
     }
 }
