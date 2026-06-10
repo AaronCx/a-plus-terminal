@@ -1,16 +1,32 @@
 import SwiftUI
 
-/// Terminal tab: active sessions (PR 5) above the server list (§4.2 layout).
+/// Terminal tab (§4.2): `+` new session top-left, Close All top-right,
+/// active sessions above the server list.
 struct TerminalTabView: View {
     @Environment(ServerStore.self) private var serverStore
+    @Environment(SessionManager.self) private var sessionManager
 
     @State private var editingServer: Server?
     @State private var addingServer = false
-    @State private var openServer: Server?
+    @State private var openSession: TerminalSession?
 
     var body: some View {
         NavigationStack {
             List {
+                if !sessionManager.sessions.isEmpty {
+                    Section("Sessions") {
+                        ForEach(sessionManager.sessions) { session in
+                            SessionRow(session: session) {
+                                sessionManager.close(session)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                openSession = session
+                            }
+                        }
+                    }
+                }
+
                 Section("Servers") {
                     if serverStore.servers.isEmpty {
                         ContentUnavailableView(
@@ -23,7 +39,7 @@ struct TerminalTabView: View {
                             ServerRow(server: server)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
-                                    openServer = server
+                                    openSession = sessionManager.open(server: server)
                                 }
                                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                     Button(role: .destructive) {
@@ -43,17 +59,35 @@ struct TerminalTabView: View {
                 }
             }
             .navigationTitle("Terminal")
-            .navigationDestination(item: $openServer) { server in
-                TerminalScreen(server: server)
+            .navigationDestination(item: $openSession) { session in
+                TerminalScreen(session: session)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        addingServer = true
+                    Menu {
+                        Section("New Session") {
+                            ForEach(serverStore.servers) { server in
+                                Button(server.name) {
+                                    openSession = sessionManager.open(server: server)
+                                }
+                            }
+                        }
+                        Button {
+                            addingServer = true
+                        } label: {
+                            Label("Add Server…", systemImage: "server.rack")
+                        }
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .accessibilityLabel("Add Server")
+                    .accessibilityLabel("New Session or Server")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if !sessionManager.sessions.isEmpty {
+                        Button("Close All") {
+                            sessionManager.closeAll()
+                        }
+                    }
                 }
             }
             .sheet(isPresented: $addingServer) {
@@ -62,6 +96,42 @@ struct TerminalTabView: View {
             .sheet(item: $editingServer) { server in
                 ServerEditView(server: server)
             }
+        }
+    }
+}
+
+struct SessionRow: View {
+    let session: TerminalSession
+    var onClose: () -> Void
+
+    var body: some View {
+        HStack {
+            Circle()
+                .fill(stateColor)
+                .frame(width: 9, height: 9)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.server.name)
+                    .font(.body.weight(.medium))
+                Text(session.startedAt, style: .time)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(role: .destructive, action: onClose) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Close Session")
+        }
+    }
+
+    private var stateColor: Color {
+        switch session.state {
+        case .connected: return .green
+        case .connecting, .reconnecting: return .orange
+        case .suspended: return .orange
+        case .closed: return .gray
         }
     }
 }

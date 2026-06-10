@@ -70,31 +70,15 @@ final class TerminalBridge {
     }
 }
 
-/// Hosts SwiftTerm's `TerminalView`, pumping SSH output into the emulator and
-/// emulator input back into the SSH channel.
+/// Mounts a session's persistent terminal view, so emulator state survives
+/// navigating away and back.
 struct TerminalHostView: UIViewRepresentable {
-    let connection: SSHConnection
-    let bridge: TerminalBridge
+    let session: TerminalSession
     var fontSize: Double
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(connection: connection)
-    }
-
     func makeUIView(context: Context) -> RelayTerminalView {
-        let view = RelayTerminalView(frame: .zero)
-        view.terminalDelegate = context.coordinator
+        let view = session.terminalView
         view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        // Relay ships its own accessory bar (KeyAccessoryBar).
-        view.inputAccessoryView = nil
-        view.interceptInsert = { [weak bridge] text in
-            bridge?.handleInsert(text) ?? false
-        }
-        bridge.terminalView = view
-        bridge.sendData = { [coordinator = context.coordinator] data in
-            coordinator.sendToConnection(data)
-        }
-        context.coordinator.startPump(into: view)
         return view
     }
 
@@ -102,63 +86,5 @@ struct TerminalHostView: UIViewRepresentable {
         if abs(view.font.pointSize - fontSize) > 0.5 {
             view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         }
-    }
-
-    final class Coordinator: NSObject, TerminalViewDelegate {
-        private let connection: SSHConnection
-        private var pumpTask: Task<Void, Never>?
-
-        init(connection: SSHConnection) {
-            self.connection = connection
-        }
-
-        deinit {
-            pumpTask?.cancel()
-        }
-
-        func sendToConnection(_ data: Data) {
-            Task { try? await connection.send(data) }
-        }
-
-        /// Feeds SSH output bytes into the emulator on the main thread.
-        func startPump(into view: RelayTerminalView) {
-            guard pumpTask == nil else { return }
-            pumpTask = Task { [weak view, connection] in
-                for await chunk in await connection.output {
-                    guard let view else { return }
-                    await MainActor.run {
-                        view.feed(byteArray: ArraySlice([UInt8](chunk)))
-                    }
-                }
-            }
-        }
-
-        // MARK: TerminalViewDelegate
-
-        func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            sendToConnection(Data(data))
-        }
-
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            Task { try? await connection.resize(cols: newCols, rows: newRows) }
-        }
-
-        func clipboardCopy(source: TerminalView, content: Data) {
-            if let text = String(data: content, encoding: .utf8) {
-                UIPasteboard.general.string = text
-            }
-        }
-
-        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            guard let url = URL(string: link), ["http", "https"].contains(url.scheme) else { return }
-            UIApplication.shared.open(url)
-        }
-
-        func setTerminalTitle(source: TerminalView, title: String) {}
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-        func scrolled(source: TerminalView, position: Double) {}
-        func bell(source: TerminalView) {}
-        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
-        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
     }
 }

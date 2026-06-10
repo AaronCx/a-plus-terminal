@@ -150,6 +150,14 @@ actor SSHConnection {
         try await send(Data(text.utf8))
     }
 
+    /// Runs a one-off command on a separate exec channel; the PTY shell is
+    /// untouched. Used for tmux session discovery (§4.1).
+    func runCommand(_ command: String) async throws -> String {
+        guard let client else { throw SSHConnectionError.notConnected }
+        let buffer = try await client.executeCommand(command)
+        return String(buffer: buffer)
+    }
+
     func resize(cols: Int, rows: Int) async throws {
         guard let writer else { throw SSHConnectionError.notConnected }
         try await writer.changeSize(cols: cols, rows: rows, pixelWidth: 0, pixelHeight: 0)
