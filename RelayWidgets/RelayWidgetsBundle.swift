@@ -4,10 +4,8 @@ import SwiftUI
 @main
 struct RelayWidgetsBundle: WidgetBundle {
     var body: some Widget {
-        // SessionLiveActivity lands in PR 8. WidgetKit requires at least one
-        // widget in the bundle, so ship a minimal Home Screen widget that
-        // mirrors the app icon affordance.
         RelayLauncherWidget()
+        SessionLiveActivity()
     }
 }
 

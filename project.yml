@@ -54,6 +54,8 @@ targets:
     platform: iOS
     sources:
       - RelayWidgets
+      # Shared ActivityAttributes — must compile identically in both targets.
+      - path: Relay/LiveActivity/SessionActivityAttributes.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.relay.widgets

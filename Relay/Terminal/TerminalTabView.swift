@@ -5,6 +5,7 @@ import SwiftUI
 struct TerminalTabView: View {
     @Environment(ServerStore.self) private var serverStore
     @Environment(SessionManager.self) private var sessionManager
+    @Environment(DeepLinkRouter.self) private var router
 
     @State private var editingServer: Server?
     @State private var addingServer = false
@@ -61,6 +62,13 @@ struct TerminalTabView: View {
             .navigationTitle("Terminal")
             .navigationDestination(item: $openSession) { session in
                 TerminalScreen(session: session)
+            }
+            .onChange(of: router.targetSessionID) { _, target in
+                // Live Activity tap: land inside the session; the reconnect
+                // contract fires via scene-phase foregrounding (§4.5).
+                guard let target, let session = sessionManager.session(for: target) else { return }
+                router.targetSessionID = nil
+                openSession = session
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {

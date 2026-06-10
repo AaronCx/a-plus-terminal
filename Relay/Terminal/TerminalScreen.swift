@@ -65,8 +65,15 @@ struct TerminalScreen: View {
             }
         }
         .onAppear {
-            if session.state == .connected {
+            switch session.state {
+            case .connected:
                 session.bridge.focus()
+            case .suspended:
+                // Arriving via Live Activity tap or session list: reconnect
+                // immediately rather than waiting for user input (§4.5).
+                Task { await session.reconnect() }
+            default:
+                break
             }
         }
     }

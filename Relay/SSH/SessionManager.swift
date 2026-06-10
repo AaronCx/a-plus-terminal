@@ -29,8 +29,12 @@ final class TerminalSession: Identifiable, Hashable {
 
     let startedAt = Date()
     private(set) var server: Server
-    private(set) var state: SessionState = .connecting
+    private(set) var state: SessionState = .connecting {
+        didSet { if oldValue != state { onStateChange?() } }
+    }
     private(set) var lastError: String?
+    /// SessionManager hook for Live Activity updates (§4.5).
+    @ObservationIgnored var onStateChange: (() -> Void)?
 
     let bridge = TerminalBridge()
     let terminalView = RelayTerminalView(frame: .zero)
@@ -252,6 +256,7 @@ final class SessionManager {
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let settings: AppSettings
+    private let activityController = SessionActivityController()
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
@@ -269,14 +274,19 @@ final class SessionManager {
             serverStore: serverStore,
             settings: settings
         )
+        session.onStateChange = { [weak self] in
+            self?.refreshActivity()
+        }
         sessions.append(session)
         Task { await session.connect() }
+        refreshActivity()
         return session
     }
 
     func close(_ session: TerminalSession) {
         sessions.removeAll { $0.id == session.id }
         Task { await session.close() }
+        refreshActivity()
     }
 
     func closeAll() {
@@ -285,6 +295,29 @@ final class SessionManager {
         for session in closing {
             Task { await session.close() }
         }
+        refreshActivity()
+    }
+
+    /// Live Activity mirror of the session list (§4.5).
+    private func refreshActivity() {
+        let summaries = sessions.map { session in
+            SessionActivityAttributes.SessionSummary(
+                id: session.id,
+                name: session.server.name,
+                host: session.server.host,
+                state: {
+                    switch session.state {
+                    case .connected: return "connected"
+                    case .connecting: return "connecting"
+                    case .reconnecting: return "reconnecting"
+                    case .suspended: return "suspended"
+                    case .closed: return "closed"
+                    }
+                }(),
+                startedAt: session.startedAt
+            )
+        }
+        activityController.update(with: summaries)
     }
 
     func session(for id: UUID) -> TerminalSession? {

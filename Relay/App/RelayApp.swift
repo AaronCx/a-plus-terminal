@@ -9,6 +9,7 @@ struct RelayApp: App {
     @State private var keys: KeyStore
     @State private var settings: AppSettings
     @State private var sessions: SessionManager
+    @State private var router = DeepLinkRouter()
 
     init() {
         let theme = ThemeStore()
@@ -30,9 +31,10 @@ struct RelayApp: App {
                 .environment(keys)
                 .environment(settings)
                 .environment(sessions)
+                .environment(router)
                 .preferredColorScheme(theme.theme.colorScheme)
                 .onOpenURL { url in
-                    DeepLinkRouter.shared.handle(url)
+                    router.handle(url)
                 }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -101,15 +103,16 @@ struct SettingsTabPlaceholder: View {
     }
 }
 
-/// Routes relay://session/<uuid> deep links. Target selection lands with
-/// Live Activities (PR 8).
+/// Routes relay://session/<uuid> deep links from the Live Activity /
+/// Dynamic Island into the matching session (§4.5).
+@Observable
 final class DeepLinkRouter {
-    static let shared = DeepLinkRouter()
-
-    private(set) var pendingSessionID: UUID?
+    /// Set when a deep link arrives; TerminalTabView consumes it.
+    var targetSessionID: UUID?
 
     func handle(_ url: URL) {
-        guard url.scheme == "relay", url.host == "session" else { return }
-        pendingSessionID = UUID(uuidString: url.lastPathComponent)
+        guard url.scheme == "relay", url.host == "session",
+              let id = UUID(uuidString: url.lastPathComponent) else { return }
+        targetSessionID = id
     }
 }
