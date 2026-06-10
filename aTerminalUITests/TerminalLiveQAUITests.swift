@@ -88,6 +88,53 @@ final class TerminalLiveQAUITests: XCTestCase {
         shot("12-refocus-typing")
     }
 
+    /// Reproduces the Island session-switch flow end-to-end: the expanded
+    /// Island rows send `aterminal://session/<uuid>`; `system.open` delivers
+    /// the identical URL, so this verifies routing while another session's
+    /// screen is frontmost — the exact case that used to bounce users back.
+    func testDeepLinkSwitchesBetweenLiveSessions() {
+        // Session A with a full-screen marker.
+        openSession()
+        type("clear; echo SCREEN-OF-SESSION-A\n")
+        app.navigationBars.buttons.firstMatch.tap()  // back to the list
+        sleep(2)
+
+        // Session B — tap the server row specifically (its subtitle is
+        // unambiguous; the session row is also labeled "LiveQA").
+        app.staticTexts["acx@127.0.0.1"].tap()
+        sleep(4)
+        type("clear; echo SCREEN-OF-SESSION-B\n")
+        app.navigationBars.buttons.firstMatch.tap()
+        sleep(2)
+        shot("20-two-sessions-list")
+
+        // Collect the session UUIDs — multiple AX nodes can carry one row's
+        // identifier, so dedupe before assuming row 0/1 are distinct sessions.
+        let ids = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'session-'"))
+        var uuids: [String] = []
+        for index in 0..<ids.count {
+            let raw = ids.element(boundBy: index).identifier.replacingOccurrences(of: "session-", with: "")
+            if !uuids.contains(raw) { uuids.append(raw) }
+        }
+        XCTAssertGreaterThanOrEqual(uuids.count, 2, "expected two distinct sessions, got \(uuids)")
+        let sessionA = uuids[0]
+        let sessionB = uuids[1]
+
+        // Enter session A (oldest row), then deep-link to B while inside A.
+        ids.element(boundBy: 0).tap()
+        sleep(3)
+        shot("21-inside-session-A")
+        XCUIDevice.shared.system.open(URL(string: "aterminal://session/\(sessionB)")!)
+        sleep(4)
+        shot("22-after-deeplink-should-be-B")
+
+        // And back to A the same way.
+        XCUIDevice.shared.system.open(URL(string: "aterminal://session/\(sessionA)")!)
+        sleep(4)
+        shot("23-after-deeplink-back-to-A")
+    }
+
     func testTmuxTypingKeyboardCycleAndAppSwitch() {
         openSession()
         type("tmux kill-session -t liveqa 2>/dev/null; tmux new -s liveqa\n", settle: 4)

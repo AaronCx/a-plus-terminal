@@ -1,4 +1,7 @@
 import SwiftUI
+import os
+
+let deepLinkLog = Logger(subsystem: "com.aaroncx.relay", category: "deeplink")
 
 @main
 struct ATerminalApp: App {
@@ -80,7 +83,11 @@ final class DeepLinkRouter {
 
     func handle(_ url: URL) {
         guard url.scheme == "aterminal", url.host == "session",
-              let id = UUID(uuidString: url.lastPathComponent) else { return }
+              let id = UUID(uuidString: url.lastPathComponent) else {
+            deepLinkLog.debug("router: rejected \(url.absoluteString, privacy: .public)")
+            return
+        }
+        deepLinkLog.debug("router: target=\(id.uuidString, privacy: .public)")
         targetSessionID = id
     }
 }

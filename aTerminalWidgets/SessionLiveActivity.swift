@@ -9,7 +9,6 @@ struct SessionLiveActivity: Widget {
             LockScreenSessionsView(state: context.state)
                 .activityBackgroundTint(Color.black.opacity(0.85))
                 .activitySystemActionForegroundColor(.white)
-                .widgetURL(deepLink(for: context.state))
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
@@ -42,14 +41,16 @@ struct SessionLiveActivity: Widget {
                 }
             } compactLeading: {
                 Image(systemName: "terminal.fill")
+                    .widgetURL(deepLink(for: context.state))
             } compactTrailing: {
                 Text("\(context.state.activeCount)")
                     .font(.caption.monospacedDigit().weight(.semibold))
+                    .widgetURL(deepLink(for: context.state))
             } minimal: {
                 Text("\(context.state.activeCount)")
                     .font(.caption.monospacedDigit().weight(.semibold))
+                    .widgetURL(deepLink(for: context.state))
             }
-            .widgetURL(deepLink(for: context.state))
         }
     }
 

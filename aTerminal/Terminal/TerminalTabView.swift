@@ -23,6 +23,7 @@ struct TerminalTabView: View {
                             SessionRow(session: session) {
                                 sessionManager.close(session)
                             }
+                            .accessibilityIdentifier("session-\(session.id.uuidString)")
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 path = [session]
@@ -45,18 +46,17 @@ struct TerminalTabView: View {
                                 .onTapGesture {
                                     path = [sessionManager.open(server: server)]
                                 }
-                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                    Button(role: .destructive) {
-                                        serverStore.remove(id: server.id)
-                                    } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
+                                .contextMenu {
                                     Button {
                                         editingServer = server
                                     } label: {
                                         Label("Edit", systemImage: "pencil")
                                     }
-                                    .tint(.blue)
+                                    Button(role: .destructive) {
+                                        serverStore.remove(id: server.id)
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
                                 }
                         }
                     }
@@ -67,7 +67,11 @@ struct TerminalTabView: View {
             // sometimes leaves the tab bar gone after popping back.
             .toolbar(path.isEmpty ? .visible : .hidden, for: .tabBar)
             .navigationDestination(for: TerminalSession.self) { session in
+                // Identity-keyed: swapping the path A→B updates the pushed
+                // screen in place, and UIViewRepresentable.makeUIView never
+                // re-runs — session A's terminal view would stay mounted.
                 TerminalScreen(session: session)
+                    .id(session.id)
             }
             .onChange(of: router.targetSessionID) { _, _ in
                 consumeDeepLink()
@@ -109,7 +113,11 @@ struct TerminalTabView: View {
     private func consumeDeepLink() {
         guard let target = router.targetSessionID else { return }
         router.targetSessionID = nil
-        guard let session = sessionManager.session(for: target) else { return }
+        guard let session = sessionManager.session(for: target) else {
+            deepLinkLog.debug("consume: no session for \(target.uuidString, privacy: .public)")
+            return
+        }
+        deepLinkLog.debug("consume: switching path to \(session.id.uuidString, privacy: .public)")
         path = [session]
     }
 }
