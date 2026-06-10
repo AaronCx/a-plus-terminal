@@ -5,6 +5,7 @@ import SwiftUI
 struct SettingsScreen: View {
     @Environment(ThemeStore.self) private var theme
     @Environment(AppSettings.self) private var settings
+    @Environment(TipStore.self) private var tipStore
 
     private let supportEmail = "[redacted]"
     private let privacyPolicyURL = URL(string: "https://aaroncx.github.io/Relay/privacy")!
@@ -88,6 +89,11 @@ struct SettingsScreen: View {
                 }
             }
             .navigationTitle("Settings")
+            .task {
+                if tipStore.loadState != .loaded {
+                    await tipStore.load()
+                }
+            }
         }
     }
 }
