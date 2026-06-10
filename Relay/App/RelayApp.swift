@@ -88,6 +88,13 @@ struct SettingsTabPlaceholder: View {
                 } footer: {
                     Text("Swipes scroll tmux and Claude Code history natively when the app requests mouse reporting. After reconnecting, automatically attach to the tmux session you were in.")
                 }
+                Section {
+                    Toggle("Auto-send after 1.5s silence", isOn: $settings.autoSendDictation)
+                } header: {
+                    Text("Dictation")
+                } footer: {
+                    Text("Dictation is processed entirely on this device and never sent to a server.")
+                }
             }
             .navigationTitle("Settings")
         }

@@ -9,6 +9,8 @@ struct TerminalScreen: View {
 
     let session: TerminalSession
 
+    @State private var showDictation = false
+
     var body: some View {
         ZStack {
             TerminalHostView(session: session, fontSize: theme.terminalFontSize)
@@ -48,8 +50,13 @@ struct TerminalScreen: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if session.state == .connected {
                 KeyAccessoryBar(bridge: session.bridge) {
-                    // Dictation lands in PR 7.
+                    showDictation = true
                 }
+            }
+        }
+        .sheet(isPresented: $showDictation) {
+            DictationSheet { text, appendReturn in
+                session.sendInput(Data((appendReturn ? text + "\n" : text).utf8))
             }
         }
         .onChange(of: session.state) { _, newState in

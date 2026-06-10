@@ -22,6 +22,11 @@ final class AppSettings {
         didSet { defaults.set(tmuxMouseHintShown, forKey: Keys.tmuxMouseHintShown) }
     }
 
+    /// §4.4 — dictation auto-inserts with Return after 1.5s of silence.
+    var autoSendDictation: Bool {
+        didSet { defaults.set(autoSendDictation, forKey: Keys.autoSendDictation) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -29,11 +34,13 @@ final class AppSettings {
         self.autoReattachTmux = defaults.object(forKey: Keys.autoReattachTmux) as? Bool ?? true
         self.scrollWheelBridge = defaults.object(forKey: Keys.scrollWheelBridge) as? Bool ?? true
         self.tmuxMouseHintShown = defaults.bool(forKey: Keys.tmuxMouseHintShown)
+        self.autoSendDictation = defaults.bool(forKey: Keys.autoSendDictation)
     }
 
     private enum Keys {
         static let autoReattachTmux = "autoReattachTmux"
         static let scrollWheelBridge = "scrollWheelBridge"
         static let tmuxMouseHintShown = "tmuxMouseHintShown"
+        static let autoSendDictation = "autoSendDictation"
     }
 }
