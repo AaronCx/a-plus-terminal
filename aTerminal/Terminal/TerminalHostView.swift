@@ -45,6 +45,9 @@ final class TerminalEmulatorView: TerminalView {
 final class TerminalBridge {
     /// Sticky Ctrl: armed by the accessory bar, consumed by the next key.
     var ctrlActive = false
+    /// Sticky tmux prefix (C-b): armed by the accessory bar, prepended to the
+    /// next key — typed, ctrl-chorded, or an accessory arrow (pane nav).
+    var prefixActive = false
 
     @ObservationIgnored weak var terminalView: TerminalEmulatorView?
     @ObservationIgnored var sendData: ((Data) -> Void)?
@@ -55,7 +58,13 @@ final class TerminalBridge {
 
     func sendKey(_ key: TerminalKey) {
         let applicationCursor = terminalView?.getTerminal().applicationCursor ?? false
-        send(key.bytes(applicationCursor: applicationCursor))
+        send(consumePrefixBytes() + key.bytes(applicationCursor: applicationCursor))
+    }
+
+    private func consumePrefixBytes() -> [UInt8] {
+        guard prefixActive else { return [] }
+        prefixActive = false
+        return [0x02]
     }
 
     func paste() {
@@ -66,7 +75,8 @@ final class TerminalBridge {
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let text = UIPasteboard.general.string else { return }
             await MainActor.run {
-                self?.sendData?(Data(text.utf8))
+                guard let self else { return }
+                self.sendData?(Data(self.consumePrefixBytes() + Array(text.utf8)))
             }
         }
     }
@@ -93,25 +103,37 @@ final class TerminalBridge {
     /// Sticky-Ctrl chord: consumes one typed character and sends its control
     /// byte instead (tap ctrl, tap C → 0x03 — Claude Code interrupt, §4.2).
     func handleInsert(_ text: String) -> Bool {
-        guard ctrlActive else { return false }
-        ctrlActive = false
+        let prefix = consumePrefixBytes()
+        if ctrlActive {
+            ctrlActive = false
+            if let control = Self.controlByte(for: text) {
+                send(prefix + [control])
+                return true
+            }
+            // Unmappable chord: fall through, still honoring an armed prefix.
+        }
+        if !prefix.isEmpty {
+            send(prefix + Array(text.utf8))
+            return true
+        }
+        return false
+    }
+
+    private static func controlByte(for text: String) -> UInt8? {
         guard text.count == 1,
               let scalar = text.uppercased().unicodeScalars.first,
               scalar.isASCII else {
-            return false
+            return nil
         }
         switch UInt8(scalar.value) {
         case let byte where (0x40...0x5F).contains(byte):
-            send([byte & 0x1F])
-            return true
+            return byte & 0x1F
         case 0x20:
-            send([0x00])
-            return true
+            return 0x00
         case 0x3F:
-            send([0x7F])
-            return true
+            return 0x7F
         default:
-            return false
+            return nil
         }
     }
 }

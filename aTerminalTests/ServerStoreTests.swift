@@ -57,6 +57,17 @@ final class ServerStoreTests: XCTestCase {
         XCTAssertEqual(Server(name: "a", host: "h", port: 2222, username: "u").displayAddress, "h:2222")
     }
 
+    func testLegacyJSONWithoutPasswordRefDecodes() throws {
+        // Server lists written before password auth existed must keep loading.
+        let legacy = """
+        [{"id":"\(UUID().uuidString)","name":"old","host":"h","port":22,"username":"u"}]
+        """
+        try legacy.write(to: fileURL, atomically: true, encoding: .utf8)
+        let store = ServerStore(fileURL: fileURL)
+        XCTAssertEqual(store.servers.count, 1)
+        XCTAssertNil(store.servers[0].passwordRef)
+    }
+
     func testStoredJSONContainsNoPrivateKeyMaterial() throws {
         let store = ServerStore(fileURL: fileURL)
         store.add(Server(name: "Mac mini", host: "100.79.92.82", username: "acx", keyID: UUID()))

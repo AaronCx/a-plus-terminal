@@ -180,6 +180,13 @@ struct ServerRow: View {
                     .padding(.vertical, 3)
                     .background(.green.opacity(0.2), in: Capsule())
                     .foregroundStyle(.green)
+            } else if server.passwordRef != nil {
+                Text("Pass")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.orange.opacity(0.2), in: Capsule())
+                    .foregroundStyle(.orange)
             }
         }
     }

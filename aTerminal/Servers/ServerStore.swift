@@ -9,6 +9,9 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     var username: String
     /// Reference into KeyStore. Contains no secret material.
     var keyID: UUID?
+    /// Reference into PasswordStore (Keychain) for password auth. The JSON
+    /// stores only this UUID, never the password.
+    var passwordRef: UUID?
     /// Last tmux session attached on this server (for auto-reattach, §4.1).
     var lastTmuxTarget: String?
     /// TOFU-pinned host public key (OpenSSH line), recorded on first connect.

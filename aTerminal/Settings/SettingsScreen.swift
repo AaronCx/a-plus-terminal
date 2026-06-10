@@ -63,6 +63,12 @@ struct SettingsScreen: View {
                     Text("Swipes scroll tmux and Claude Code history natively when the app requests mouse reporting. Dictation is processed entirely on this device.")
                 }
 
+                Section("SSH Keys") {
+                    NavigationLink("Manage Keys") {
+                        KeysView()
+                    }
+                }
+
                 Section("Support") {
                     Link(destination: supportURL) {
                         Label("Report an Issue", systemImage: "questionmark.circle")

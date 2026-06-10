@@ -6,7 +6,7 @@ import SwiftUI
 struct SessionLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: SessionActivityAttributes.self) { context in
-            LockScreenSessionsView(state: context.state)
+            LockScreenSessionsView(state: context.state, isStale: context.isStale)
                 .activityBackgroundTint(Color.black.opacity(0.85))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
@@ -26,14 +26,20 @@ struct SessionLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 6) {
-                        if context.state.sessions.isEmpty {
+                        if context.isStale {
+                            Text("Sessions ended — tap to reopen")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        } else if context.state.sessions.isEmpty {
                             Text("All sessions closed")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
-                        ForEach(context.state.sessions) { session in
-                            Link(destination: .sessionDeepLink(id: session.id)) {
-                                SessionActivityRow(session: session)
+                        if !context.isStale {
+                            ForEach(context.state.sessions) { session in
+                                Link(destination: .sessionDeepLink(id: session.id)) {
+                                    SessionActivityRow(session: session)
+                                }
                             }
                         }
                     }
@@ -81,23 +87,32 @@ struct SessionActivityRow: View {
 
 struct LockScreenSessionsView: View {
     let state: SessionActivityAttributes.ContentState
+    var isStale = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: "terminal.fill")
-                Text(state.activeCount == 1 ? "1 active session" : "\(state.activeCount) active sessions")
+                Text(isStale
+                    ? "Sessions ended"
+                    : state.activeCount == 1 ? "1 active session" : "\(state.activeCount) active sessions")
                     .font(.headline)
                 Spacer()
             }
-            if state.sessions.isEmpty {
+            if isStale {
+                Text("Tap to reopen a-Terminal.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if state.sessions.isEmpty {
                 Text("All sessions closed")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            ForEach(state.sessions) { session in
-                Link(destination: .sessionDeepLink(id: session.id)) {
-                    SessionActivityRow(session: session)
+            if !isStale {
+                ForEach(state.sessions) { session in
+                    Link(destination: .sessionDeepLink(id: session.id)) {
+                        SessionActivityRow(session: session)
+                    }
                 }
             }
         }

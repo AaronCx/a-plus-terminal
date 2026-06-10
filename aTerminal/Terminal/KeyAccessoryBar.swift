@@ -48,8 +48,21 @@ struct KeyAccessoryBar: View {
                     }
                     .accessibilityLabel("Control")
                     .accessibilityAddTraits(bridge.ctrlActive ? .isSelected : [])
-                    key("C-b") { bridge.send([0x02]) }
-                        .accessibilityLabel("tmux prefix Control-B")
+                    Button {
+                        bridge.prefixActive.toggle()
+                    } label: {
+                        Text("C-b")
+                            .font(.system(size: 14, weight: .medium, design: .monospaced))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(
+                                bridge.prefixActive ? Color.accentColor : Color(.tertiarySystemFill),
+                                in: RoundedRectangle(cornerRadius: 6)
+                            )
+                            .foregroundStyle(bridge.prefixActive ? .white : .primary)
+                    }
+                    .accessibilityLabel("tmux prefix Control-B")
+                    .accessibilityAddTraits(bridge.prefixActive ? .isSelected : [])
                     key(systemImage: "arrow.up") { bridge.sendKey(.up) }
                     key(systemImage: "arrow.down") { bridge.sendKey(.down) }
                     key(systemImage: "arrow.left") { bridge.sendKey(.left) }
