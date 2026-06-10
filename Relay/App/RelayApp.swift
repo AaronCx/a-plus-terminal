@@ -81,9 +81,12 @@ struct SettingsTabPlaceholder: View {
                     }
                 }
                 Section {
+                    Toggle("Send scroll as mouse wheel in full-screen apps", isOn: $settings.scrollWheelBridge)
                     Toggle("Auto-reattach tmux", isOn: $settings.autoReattachTmux)
+                } header: {
+                    Text("Scrolling")
                 } footer: {
-                    Text("After reconnecting, automatically attach to the tmux session you were in.")
+                    Text("Swipes scroll tmux and Claude Code history natively when the app requests mouse reporting. After reconnecting, automatically attach to the tmux session you were in.")
                 }
             }
             .navigationTitle("Settings")

@@ -34,12 +34,15 @@ final class TerminalSession: Identifiable, Hashable {
 
     let bridge = TerminalBridge()
     let terminalView = RelayTerminalView(frame: .zero)
+    /// One-time `set -g mouse on` hint banner trigger (§4.3).
+    var showTmuxMouseHint = false
 
     private(set) var connection = SSHConnection()
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let settings: AppSettings
     private var io: SessionIO?
+    private var scrollBridge: ScrollBridge?
     private var pumpTask: Task<Void, Never>?
 
     init(server: Server, keyStore: KeyStore, serverStore: ServerStore, settings: AppSettings) {
@@ -59,6 +62,18 @@ final class TerminalSession: Identifiable, Hashable {
         bridge.sendData = { [weak self] data in
             self?.sendInput(data)
         }
+
+        let scrollBridge = ScrollBridge(
+            sendData: { [weak self] data in self?.sendInput(data) },
+            wheelBridgeEnabled: { [weak settings] in settings?.scrollWheelBridge ?? true }
+        )
+        scrollBridge.onModeBTriggered = { [weak self] in
+            guard let self, !self.settings.tmuxMouseHintShown else { return }
+            self.settings.tmuxMouseHintShown = true
+            self.showTmuxMouseHint = true
+        }
+        scrollBridge.attach(to: terminalView)
+        self.scrollBridge = scrollBridge
     }
 
     func sendInput(_ data: Data) {
