@@ -1,0 +1,213 @@
+import XCTest
+import Citadel
+import CryptoKit
+import NIOCore
+import NIOSSH
+@testable import Relay
+
+/// Accepts public-key auth for exactly one allowed key.
+final class SingleKeyAuthDelegate: NIOSSHServerUserAuthenticationDelegate {
+    let supportedAuthenticationMethods: NIOSSHAvailableUserAuthenticationMethods = .publicKey
+    let allowedKey: NIOSSHPublicKey
+
+    init(allowedKey: NIOSSHPublicKey) {
+        self.allowedKey = allowedKey
+    }
+
+    func requestReceived(
+        request: NIOSSHUserAuthenticationRequest,
+        responsePromise: EventLoopPromise<NIOSSHUserAuthenticationOutcome>
+    ) {
+        if case .publicKey(let key) = request.request, key.publicKey == allowedKey {
+            responsePromise.succeed(.success)
+        } else {
+            responsePromise.succeed(.failure)
+        }
+    }
+}
+
+/// Shell that announces readiness and echoes stdin back, prefixed so tests can
+/// tell echo from banner.
+struct EchoShell: ShellDelegate {
+    func startShell(
+        inbound: AsyncStream<ShellClientEvent>,
+        outbound: ShellOutboundWriter,
+        context: SSHShellContext
+    ) async throws {
+        outbound.write("RELAY-TEST-READY\n")
+        for await event in inbound {
+            if case .stdin(let buffer) = event {
+                var reply = ByteBuffer(string: "echo:")
+                var copy = buffer
+                reply.writeBuffer(&copy)
+                outbound.write(reply)
+            }
+        }
+    }
+}
+
+final class SSHConnectionTests: XCTestCase {
+    var server: SSHServer!
+    var hostKey: Curve25519.Signing.PrivateKey!
+    var clientKey: Curve25519.Signing.PrivateKey!
+    var port: Int!
+
+    var hostKeyLine: String {
+        String(openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: hostKey).publicKey)
+    }
+
+    override func setUp() async throws {
+        try await super.setUp()
+        hostKey = Curve25519.Signing.PrivateKey()
+        clientKey = Curve25519.Signing.PrivateKey()
+
+        // Bind retry: random high ports until one is free.
+        for attempt in 0..<5 {
+            let candidate = Int.random(in: 30000..<60000)
+            do {
+                server = try await SSHServer.host(
+                    host: "127.0.0.1",
+                    port: candidate,
+                    hostKeys: [NIOSSHPrivateKey(ed25519Key: hostKey)],
+                    authenticationDelegate: SingleKeyAuthDelegate(
+                        allowedKey: NIOSSHPrivateKey(ed25519Key: clientKey).publicKey
+                    )
+                )
+                server.enableShell(withDelegate: EchoShell())
+                port = candidate
+                break
+            } catch {
+                if attempt == 4 { throw error }
+            }
+        }
+    }
+
+    override func tearDown() async throws {
+        try? await server?.close()
+        try await super.tearDown()
+    }
+
+    private func makeConfig(knownHostKey: String? = nil) -> SSHConnection.Configuration {
+        SSHConnection.Configuration(
+            host: "127.0.0.1",
+            port: port,
+            username: "relay-test",
+            privateKey: clientKey,
+            knownHostKey: knownHostKey
+        )
+    }
+
+    /// Reads from the connection's output stream until `marker` appears or the
+    /// timeout elapses.
+    private func collectOutput(
+        _ connection: SSHConnection,
+        until marker: String,
+        timeout: TimeInterval = 10
+    ) async -> String {
+        let task = Task { () -> String in
+            var collected = ""
+            for await chunk in await connection.output {
+                collected += String(decoding: chunk, as: UTF8.self)
+                if collected.contains(marker) { break }
+            }
+            return collected
+        }
+        let timeoutTask = Task {
+            try? await Task.sleep(for: .seconds(timeout))
+            task.cancel()
+        }
+        let result = await task.value
+        timeoutTask.cancel()
+        return result
+    }
+
+    func testConnectShellRoundTripAndDisconnect() async throws {
+        let connection = SSHConnection()
+        try await connection.connect(makeConfig())
+
+        let recordedHostKey = await connection.serverHostKey
+        XCTAssertEqual(recordedHostKey, hostKeyLine, "TOFU should record the server's host key")
+
+        try await connection.send("hello\n")
+        let output = await collectOutput(connection, until: "echo:hello")
+        XCTAssertTrue(output.contains("RELAY-TEST-READY"), "shell banner missing in: \(output)")
+        XCTAssertTrue(output.contains("echo:hello"), "echo missing in: \(output)")
+
+        await connection.disconnect()
+        if case .disconnected = await connection.state {} else {
+            XCTFail("expected disconnected state")
+        }
+    }
+
+    func testPinnedHostKeyAccepted() async throws {
+        let connection = SSHConnection()
+        try await connection.connect(makeConfig(knownHostKey: hostKeyLine))
+        await connection.disconnect()
+    }
+
+    func testHostKeyMismatchHardFails() async throws {
+        let impostorKey = String(
+            openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        )
+
+        let connection = SSHConnection()
+        do {
+            try await connection.connect(makeConfig(knownHostKey: impostorKey))
+            XCTFail("connect should have failed on host key mismatch")
+        } catch let error as SSHConnectionError {
+            guard case .hostKeyMismatch(let expected, let presented) = error else {
+                return XCTFail("expected hostKeyMismatch, got \(error)")
+            }
+            XCTAssertTrue(expected.hasPrefix("SHA256:"))
+            XCTAssertTrue(presented.hasPrefix("SHA256:"))
+            XCTAssertNotEqual(expected, presented, "fingerprint diff must show both keys")
+            XCTAssertEqual(presented, HostKeyFingerprint.fingerprint(ofOpenSSHKey: hostKeyLine))
+        }
+    }
+
+    func testWrongClientKeyRejected() async throws {
+        let connection = SSHConnection()
+        do {
+            try await connection.connect(makeConfig().with(privateKey: Curve25519.Signing.PrivateKey()))
+            XCTFail("connect should have failed with an unauthorized key")
+        } catch {
+            // Any auth failure is acceptable; it must not be a host key mismatch.
+            XCTAssertFalse(error is SSHConnectionError)
+        }
+    }
+
+    func testSendBeforeConnectThrows() async throws {
+        let connection = SSHConnection()
+        do {
+            try await connection.send("nope\n")
+            XCTFail("send should throw before connect")
+        } catch let error as SSHConnectionError {
+            guard case .notConnected = error else {
+                return XCTFail("expected notConnected, got \(error)")
+            }
+        }
+    }
+}
+
+private extension SSHConnection.Configuration {
+    func with(privateKey: Curve25519.Signing.PrivateKey) -> Self {
+        var copy = self
+        copy.privateKey = privateKey
+        return copy
+    }
+}
+
+final class HostKeyFingerprintTests: XCTestCase {
+    func testFingerprintMatchesOpenSSHFormat() {
+        let key = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey())
+        let line = String(openSSHPublicKey: key.publicKey)
+        let fingerprint = HostKeyFingerprint.fingerprint(ofOpenSSHKey: line)
+        XCTAssertTrue(fingerprint.hasPrefix("SHA256:"))
+        XCTAssertFalse(fingerprint.hasSuffix("="), "OpenSSH fingerprints strip base64 padding")
+        XCTAssertEqual(fingerprint, HostKeyFingerprint.fingerprint(ofOpenSSHKey: line), "deterministic")
+    }
+
+    func testInvalidLineDoesNotCrash() {
+        XCTAssertEqual(HostKeyFingerprint.fingerprint(ofOpenSSHKey: "garbage"), "(invalid key)")
+    }
+}
