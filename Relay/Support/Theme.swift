@@ -54,6 +54,18 @@ final class ThemeStore {
         self.terminalFontSize = termSize > 0 ? termSize : Self.defaultTerminalFontSize
     }
 
+    /// App-wide type size derived from the Application font slider (§4.6).
+    var appTypeSize: DynamicTypeSize {
+        switch appFontSize {
+        case ..<15: return .small
+        case ..<16.5: return .medium
+        case ..<18: return .large
+        case ..<19.5: return .xLarge
+        case ..<21: return .xxLarge
+        default: return .xxxLarge
+        }
+    }
+
     func resetAppFontSize() {
         appFontSize = Self.defaultAppFontSize
     }

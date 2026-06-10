@@ -37,3 +37,19 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(reloaded.tmuxMouseHintShown)
     }
 }
+
+final class ThemeTypeSizeTests: XCTestCase {
+    func testAppTypeSizeMapping() {
+        let defaults = UserDefaults(suiteName: "ThemeTypeSizeTests")!
+        defaults.removePersistentDomain(forName: "ThemeTypeSizeTests")
+        let store = ThemeStore(defaults: defaults)
+
+        store.appFontSize = 14
+        XCTAssertEqual(store.appTypeSize, .small)
+        store.appFontSize = ThemeStore.defaultAppFontSize
+        XCTAssertEqual(store.appTypeSize, .large, "default 17pt maps to the system default size")
+        store.appFontSize = 22
+        XCTAssertEqual(store.appTypeSize, .xxxLarge)
+        defaults.removePersistentDomain(forName: "ThemeTypeSizeTests")
+    }
+}
