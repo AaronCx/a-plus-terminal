@@ -13,6 +13,15 @@ struct TerminalScreen: View {
         ZStack {
             TerminalHostView(session: session, fontSize: theme.terminalFontSize)
 
+            if session.showTmuxMouseHint {
+                VStack {
+                    TmuxMouseHintBanner {
+                        session.showTmuxMouseHint = false
+                    }
+                    Spacer()
+                }
+            }
+
             switch session.state {
             case .connecting:
                 statusCard {
@@ -59,6 +68,39 @@ struct TerminalScreen: View {
         content()
             .padding(20)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+/// One-time hint when scrolling falls back to arrow keys inside a full-screen
+/// app: tmux feels native once `set -g mouse on` is configured (§4.3).
+struct TmuxMouseHintBanner: View {
+    var onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "lightbulb")
+                .foregroundStyle(.yellow)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Smoother scrolling in tmux")
+                    .font(.subheadline.weight(.semibold))
+                Text("Add `set -g mouse on` to ~/.tmux.conf on this server so swipes scroll tmux history natively.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityLabel("Dismiss Hint")
+        }
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
     }
 }
 
