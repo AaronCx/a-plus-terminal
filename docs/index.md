@@ -1,4 +1,4 @@
-# Relay
+# a-Terminal
 
 Privacy-first iOS SSH terminal — tmux + Claude Code ergonomics, on-device dictation, Live Activities. **Zero data collection.**
 

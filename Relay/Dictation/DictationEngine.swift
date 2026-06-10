@@ -31,12 +31,12 @@ final class DictationEngine {
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
         guard speechAuth == .authorized else {
-            state = .failed("Speech recognition permission was denied. Enable it in Settings → Relay.")
+            state = .failed("Speech recognition permission was denied. Enable it in Settings → a-Terminal.")
             return
         }
         let micGranted = await AVAudioApplication.requestRecordPermission()
         guard micGranted else {
-            state = .failed("Microphone permission was denied. Enable it in Settings → Relay.")
+            state = .failed("Microphone permission was denied. Enable it in Settings → a-Terminal.")
             return
         }
 
@@ -46,7 +46,7 @@ final class DictationEngine {
         }
         guard recognizer.supportsOnDeviceRecognition else {
             // Never fall back to network recognition — zero-data posture.
-            state = .failed("On-device dictation isn't available for your language on this iPhone. Relay never sends audio to a server, so dictation is disabled.")
+            state = .failed("On-device dictation isn't available for your language on this iPhone. a-Terminal never sends audio to a server, so dictation is disabled.")
             return
         }
 

@@ -65,7 +65,7 @@ struct AppLockGate<Content: View>: View {
         do {
             let success = try await context.evaluatePolicy(
                 .deviceOwnerAuthentication,
-                localizedReason: "Unlock Relay"
+                localizedReason: "Unlock a-Terminal"
             )
             if success {
                 locked = false
@@ -89,7 +89,7 @@ struct LockScreenOverlay: View {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 42))
                     .foregroundStyle(.secondary)
-                Text("Relay is locked")
+                Text("a-Terminal is locked")
                     .font(.headline)
                 if let errorMessage {
                     Text(errorMessage)

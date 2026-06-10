@@ -2,7 +2,7 @@
 
 ## Identity
 
-- **Name:** Relay — SSH Terminal
+- **Name:** a-Terminal — SSH Terminal
 - **Subtitle:** tmux & Claude Code on the go
 - **Bundle ID:** `com.aaroncx.relay`
 - **SKU:** `relay-ios`

@@ -15,7 +15,7 @@ struct SessionLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 6) {
                         Image(systemName: "terminal.fill")
-                        Text("Relay")
+                        Text("a-Terminal")
                             .font(.headline)
                     }
                     .padding(.leading, 4)

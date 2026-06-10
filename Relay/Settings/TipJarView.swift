@@ -11,7 +11,7 @@ struct TipJarView: View {
                 Label("Tip Jar", systemImage: "heart.fill")
                     .font(.headline)
                     .foregroundStyle(.pink)
-                Text("Relay is free and collects zero data. If it saves you time, you can leave a tip to support development.")
+                Text("a-Terminal is free and collects zero data. If it saves you time, you can leave a tip to support development.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }

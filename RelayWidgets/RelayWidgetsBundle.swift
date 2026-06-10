@@ -15,8 +15,8 @@ struct RelayLauncherWidget: Widget {
             LauncherWidgetView()
                 .containerBackground(.fill.tertiary, for: .widget)
         }
-        .configurationDisplayName("Relay")
-        .description("Open Relay.")
+        .configurationDisplayName("a-Terminal")
+        .description("Open a-Terminal.")
         .supportedFamilies([.systemSmall])
     }
 }
@@ -44,7 +44,7 @@ struct LauncherWidgetView: View {
         VStack(spacing: 8) {
             Image(systemName: "terminal")
                 .font(.system(size: 32, weight: .medium))
-            Text("Relay")
+            Text("a-Terminal")
                 .font(.headline)
         }
     }

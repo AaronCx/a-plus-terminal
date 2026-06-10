@@ -37,7 +37,7 @@ targets:
     info:
       path: Relay/Info.plist
       properties:
-        CFBundleDisplayName: Relay
+        CFBundleDisplayName: a-Terminal
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -45,9 +45,9 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSSupportsLiveActivities: true
         ITSAppUsesNonExemptEncryption: false
-        NSMicrophoneUsageDescription: "Relay uses the microphone for voice dictation into your terminal. Audio is processed entirely on this device and never uploaded anywhere."
-        NSSpeechRecognitionUsageDescription: "Relay transcribes dictation on-device only. Your speech never leaves this iPhone — Relay never falls back to server-based recognition."
-        NSFaceIDUsageDescription: "Relay uses Face ID to unlock the app when App Protection is enabled."
+        NSMicrophoneUsageDescription: "a-Terminal uses the microphone for voice dictation into your terminal. Audio is processed entirely on this device and never uploaded anywhere."
+        NSSpeechRecognitionUsageDescription: "a-Terminal transcribes dictation on-device only. Your speech never leaves this iPhone — a-Terminal never falls back to server-based recognition."
+        NSFaceIDUsageDescription: "a-Terminal uses Face ID to unlock the app when App Protection is enabled."
         CFBundleURLTypes:
           - CFBundleURLName: com.aaroncx.relay
             CFBundleURLSchemes:
@@ -67,7 +67,7 @@ targets:
     info:
       path: RelayWidgets/Info.plist
       properties:
-        CFBundleDisplayName: RelayWidgets
+        CFBundleDisplayName: a-Terminal Widgets
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
   RelayTests:
