@@ -33,12 +33,28 @@ final class TerminalLiveQAUITests: XCTestCase {
         add(attachment)
     }
 
+    private var seededServerName: String {
+        let env = ProcessInfo.processInfo.environment["ATERMINAL_TEST_SERVER"] ?? ""
+        if let data = env.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let name = obj["name"] as? String {
+            return name
+        }
+        return "LiveQA"
+    }
+
     private func openSession() {
-        let row = app.staticTexts["LiveQA"]
-        XCTAssertTrue(row.waitForExistence(timeout: 10), "seeded server row missing")
+        let row = app.staticTexts[seededServerName]
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "seeded server row \(seededServerName) missing")
         row.tap()
         // Connection + keyboard focus.
         sleep(4)
+        // First keyboard on a fresh simulator shows the swipe-typing tutorial.
+        let tutorial = app.buttons["Continue"]
+        if tutorial.waitForExistence(timeout: 2) {
+            tutorial.tap()
+            sleep(1)
+        }
         shot("01-connected")
     }
 
@@ -133,6 +149,38 @@ final class TerminalLiveQAUITests: XCTestCase {
         XCUIDevice.shared.system.open(URL(string: "aterminal://session/\(sessionA)")!)
         sleep(4)
         shot("23-after-deeplink-back-to-A")
+    }
+
+    /// App Store screenshot capture — curated scenes at the device's native
+    /// resolution. Run on an iPhone Pro Max-class simulator with the status
+    /// bar overridden. Gated separately so normal live QA doesn't pay for it.
+    func testAppStoreScreenshots() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["ATERMINAL_SCREENSHOTS"] == "1")
+        openSession()
+
+        // Scene: terminal + keyboard + accessory bar (C-b visible)
+        type("clear\n")
+        shot("shot-05-keyboard")
+
+        // Scene: tmux running Claude Code's CLI (the hero)
+        type("tmux kill-session -t shots 2>/dev/null; tmux new -s shots\n", settle: 4)
+        type("export PATH=$PATH:$HOME/.local/bin; clear; claude --help\n", settle: 5)
+        shot("shot-01-hero-tmux-claude")
+
+        // Scene: scrollable output
+        type("clear; seq 1 40\n", settle: 3)
+        shot("shot-02-scroll")
+        type("tmux kill-session 2>/dev/null\n", settle: 2)
+
+        // Scene: sessions + servers list
+        app.navigationBars.buttons.firstMatch.tap()
+        sleep(2)
+        shot("shot-03-list")
+
+        // Scene: settings with the tip jar (StoreKit config loads products)
+        app.buttons["Settings"].tap()
+        sleep(4)
+        shot("shot-04-settings")
     }
 
     func testTmuxTypingKeyboardCycleAndAppSwitch() {

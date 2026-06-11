@@ -118,6 +118,7 @@ schemes:
       storeKitConfiguration: aTerminal.storekit
     test:
       config: Debug
+      storeKitConfiguration: aTerminal.storekit
       targets:
         - aTerminalTests
         - aTerminalUITests
