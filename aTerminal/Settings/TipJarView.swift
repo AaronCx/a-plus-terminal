@@ -61,42 +61,52 @@ struct SupporterView: View {
 
     var body: some View {
         Section {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Label("Supporter", systemImage: "star.fill")
-                        .font(.headline)
-                        .foregroundStyle(.yellow)
-                    if store.isSupporter {
-                        SupporterBadge()
-                    }
-                }
-                Text("A small recurring thank-you. Supporters get a badge here — and our gratitude. No features are paywalled, ever.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.vertical, 4)
-
-            if store.loadState == .loaded {
-                ForEach(store.subscriptionProducts) { product in
-                    Button {
-                        Task { await store.purchase(product) }
-                    } label: {
-                        HStack {
-                            Text(product.displayName)
-                            Spacer()
-                            Text(subscriptionPriceLabel(for: product))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                    }
-                }
-            }
-
-            Button("Restore Purchases") {
-                Task { await store.restorePurchases() }
-            }
-            .font(.subheadline)
+            content
+        } footer: {
+            // App Review Guideline 3.1.2: auto-renewal terms and functional
+            // Privacy Policy / Terms of Use links must accompany the
+            // subscription purchase UI.
+            Text("Subscriptions renew automatically until cancelled. Manage or cancel any time in Settings › Apple Account › Subscriptions. [Privacy Policy](https://aaroncx.github.io/a-Terminal/privacy) · [Terms of Use (EULA)](https://www.apple.com/legal/internet-services/itunes/dev/stdeula/)")
         }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Supporter", systemImage: "star.fill")
+                    .font(.headline)
+                    .foregroundStyle(.yellow)
+                if store.isSupporter {
+                    SupporterBadge()
+                }
+            }
+            Text("A small recurring thank-you. Supporters get a badge here — and our gratitude. No features are paywalled, ever.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+
+        if store.loadState == .loaded {
+            ForEach(store.subscriptionProducts) { product in
+                Button {
+                    Task { await store.purchase(product) }
+                } label: {
+                    HStack {
+                        Text(product.displayName)
+                        Spacer()
+                        Text(subscriptionPriceLabel(for: product))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+            }
+        }
+
+        Button("Restore Purchases") {
+            Task { await store.restorePurchases() }
+        }
+        .font(.subheadline)
     }
 
     private func subscriptionPriceLabel(for product: Product) -> String {

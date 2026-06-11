@@ -75,6 +75,34 @@ final class TerminalLiveQAUITests: XCTestCase {
         sleep(settle)
     }
 
+    /// Compliance pin (App Review Guideline 3.1.2): the Supporter card must
+    /// surface auto-renewal terms plus Privacy Policy and Terms of Use links
+    /// at the point of purchase — reviewers reject subscription apps without
+    /// this, so losing the footer is a release blocker, not a style change.
+    func testSupporterDisclosureAndLegalLinks() {
+        app.tabBars.buttons["Settings"].tap()
+        sleep(1)
+
+        let disclosure = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS 'renew automatically'")).firstMatch
+        if !disclosure.waitForExistence(timeout: 3) {
+            app.swipeUp()
+        }
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 5),
+                      "auto-renewal disclosure missing from the Supporter card")
+
+        XCTAssertTrue(app.buttons["Restore Purchases"].exists,
+                      "Restore Purchases button missing from the Supporter card")
+
+        let hasPrivacyLink = app.links["Privacy Policy"].exists
+            || disclosure.label.contains("Privacy Policy")
+        let hasTermsLink = app.links["Terms of Use (EULA)"].exists
+            || disclosure.label.contains("Terms of Use")
+        XCTAssertTrue(hasPrivacyLink, "Privacy Policy link missing near the purchase UI")
+        XCTAssertTrue(hasTermsLink, "Terms of Use link missing near the purchase UI")
+        shot("30-supporter-disclosure")
+    }
+
     func testPlainShellTypingAndBurst() {
         openSession()
         type("echo MARKER-ALPHA-12345\n")
