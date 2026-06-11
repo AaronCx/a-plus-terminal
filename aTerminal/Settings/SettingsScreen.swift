@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Settings tab (§4.6) — cards in spec order: Tip Jar, Supporter,
-/// Application, Terminal, App Protection, Theme, Scrolling, Support, Legal.
+/// Settings tab (§4.6) — cards in spec order: Support (tips + supporter
+/// subscription), Application, Terminal, App Protection, Theme, Scrolling,
+/// Support, Legal.
 struct SettingsScreen: View {
     @Environment(ThemeStore.self) private var theme
     @Environment(AppSettings.self) private var settings
@@ -15,8 +16,7 @@ struct SettingsScreen: View {
         @Bindable var settings = settings
         NavigationStack {
             Form {
-                TipJarView()
-                SupporterView()
+                SupportCardLink()
 
                 Section("Application") {
                     LabeledSlider(

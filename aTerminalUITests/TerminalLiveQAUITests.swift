@@ -83,16 +83,24 @@ final class TerminalLiveQAUITests: XCTestCase {
         app.tabBars.buttons["Settings"].tap()
         sleep(1)
 
+        // Tips and the subscription live behind the single Support row.
+        let supportRow = app.staticTexts["Support a-Terminal"]
+        XCTAssertTrue(supportRow.waitForExistence(timeout: 5),
+                      "Support a-Terminal row missing from Settings")
+        supportRow.tap()
+        sleep(1)
+        shot("29-support-screen")
+
         let disclosure = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS 'renew automatically'")).firstMatch
         if !disclosure.waitForExistence(timeout: 3) {
             app.swipeUp()
         }
         XCTAssertTrue(disclosure.waitForExistence(timeout: 5),
-                      "auto-renewal disclosure missing from the Supporter card")
+                      "auto-renewal disclosure missing from the Support screen")
 
         XCTAssertTrue(app.buttons["Restore Purchases"].exists,
-                      "Restore Purchases button missing from the Supporter card")
+                      "Restore Purchases button missing from the Support screen")
 
         let hasPrivacyLink = app.links["Privacy Policy"].exists
             || disclosure.label.contains("Privacy Policy")
