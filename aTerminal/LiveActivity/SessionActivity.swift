@@ -1,5 +1,6 @@
 import ActivityKit
 import Foundation
+import UIKit
 
 /// Live Activity lifecycle (§4.5): starts when the first session connects,
 /// updates on add/remove/state change, shows a zero state when the last
@@ -28,6 +29,27 @@ final class SessionActivityController {
         activity = survivors.first
         for orphan in survivors.dropFirst() {
             Task { await orphan.end(nil, dismissalPolicy: .immediate) }
+        }
+
+        // Force-quit from the app switcher: a *suspended* app dies silently
+        // (the stale treatment covers that), but an app that's foreground or
+        // still inside the background grace task receives willTerminate —
+        // end the Activity before the process goes away. The work runs on a
+        // detached task (main is the thread being torn down) with a short
+        // blocking wait, which is acceptable in a dying process.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willTerminateNotification,
+            object: nil,
+            queue: nil
+        ) { _ in
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached(priority: .userInitiated) {
+                for activity in Activity<SessionActivityAttributes>.activities {
+                    await activity.end(nil, dismissalPolicy: .immediate)
+                }
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + 3)
         }
     }
 
