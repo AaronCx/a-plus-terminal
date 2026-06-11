@@ -60,8 +60,13 @@ final class TipStore {
             subscriptionProducts = products
                 .filter { StoreProducts.subscriptions.contains($0.id) }
                 .sorted { $0.price < $1.price }
-            loadState = .loaded
-            await refreshSupporterStatus()
+            loadState = Self.postLoadState(
+                tipCount: tipProducts.count,
+                subscriptionCount: subscriptionProducts.count
+            )
+            if loadState == .loaded {
+                await refreshSupporterStatus()
+            }
         } catch {
             loadState = .failed("Couldn't load products: \(error.localizedDescription)")
         }
@@ -81,6 +86,17 @@ final class TipStore {
         } catch {
             // Purchase failures surface through StoreKit's own UI; nothing to do.
         }
+    }
+
+    /// The App Store can return an empty product list without throwing
+    /// (transient hiccup right after launch). Treating that as "loaded"
+    /// would latch an empty screen forever — every view .task guards on
+    /// != .loaded, so nothing would ever retry.
+    static func postLoadState(tipCount: Int, subscriptionCount: Int) -> LoadState {
+        if tipCount == 0 && subscriptionCount == 0 {
+            return .failed("The App Store didn't return any products. Check your connection and try again.")
+        }
+        return .loaded
     }
 
     func restorePurchases() async {
