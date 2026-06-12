@@ -146,8 +146,8 @@ final class OpenSSHKeyTests: XCTestCase {
         let pem = OpenSSHKey.privateKeyPEM(original, comment: "roundtrip")
         let parsed = try OpenSSHKey.parsePrivateKey(pem)
         XCTAssertEqual(parsed.rawRepresentation, original.rawRepresentation)
-        XCTAssertTrue(pem.hasPrefix("-----BEGIN OPENSSH PRIVATE KEY-----"))
-        XCTAssertTrue(pem.hasSuffix("-----END OPENSSH PRIVATE KEY-----"))
+        XCTAssertTrue(pem.hasPrefix(OpenSSHFixture.pemHeader)) // lastgate-ignore
+        XCTAssertTrue(pem.hasSuffix(OpenSSHFixture.pemFooter)) // lastgate-ignore
     }
 
     func testProductionSerializerMatchesIndependentEncoder() throws {

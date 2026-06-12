@@ -63,7 +63,7 @@ enum OpenSSHKey {
         blob.appendSSHString(publicBlob)
         blob.appendSSHString(privateBlock)
 
-        var lines = ["-----BEGIN OPENSSH PRIVATE KEY-----"]
+        var lines = ["-----BEGIN OPENSSH PRIVATE KEY-----"] // lastgate-ignore (format marker, not a key)
         let base64 = blob.base64EncodedString()
         var index = base64.startIndex
         while index < base64.endIndex {
@@ -71,14 +71,14 @@ enum OpenSSHKey {
             lines.append(String(base64[index..<end]))
             index = end
         }
-        lines.append("-----END OPENSSH PRIVATE KEY-----")
+        lines.append("-----END OPENSSH PRIVATE KEY-----") // lastgate-ignore (format marker)
         return lines.joined(separator: "\n")
     }
 
     /// Parses an unencrypted `-----BEGIN OPENSSH PRIVATE KEY-----` blob (openssh-key-v1).
     static func parsePrivateKey(_ pem: String) throws -> Curve25519.Signing.PrivateKey {
         let lines = pem.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-        guard let begin = lines.firstIndex(of: "-----BEGIN OPENSSH PRIVATE KEY-----"),
+        guard let begin = lines.firstIndex(of: "-----BEGIN OPENSSH PRIVATE KEY-----"), // lastgate-ignore (format marker)
               let end = lines.firstIndex(of: "-----END OPENSSH PRIVATE KEY-----"),
               begin < end else {
             throw ParseError.notOpenSSHFormat
