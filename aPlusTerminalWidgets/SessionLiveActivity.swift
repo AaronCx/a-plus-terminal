@@ -49,13 +49,27 @@ struct SessionLiveActivity: Widget {
                 Image(systemName: "terminal.fill")
                     .widgetURL(deepLink(for: context.state))
             } compactTrailing: {
-                Text("\(context.state.activeCount)")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .widgetURL(deepLink(for: context.state))
+                // An agent waiting for input outranks the session count —
+                // that's the moment the user actually wants to glance for.
+                if context.state.sessions.contains(where: { $0.agentIsWaiting }) {
+                    Image(systemName: "exclamationmark.bubble.fill")
+                        .foregroundStyle(.orange)
+                        .widgetURL(deepLink(for: context.state))
+                } else {
+                    Text("\(context.state.activeCount)")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .widgetURL(deepLink(for: context.state))
+                }
             } minimal: {
-                Text("\(context.state.activeCount)")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .widgetURL(deepLink(for: context.state))
+                if context.state.sessions.contains(where: { $0.agentIsWaiting }) {
+                    Image(systemName: "exclamationmark.bubble.fill")
+                        .foregroundStyle(.orange)
+                        .widgetURL(deepLink(for: context.state))
+                } else {
+                    Text("\(context.state.activeCount)")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .widgetURL(deepLink(for: context.state))
+                }
             }
         }
     }
@@ -69,18 +83,26 @@ struct SessionActivityRow: View {
     let session: SessionActivityAttributes.SessionSummary
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(session.isConnected ? Color.green : Color.orange)
-                .frame(width: 8, height: 8)
-            Text(session.name)
-                .font(.subheadline.weight(.medium))
-                .lineLimit(1)
-            Spacer()
-            Text(session.startedAt, style: .timer)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: 56)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(session.isConnected ? Color.green : Color.orange)
+                    .frame(width: 8, height: 8)
+                Text(session.name)
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                Spacer()
+                Text(session.startedAt, style: .timer)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 56)
+            }
+            if let agentLabel = session.agentLabel {
+                Text(agentLabel)
+                    .font(.caption)
+                    .foregroundStyle(session.agentIsWaiting ? Color.orange : Color.cyan)
+                    .padding(.leading, 16)
+            }
         }
     }
 }

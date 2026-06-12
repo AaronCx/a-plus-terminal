@@ -41,6 +41,8 @@ final class TerminalSession: Identifiable, Hashable {
 
     let bridge = TerminalBridge()
     let terminalView = TerminalEmulatorView(frame: .zero)
+    /// Claude Code working/waiting heuristic for the Live Activity (§4.5).
+    let agentMonitor = AgentActivityMonitor()
     /// One-time `set -g mouse on` hint banner trigger (§4.3).
     var showTmuxMouseHint = false
 
@@ -269,7 +271,9 @@ final class TerminalSession: Identifiable, Hashable {
         pumpTask = Task { [weak self] in
             for await chunk in await connection.output {
                 guard let self, !Task.isCancelled else { return }
-                self.terminalView.feed(byteArray: ArraySlice([UInt8](chunk)))
+                let bytes = [UInt8](chunk)
+                self.terminalView.feed(byteArray: ArraySlice(bytes))
+                self.agentMonitor.observe(bytes)
             }
             guard let self, !Task.isCancelled else { return }
             self.channelEnded(connection)
@@ -381,6 +385,9 @@ final class SessionManager {
         session.onStateChange = { [weak self] in
             self?.refreshActivity()
         }
+        session.agentMonitor.onChange = { [weak self] in
+            self?.refreshActivity()
+        }
         session.onShellExit = { [weak self, weak session] in
             guard let self, let session else { return }
             self.sessions.removeAll { $0.id == session.id }
@@ -423,7 +430,10 @@ final class SessionManager {
                     case .closed: return "closed"
                     }
                 }(),
-                startedAt: session.startedAt
+                startedAt: session.startedAt,
+                agentStatus: session.agentMonitor.status == .none
+                    ? nil
+                    : session.agentMonitor.status.rawValue
             )
         }
         activityController.update(with: summaries)
