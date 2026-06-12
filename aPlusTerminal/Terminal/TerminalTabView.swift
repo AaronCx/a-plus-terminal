@@ -9,6 +9,10 @@ struct TerminalTabView: View {
 
     @State private var editingServer: Server?
     @State private var addingServer = false
+    @State private var discovering = false
+    @State private var discoveredServer: Server?
+    @State private var reachability = ReachabilityStore()
+    @State private var wakeSentFor: String?
     /// Path-based navigation: replacing the path swaps the visible session
     /// atomically — `navigationDestination(item:)` ignores item changes while
     /// a screen is already pushed (Island switching between sessions).
@@ -44,7 +48,7 @@ struct TerminalTabView: View {
                     ForEach(serverGroups, id: \.title) { group in
                         Section(group.title) {
                             ForEach(group.servers) { server in
-                                ServerRow(server: server)
+                                ServerRow(server: server, status: reachability.statuses[server.id] ?? .unknown)
                                     .contentShape(Rectangle())
                                     .onTapGesture {
                                         path = [sessionManager.open(server: server)]
@@ -54,6 +58,13 @@ struct TerminalTabView: View {
                                             editingServer = server
                                         } label: {
                                             Label("Edit", systemImage: "pencil")
+                                        }
+                                        if server.macAddress != nil {
+                                            Button {
+                                                wake(server)
+                                            } label: {
+                                                Label("Wake Server", systemImage: "power")
+                                            }
                                         }
                                         Button(role: .destructive) {
                                             serverStore.remove(id: server.id)
@@ -85,10 +96,25 @@ struct TerminalTabView: View {
                 // changes — consume whatever is already pending.
                 consumeDeepLink()
             }
+            .task {
+                await reachability.refresh(serverStore.servers)
+            }
+            .refreshable {
+                await reachability.refresh(serverStore.servers)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        addingServer = true
+                    Menu {
+                        Button {
+                            addingServer = true
+                        } label: {
+                            Label("Add Server", systemImage: "plus")
+                        }
+                        Button {
+                            discovering = true
+                        } label: {
+                            Label("Discover on Network…", systemImage: "antenna.radiowaves.left.and.right")
+                        }
                     } label: {
                         Image(systemName: "plus")
                     }
@@ -108,6 +134,30 @@ struct TerminalTabView: View {
             .sheet(item: $editingServer) { server in
                 ServerEditView(server: server)
             }
+            .sheet(isPresented: $discovering) {
+                DiscoveryView { found in
+                    discoveredServer = found
+                }
+            }
+            .sheet(item: $discoveredServer) { server in
+                ServerEditView(prefill: server)
+            }
+            .alert(
+                "Wake packet sent",
+                isPresented: Binding(get: { wakeSentFor != nil }, set: { if !$0 { wakeSentFor = nil } })
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Sent a Wake-on-LAN magic packet to \(wakeSentFor ?? ""). The machine may take a few seconds to wake.")
+            }
+        }
+    }
+
+    private func wake(_ server: Server) {
+        guard let mac = server.macAddress else { return }
+        Task {
+            try? await WakeOnLAN.wake(macAddress: mac, host: server.host)
+            wakeSentFor = server.name
         }
     }
 
@@ -179,9 +229,14 @@ struct ServerRow: View {
     @Environment(KeyStore.self) private var keyStore
 
     let server: Server
+    var status: ReachabilityStore.Status = .unknown
 
     var body: some View {
         HStack {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
+                .accessibilityLabel("Server \(statusLabel)")
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
                     .font(.body.weight(.medium))
@@ -205,6 +260,24 @@ struct ServerRow: View {
                     .background(.orange.opacity(0.2), in: Capsule())
                     .foregroundStyle(.orange)
             }
+        }
+    }
+
+    private var statusColor: Color {
+        switch status {
+        case .up: return .green
+        case .down: return .red
+        case .checking: return .yellow
+        case .unknown: return .gray.opacity(0.4)
+        }
+    }
+
+    private var statusLabel: String {
+        switch status {
+        case .up: return "reachable"
+        case .down: return "unreachable"
+        case .checking: return "checking"
+        case .unknown: return "status unknown"
         }
     }
 }

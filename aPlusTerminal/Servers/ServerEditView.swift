@@ -32,6 +32,14 @@ struct ServerEditView: View {
         isNew = server == nil
     }
 
+    /// A brand-new server with fields pre-filled (e.g. from Bonjour discovery).
+    init(prefill: Server) {
+        _server = State(initialValue: prefill)
+        _portText = State(initialValue: String(prefill.port))
+        _authMode = State(initialValue: .key)
+        isNew = true
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -51,6 +59,20 @@ struct ServerEditView: View {
                         get: { server.group ?? "" },
                         set: { server.group = $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
                     ))
+                }
+
+                Section {
+                    TextField("MAC address (optional)", text: Binding(
+                        get: { server.macAddress ?? "" },
+                        set: { server.macAddress = $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+                    ))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.body.monospaced())
+                } header: {
+                    Text("Wake-on-LAN")
+                } footer: {
+                    Text("With a MAC address set (e.g. aa:bb:cc:dd:ee:ff), long-press the server to send a wake packet. Enable Wake for network access on the target machine.")
                 }
 
                 Section {

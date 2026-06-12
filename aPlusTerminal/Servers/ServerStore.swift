@@ -1,34 +1,14 @@
 import Foundation
 import Observation
 
-struct Server: Codable, Identifiable, Equatable, Hashable {
-    var id = UUID()
-    var name: String
-    var host: String
-    var port: Int = 22
-    var username: String
-    /// Optional list grouping (e.g. "Home", "Work"). Nil = ungrouped.
-    var group: String?
-    /// Reference into KeyStore. Contains no secret material.
-    var keyID: UUID?
-    /// Reference into PasswordStore (Keychain) for password auth. The JSON
-    /// stores only this UUID, never the password.
-    var passwordRef: UUID?
-    /// Last tmux session attached on this server (for auto-reattach, §4.1).
-    var lastTmuxTarget: String?
-    /// TOFU-pinned host public key (OpenSSH line), recorded on first connect.
-    /// Public information — display via `HostKeyFingerprint.fingerprint`.
-    var knownHostKey: String?
-
-    var displayAddress: String {
-        port == 22 ? host : "\(host):\(port)"
-    }
-}
-
-/// JSON-backed host list at Application Support. Contains no secrets —
-/// private keys stay in the Keychain, referenced by `keyID`.
+/// JSON-backed host list. Contains no secrets — private keys stay in the
+/// Keychain, referenced by `keyID`. Lives in the App Group container so the
+/// status widget can read it; falls back to Application Support when the
+/// group container is unavailable (tests, simulators without entitlements).
 @Observable
 final class ServerStore {
+    static let appGroupID = "group.com.aaroncx.aplusterminal"
+
     private(set) var servers: [Server] = []
 
     private let fileURL: URL
@@ -39,9 +19,30 @@ final class ServerStore {
     }
 
     static func defaultFileURL() -> URL {
+        let legacy = legacyFileURL()
+        guard let group = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroupID) else {
+            return legacy
+        }
+        let shared = group.appendingPathComponent("servers.json")
+        // One-time migration: earlier builds stored the list app-side.
+        if !FileManager.default.fileExists(atPath: shared.path),
+           FileManager.default.fileExists(atPath: legacy.path) {
+            try? FileManager.default.copyItem(at: legacy, to: shared)
+        }
+        return shared
+    }
+
+    private static func legacyFileURL() -> URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("servers.json")
+    }
+
+    /// Read-only snapshot for the widget extension — no Observation, no
+    /// store instance, just the decoded list from the shared container.
+    static func sharedSnapshot() -> [Server] {
+        (try? JSONDecoder().decode([Server].self, from: Data(contentsOf: defaultFileURL()))) ?? []
     }
 
     func add(_ server: Server) {

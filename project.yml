@@ -20,6 +20,11 @@ targets:
   aPlusTerminal:
     type: application
     platform: iOS
+    entitlements:
+      path: aPlusTerminal/aPlusTerminal.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.aaroncx.aplusterminal
     sources:
       - aPlusTerminal
       - path: Resources
@@ -54,6 +59,9 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSSupportsLiveActivities: true
         ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: "a+Terminal browses your local network for SSH servers you choose to add, checks whether your saved servers are reachable, and sends wake packets when you ask. Everything stays on your network — nothing is collected."
+        NSBonjourServices:
+          - _ssh._tcp.
         NSMicrophoneUsageDescription: "a+Terminal uses the microphone for voice dictation into your terminal. Audio is processed entirely on this device and never uploaded anywhere."
         NSSpeechRecognitionUsageDescription: "a+Terminal transcribes dictation on-device only. Your speech never leaves this iPhone — a+Terminal never falls back to server-based recognition."
         CFBundleURLTypes:
@@ -63,10 +71,18 @@ targets:
   aPlusTerminalWidgets:
     type: app-extension
     platform: iOS
+    entitlements:
+      path: aPlusTerminalWidgets/aPlusTerminalWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.aaroncx.aplusterminal
     sources:
       - aPlusTerminalWidgets
-      # Shared ActivityAttributes — must compile identically in both targets.
+      # Shared with the app target — must compile identically in both.
       - path: aPlusTerminal/LiveActivity/SessionActivityAttributes.swift
+      - path: aPlusTerminal/Servers/Server.swift
+      - path: aPlusTerminal/Servers/ServerStore.swift
+      - path: aPlusTerminal/Network/Reachability.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.aplusterminal.widgets

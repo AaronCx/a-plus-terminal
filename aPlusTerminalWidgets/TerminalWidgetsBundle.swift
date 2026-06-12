@@ -5,6 +5,7 @@ import SwiftUI
 struct TerminalWidgetsBundle: WidgetBundle {
     var body: some Widget {
         LauncherWidget()
+        ServerStatusWidget()
         SessionLiveActivity()
     }
 }
