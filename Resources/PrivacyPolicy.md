@@ -1,12 +1,12 @@
-# a+Terminal Privacy Policy
+**a+Terminal Privacy Policy**
 
 **a+Terminal collects no data. None.**
 
-- No analytics or telemetry
-- No crash reporting services
-- No accounts or sign-in
-- No advertising or tracking SDKs
-- No servers operated by us
+• No analytics or telemetry
+• No crash reporting services
+• No accounts or sign-in
+• No advertising or tracking SDKs
+• No servers operated by us
 
 The only network traffic a+Terminal produces is the SSH connection **you** initiate to **your own** servers. That traffic is end-to-end encrypted with standard SSH and goes directly from your iPhone to your server — never through us, because there is no "us" in the middle.
 
