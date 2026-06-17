@@ -22,9 +22,9 @@ Notes for specific features:
 - **Voice dictation** uses `SFSpeechRecognizer` with
   `requiresOnDeviceRecognition = true`. Audio never leaves the device.
 - **Live Activity** is local-only (no push tokens).
-- **Tips/Supporter subscription** are donations through StoreKit 2. They
-  unlock no features; the supporter badge in Settings is cosmetic gratitude.
-  This model is precedented (e.g. Overcast, Apollo's tip jars).
+- **Tips** are one-time consumable donations through StoreKit 2. They unlock
+  no features; nothing is paywalled. Consumable tip jars are well-precedented
+  (e.g. Apollo, Overcast).
 - **Privacy label is "Data Not Collected"** — the app has no analytics, no
   crash SDKs, no accounts, and no first-party server. The only network
   traffic is the SSH connection the user initiates to their own host.

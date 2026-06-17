@@ -120,15 +120,16 @@ final class TerminalLiveQAUITests: XCTestCase {
         sleep(1)
     }
 
-    /// Compliance pin (App Review Guideline 3.1.2): the Supporter card must
-    /// surface auto-renewal terms plus Privacy Policy and Terms of Use links
-    /// at the point of purchase — reviewers reject subscription apps without
-    /// this, so losing the footer is a release blocker, not a style change.
+    /// Compliance pin (App Review Guideline 3.1.2): the Support screen is now
+    /// consumable tips only — no auto-renewable subscription. It must surface a
+    /// Privacy Policy link and make clear nothing renews, and must NOT show the
+    /// subscription-era "Restore Purchases" / auto-renewal / Terms of Use UI
+    /// that would imply an auto-renewable product is attached to this version.
     func testSupporterDisclosureAndLegalLinks() {
         app.tabBars.buttons["Settings"].tap()
         sleep(1)
 
-        // Tips and the subscription live behind the single Support row.
+        // Tips live behind the single Support row.
         let supportRow = app.staticTexts["Support a+Terminal"]
         XCTAssertTrue(supportRow.waitForExistence(timeout: 5),
                       "Support a+Terminal row missing from Settings")
@@ -136,24 +137,28 @@ final class TerminalLiveQAUITests: XCTestCase {
         sleep(1)
         shot("29-support-screen")
 
-        let disclosure = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'renew automatically'")).firstMatch
-        if !disclosure.waitForExistence(timeout: 3) {
+        // The tips-only footer makes the no-renewal posture explicit.
+        let footer = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS 'nothing renews'")).firstMatch
+        if !footer.waitForExistence(timeout: 3) {
             app.swipeUp()
         }
-        XCTAssertTrue(disclosure.waitForExistence(timeout: 5),
-                      "auto-renewal disclosure missing from the Support screen")
-
-        XCTAssertTrue(app.buttons["Restore Purchases"].exists,
-                      "Restore Purchases button missing from the Support screen")
+        XCTAssertTrue(footer.waitForExistence(timeout: 5),
+                      "tips-only footer missing from the Support screen")
 
         let hasPrivacyLink = app.links["Privacy Policy"].exists
-            || disclosure.label.contains("Privacy Policy")
-        let hasTermsLink = app.links["Terms of Use (EULA)"].exists
-            || disclosure.label.contains("Terms of Use")
-        XCTAssertTrue(hasPrivacyLink, "Privacy Policy link missing near the purchase UI")
-        XCTAssertTrue(hasTermsLink, "Terms of Use link missing near the purchase UI")
-        shot("30-supporter-disclosure")
+            || app.staticTexts["Privacy Policy"].exists
+        XCTAssertTrue(hasPrivacyLink, "Privacy Policy link missing from the Support screen")
+
+        // Subscription-era UI must be gone (Guideline 3.1.2(a)).
+        XCTAssertFalse(app.buttons["Restore Purchases"].exists,
+                       "Restore Purchases must not appear once the subscription is removed")
+        XCTAssertFalse(app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS 'renew automatically'")).firstMatch.exists,
+                       "auto-renewal disclosure must not appear once the subscription is removed")
+        XCTAssertFalse(app.links["Terms of Use (EULA)"].exists,
+                       "Terms of Use (EULA) link is subscription-only and must not appear")
+        shot("30-tips-only-disclosure")
     }
 
     func testPlainShellTypingAndBurst() {

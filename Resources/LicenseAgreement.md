@@ -5,7 +5,7 @@ a+Terminal is licensed to you under Apple's standard Licensed Application End Us
 Notes specific to a+Terminal:
 
 • a+Terminal's source code is separately available under the MIT License at https://github.com/AaronCx/a-plus-terminal — the open-source license governs the source repository; this Standard EULA governs the App Store copy of the app.
-• Tips and the Supporter subscription are voluntary donations processed by Apple. They unlock no features and are non-refundable except as provided by App Store policy.
+• Tips are voluntary donations processed by Apple. They unlock no features and are non-refundable except as provided by App Store policy.
 • You are responsible for the servers you connect to and the commands you run on them.
 
 **LICENSED APPLICATION END USER LICENSE AGREEMENT**

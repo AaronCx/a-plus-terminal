@@ -8,7 +8,7 @@
 - **SKU:** `aplusterminal-ios`
 - **Primary category:** Developer Tools
 - **Secondary category:** Utilities
-- **Price:** Free (IAP: 3 tip consumables + supporter subscription)
+- **Price:** Free (IAP: 3 consumable tips)
 - **Age rating:** 4+
 
 ## Description (draft)
@@ -35,7 +35,7 @@ there is nothing to collect it with. The only network traffic is your own
 SSH connection.
 
 **Free forever.** Every feature is free. If a+Terminal saves you time, there's a
-tip jar — and a supporter badge if you subscribe. Nothing is paywalled, ever.
+tip jar. Nothing is paywalled, ever.
 
 - ed25519 keys generated on-device, stored in the Keychain (never exportable,
   never in backups)

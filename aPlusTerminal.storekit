@@ -59,65 +59,7 @@
     ]
   },
   "subscriptionGroups" : [
-    {
-      "id" : "aplusterminal-supporter-group",
-      "localizations" : [
 
-      ],
-      "name" : "Supporter",
-      "subscriptions" : [
-        {
-          "adHocOffers" : [
-
-          ],
-          "codeOffers" : [
-
-          ],
-          "displayPrice" : "0.99",
-          "familyShareable" : false,
-          "groupNumber" : 1,
-          "internalID" : "aplusterminal-supporter-monthly",
-          "introductoryOffer" : null,
-          "localizations" : [
-            {
-              "description" : "Support a+Terminal development monthly.",
-              "displayName" : "Supporter (Monthly)",
-              "locale" : "en_US"
-            }
-          ],
-          "productID" : "com.aaroncx.aplusterminal.supporter.monthly",
-          "recurringSubscriptionPeriod" : "P1M",
-          "referenceName" : "Supporter Monthly",
-          "subscriptionGroupID" : "aplusterminal-supporter-group",
-          "type" : "RecurringSubscription"
-        },
-        {
-          "adHocOffers" : [
-
-          ],
-          "codeOffers" : [
-
-          ],
-          "displayPrice" : "9.99",
-          "familyShareable" : false,
-          "groupNumber" : 1,
-          "internalID" : "aplusterminal-supporter-yearly",
-          "introductoryOffer" : null,
-          "localizations" : [
-            {
-              "description" : "Support a+Terminal development yearly.",
-              "displayName" : "Supporter (Yearly)",
-              "locale" : "en_US"
-            }
-          ],
-          "productID" : "com.aaroncx.aplusterminal.supporter.yearly",
-          "recurringSubscriptionPeriod" : "P1Y",
-          "referenceName" : "Supporter Yearly",
-          "subscriptionGroupID" : "aplusterminal-supporter-group",
-          "type" : "RecurringSubscription"
-        }
-      ]
-    }
   ],
   "version" : {
     "major" : 4,
