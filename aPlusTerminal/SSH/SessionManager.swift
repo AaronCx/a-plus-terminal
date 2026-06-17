@@ -149,6 +149,7 @@ final class TerminalSession: Identifiable, Hashable {
         pumpTask?.cancel()
         pumpTask = nil
         await connection.disconnect()
+        agentMonitor.reset()
         state = .suspended
     }
 
@@ -165,6 +166,7 @@ final class TerminalSession: Identifiable, Hashable {
         pumpTask = nil
         outboxTask?.cancel()
         outboxContinuation.finish()
+        agentMonitor.reset()
         state = .closed
         await connection.disconnect()
     }
@@ -230,6 +232,10 @@ final class TerminalSession: Identifiable, Hashable {
             server.knownHostKey = presented
             serverStore.update(server)
         }
+        // Re-arm agent detection from a clean slate: a reconnect — or a tmux
+        // reattach to a different window — must not inherit the previous
+        // shell's working/waiting reading.
+        agentMonitor.reset()
         startPump(reading: fresh)
     }
 
@@ -416,12 +422,13 @@ final class SessionManager {
 
     /// Live Activity mirror of the session list (§4.5).
     private func refreshActivity() {
-        let summaries = sessions.map { session in
-            SessionActivityAttributes.SessionSummary(
-                id: session.id,
-                name: session.server.name,
-                host: session.server.host,
-                state: {
+        let summaries = sessions
+            // A `.closed` session is on its way out of `sessions` this same
+            // tick (onShellExit / close remove it); don't let it flicker into
+            // the count.
+            .filter { $0.state != .closed }
+            .map { session -> SessionActivityAttributes.SessionSummary in
+                let stateString: String = {
                     switch session.state {
                     case .connected: return "connected"
                     case .connecting: return "connecting"
@@ -429,13 +436,24 @@ final class SessionManager {
                     case .suspended: return "suspended"
                     case .closed: return "closed"
                     }
-                }(),
-                startedAt: session.startedAt,
-                agentStatus: session.agentMonitor.status == .none
+                }()
+                let monitorStatus = session.agentMonitor.status == .none
                     ? nil
                     : session.agentMonitor.status.rawValue
-            )
-        }
+                return SessionActivityAttributes.SessionSummary(
+                    id: session.id,
+                    name: session.server.name,
+                    host: session.server.host,
+                    state: stateString,
+                    startedAt: session.startedAt,
+                    // Never surface a stale agent label on a session that
+                    // isn't currently connected.
+                    agentStatus: SessionActivityAttributes.resolvedAgentStatus(
+                        sessionState: stateString,
+                        monitorStatus: monitorStatus
+                    )
+                )
+            }
         activityController.update(with: summaries)
     }
 

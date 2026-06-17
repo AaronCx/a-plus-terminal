@@ -42,6 +42,14 @@ struct SessionActivityAttributes: ActivityAttributes {
             sessions.first?.id
         }
     }
+
+    /// Agent status to surface in the Live Activity. Only a *connected*
+    /// session can show a live agent — a reconnecting / suspended / closed
+    /// session must not keep displaying "Claude: working…" or "waiting for
+    /// input", since the stream that produced that reading is gone.
+    static func resolvedAgentStatus(sessionState: String, monitorStatus: String?) -> String? {
+        sessionState == "connected" ? monitorStatus : nil
+    }
 }
 
 extension URL {
