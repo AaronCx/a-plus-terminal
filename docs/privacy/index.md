@@ -1,3 +1,7 @@
+---
+title: a+Terminal Privacy Policy
+---
+
 # a+Terminal Privacy Policy
 
 **a+Terminal collects no data. None.**
@@ -14,7 +18,7 @@ The only network traffic a+Terminal produces is the SSH connection **you** initi
 
 **Your keys and servers** stay on your device: SSH private keys live in the iOS Keychain (this device only, excluded from backups; they leave the Keychain only when you explicitly reveal, copy, or export them in Manage Keys), and your server list is a local file containing no secrets.
 
-**Purchases** (tips and the supporter subscription) are handled by Apple through the App Store. We never see your payment details.
+**Purchases** (tips) are handled by Apple through the App Store. We never see your payment details.
 
 If you have questions, use the support link in the app's Settings tab (it opens the public GitHub issue tracker). Anything you post there is the only way information ever reaches us: when you choose to share it.
 
