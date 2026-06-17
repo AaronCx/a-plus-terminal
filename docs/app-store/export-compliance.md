@@ -1,9 +1,12 @@
 # Export compliance (encryption)
 
-a+Terminal uses standard SSH encryption via SwiftNIO SSH / Citadel (and Apple's
-CryptoKit for key generation). That makes it **exempt** under category 5D002
-mass-market / standard-protocol provisions, but it still requires the annual
-self-classification report.
+a+Terminal uses only **standard, widely-available encryption**: SSH via SwiftNIO
+SSH / Citadel and Apple's OS-provided CryptoKit. It implements no proprietary or
+non-standard cryptography of its own. On that basis it qualifies for the
+encryption exemption in Category 5, Part 2 — the app calls standard protocols
+(SSH/TLS) and the operating system's crypto rather than supplying its own.
+No export license, no Encryption Registration Number (ERN), and no annual
+self-classification report is required.
 
 ## App Store Connect answers
 
@@ -14,21 +17,15 @@ self-classification report.
 | Is your app going to be available in France? | Yes (standard exemption covers it) |
 
 `ITSAppUsesNonExemptEncryption` is already set to `NO` in the Info.plist
-(see `project.yml`), so App Store Connect won't re-ask per build.
+(see `project.yml`), so App Store Connect won't re-ask per build. Because the
+app qualifies for the exemption, there is nothing further to file.
 
-## Annual BIS self-classification report
+## Note: open-source basis (optional, not required)
 
-Due **by February 1 each year** for the prior calendar year. One email with a
-CSV to BIS and the ENC Encryption Request Coordinator:
-
-- To: `crypt-supp8@bis.doc.gov`, `enc@nsa.gov`
-- Subject: `Self-classification report for encryption items — [year]`
-- CSV columns and an example row:
-
-```csv
-PRODUCT NAME,MODEL NUMBER,MANUFACTURER,ECCN,AUTHORIZATION TYPE,ITEM TYPE,SUBMITTER NAME,TELEPHONE NUMBER,E-MAIL ADDRESS,MAILING ADDRESS
-a+Terminal,N/A,Aaron Character,5D992.c,MMKT,Mobility and mobile applications n.e.s.,Aaron Character,[PHONE],[EMAIL],[ADDRESS]
-```
-
-Reference: 15 CFR §742.15(b) and Apple's "Complying with Encryption Export
-Regulations" documentation.
+a+Terminal's source is published under the MIT License at
+<https://github.com/AaronCx/a-plus-terminal>. If a belt-and-suspenders posture
+is ever wanted, publicly-available encryption source code can be notified to BIS
+under 15 CFR §740.13(e) — a **one-time** email (not an annual report) to
+`crypt@bis.doc.gov` and `enc@nsa.gov` with the repository URL. This is
+optional; the standard-protocol / OS-crypto exemption above already covers the
+shipped app.
