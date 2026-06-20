@@ -1,4 +1,5 @@
 import XCTest
+import ActivityKit
 @testable import aPlusTerminal
 
 final class SessionActivityContentStateTests: XCTestCase {
@@ -115,6 +116,90 @@ final class ResolvedAgentStatusTests: XCTestCase {
     func testNoDetectionStaysNil() {
         XCTAssertNil(
             SessionActivityAttributes.resolvedAgentStatus(sessionState: "connected", monitorStatus: nil)
+        )
+    }
+}
+
+/// Runtime integration coverage that exercises a **real ActivityKit Live
+/// Activity in the simulator** (not just the pure helpers). Live Activities do
+/// run in the iOS Simulator for locally-managed activities; only push updates
+/// need a device, and a+Terminal's Activity is local-only. This drives the same
+/// transition the patch-4 bug was about — a connected session showing the agent
+/// "working", then the connection dropping — and asserts the stale label clears
+/// on the actually-running Activity.
+@MainActor
+final class SessionActivityRuntimeTests: XCTestCase {
+    /// Build a summary the way `SessionManager.refreshActivity` does: the agent
+    /// label is routed through `resolvedAgentStatus`, so connection state gates it.
+    private func summary(id: UUID, state: String, monitor: String?) -> SessionActivityAttributes.SessionSummary {
+        SessionActivityAttributes.SessionSummary(
+            id: id, name: "runtime", host: "100.0.0.1", state: state, startedAt: .now,
+            agentStatus: SessionActivityAttributes.resolvedAgentStatus(sessionState: state, monitorStatus: monitor)
+        )
+    }
+
+    /// Live Activity updates are dispatched async (`Task { await activity.update }`),
+    /// so poll the running Activity's content until it reflects the change.
+    private func waitForLiveState(
+        timeout: TimeInterval = 5,
+        _ predicate: @escaping (SessionActivityAttributes.ContentState) -> Bool
+    ) async -> SessionActivityAttributes.ContentState? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let st = Activity<SessionActivityAttributes>.activities.first?.content.state, predicate(st) {
+                return st
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        } while Date() < deadline
+        return Activity<SessionActivityAttributes>.activities.first?.content.state
+    }
+
+    func testLiveActivityClearsAgentLabelOnDisconnect() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment — enable them to run this integration test"
+        )
+
+        let controller = SessionActivityController()
+        await controller.endNow()  // clean slate (drop any orphan from a prior run)
+
+        let sid = UUID()
+
+        // 1. Connected session, agent "working" → a real Live Activity starts and
+        //    shows the label.
+        controller.update(with: [summary(id: sid, state: "connected", monitor: "working")])
+        let started = await waitForLiveState { $0.sessions.first?.agentStatus == "working" }
+        XCTAssertEqual(
+            Activity<SessionActivityAttributes>.activities.count, 1,
+            "a real Live Activity should be running in the simulator"
+        )
+        XCTAssertEqual(started?.sessions.first?.state, "connected")
+        XCTAssertEqual(started?.sessions.first?.agentStatus, "working")
+        XCTAssertEqual(started?.sessions.first?.agentLabel, "Claude: working…")
+
+        // 2. The connection drops (foreground reconnect). Same session id, but
+        //    state → reconnecting. The stale "working" label MUST clear on the
+        //    live Activity — this is the patch-4 bug.
+        controller.update(with: [summary(id: sid, state: "reconnecting", monitor: "working")])
+        let dropped = await waitForLiveState { $0.sessions.first?.agentStatus == nil }
+        XCTAssertEqual(dropped?.sessions.first?.state, "reconnecting")
+        XCTAssertNil(
+            dropped?.sessions.first?.agentStatus,
+            "stale agent label must clear once the session is no longer connected"
+        )
+        XCTAssertNil(dropped?.sessions.first?.agentLabel)
+
+        // 3. Reconnect succeeds and the agent is active again → label returns.
+        controller.update(with: [summary(id: sid, state: "connected", monitor: "waiting")])
+        let revived = await waitForLiveState { $0.sessions.first?.agentStatus == "waiting" }
+        XCTAssertEqual(revived?.sessions.first?.agentLabel, "Claude: waiting for input")
+
+        await controller.endNow()
+        let cleared = await waitForLiveState(timeout: 3) { _ in false }
+        _ = cleared  // best-effort; system may keep an ending activity briefly
+        XCTAssertTrue(
+            Activity<SessionActivityAttributes>.activities.isEmpty,
+            "endNow() should immediately dismiss the Activity"
         )
     }
 }
