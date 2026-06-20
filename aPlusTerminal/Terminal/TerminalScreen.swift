@@ -49,10 +49,10 @@ struct TerminalScreen: View {
                     }
                 } else {
                     // Cleanly paused (backgrounded long enough that iOS froze
-                    // us). Let the user pick which session to come back to.
+                    // us). Reconnect queries the *live* sessions, then attaches
+                    // or shows the picker — so the choices are never stale.
                     SessionPausedView(
-                        sessions: session.reattachCandidates,
-                        onReattach: { picked in Task { await session.reconnect(attachTo: picked) } },
+                        onReconnect: { Task { await session.reconnectChoosingSession() } },
                         onFreshShell: { Task { await session.reconnect(attachTo: nil) } },
                         onClose: {
                             sessionManager.close(session)
@@ -62,6 +62,15 @@ struct TerminalScreen: View {
                 }
             case .connected, .closed:
                 EmptyView()
+            }
+
+            // Multiple live sessions after a reconnect — pick which to reattach.
+            if session.state == .connected && session.reattachChoicePending {
+                ReattachPickerView(
+                    sessions: session.availableSessions,
+                    onPick: { name in session.attachToChosen(name) },
+                    onStayInShell: { session.dismissReattachChoice() }
+                )
             }
         }
         .navigationTitle(session.server.name)
@@ -189,9 +198,7 @@ struct TmuxMouseHintBanner: View {
 /// app, so the socket was suspended). The server-side session survives; the
 /// user chooses how to come back — reattach the multiplexer or a fresh shell.
 struct SessionPausedView: View {
-    /// Attachable sessions, best guess first. Empty → only a fresh shell.
-    let sessions: [String]
-    var onReattach: (String) -> Void
+    var onReconnect: () -> Void
     var onFreshShell: () -> Void
     var onClose: () -> Void
 
@@ -202,43 +209,63 @@ struct SessionPausedView: View {
                 .foregroundStyle(.secondary)
             Text("Session Paused")
                 .font(.headline)
-            Text(sessions.isEmpty
-                 ? "iOS paused this connection in the background. Reconnect when you're ready."
-                 : (sessions.count == 1
-                    ? "iOS paused this connection in the background. Your session is still running on the server."
-                    : "iOS paused this connection. Pick the session to reattach — your work is still running on the server."))
+            Text("iOS paused this connection in the background. Your work is still running on the server.")
                 .font(.callout)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             VStack(spacing: 10) {
-                // One button per available session; the best guess (index 0) is
-                // prominent. Tap any to reattach to exactly that session.
-                ForEach(Array(sessions.enumerated()), id: \.element) { index, name in
-                    let label = Label(sessions.count == 1 ? "Reattach “\(name)”" : name,
-                                      systemImage: "arrow.uturn.backward")
-                        .frame(maxWidth: .infinity)
-                    if index == 0 {
-                        Button { onReattach(name) } label: { label }
-                            .buttonStyle(.borderedProminent)
-                    } else {
-                        Button { onReattach(name) } label: { label }
-                            .buttonStyle(.bordered)
-                    }
+                Button(action: onReconnect) {
+                    Label("Reconnect", systemImage: "arrow.uturn.backward").frame(maxWidth: .infinity)
                 }
-
-                let freshLabel = Label(sessions.isEmpty ? "Reconnect" : "New Shell",
-                                       systemImage: sessions.isEmpty ? "arrow.uturn.backward" : "plus.square")
-                    .frame(maxWidth: .infinity)
-                if sessions.isEmpty {
-                    Button(action: onFreshShell) { freshLabel }.buttonStyle(.borderedProminent)
-                } else {
-                    Button(action: onFreshShell) { freshLabel }.buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                Button(action: onFreshShell) {
+                    Label("New Shell", systemImage: "plus.square").frame(maxWidth: .infinity)
                 }
-
+                .buttonStyle(.bordered)
                 Button("Close", role: .cancel, action: onClose)
                     .frame(maxWidth: .infinity)
             }
             .frame(maxWidth: 320)
+        }
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding(24)
+    }
+}
+
+/// Live session picker shown over the reconnected shell when several sessions
+/// exist. `sessions` is a fresh query (no stale/closed entries).
+struct ReattachPickerView: View {
+    let sessions: [String]
+    var onPick: (String) -> Void
+    var onStayInShell: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "rectangle.stack")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text("Reattach a Session")
+                .font(.headline)
+            Text("Pick the session to return to.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(sessions, id: \.self) { name in
+                        Button { onPick(name) } label: {
+                            Label(name, systemImage: "arrow.uturn.backward").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Button(action: onStayInShell) {
+                        Label("Stay in Shell", systemImage: "terminal").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: 320)
+            }
+            .frame(maxHeight: 300)
         }
         .padding(24)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))

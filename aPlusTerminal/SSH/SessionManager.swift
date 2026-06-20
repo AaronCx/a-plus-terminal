@@ -249,11 +249,19 @@ final class TerminalSession: Identifiable, Hashable {
         return profiles.agent(id: id)
     }
 
+    /// How a (re)connect should resume the multiplexer.
+    enum ReattachIntent {
+        case auto              // best-guess, if auto-reattach is on (drop/foreground/retry)
+        case session(String)   // attach this exact session (explicit pick)
+        case freshShell        // no attach
+        case choose            // query live sessions, then attach one / offer a fresh picker
+    }
+
     /// Initial connection; also the retry path for a failed first connect.
     func connect() async {
         guard state == .connecting || state == .suspended else { return }
         state = .connecting
-        await attemptLoop(maxAttempts: 1, attachSession: defaultAttachSession)
+        await attemptLoop(maxAttempts: 1, intent: .auto)
     }
 
     /// Reconnect contract (§4.1): exponential backoff 0.5s → 1s → 2s.
@@ -263,28 +271,34 @@ final class TerminalSession: Identifiable, Hashable {
     /// Uses the default attach behavior (auto-reattach the best-guess session if
     /// enabled). Used by the drop/foreground/retry paths.
     func reconnect(maxAttempts: Int = 3) async {
-        await reconnect(attachTo: defaultAttachSession, maxAttempts: maxAttempts)
+        await reconnect(intent: .auto, maxAttempts: maxAttempts)
     }
 
     /// Reconnect and attach to a *specific* session (or `nil` for a fresh
-    /// shell). The paused card passes the user's explicit pick.
+    /// shell). Used for explicit picks made over a live list.
     func reconnect(attachTo session: String?, maxAttempts: Int = 3) async {
+        await reconnect(intent: session.map(ReattachIntent.session) ?? .freshShell, maxAttempts: maxAttempts)
+    }
+
+    /// Reconnect, then decide from the *live* session list: attach the only one,
+    /// or surface a fresh picker if several exist. The paused card's "Reconnect"
+    /// uses this so the choices are never stale (a session closed since the drop
+    /// won't appear).
+    func reconnectChoosingSession(maxAttempts: Int = 3) async {
+        await reconnect(intent: .choose, maxAttempts: maxAttempts)
+    }
+
+    private func reconnect(intent: ReattachIntent, maxAttempts: Int) async {
         guard state == .suspended || state == .reconnecting else { return }
         if let reconnectLoop {
             await reconnectLoop.value
             return
         }
         state = .reconnecting
-        let loop = Task { await attemptLoop(maxAttempts: maxAttempts, attachSession: session) }
+        let loop = Task { await attemptLoop(maxAttempts: maxAttempts, intent: intent) }
         reconnectLoop = loop
         await loop.value
         reconnectLoop = nil
-    }
-
-    /// Best-guess session for the auto/default reconnect paths: the recorded
-    /// target when auto-reattach is on and the profile can attach.
-    private var defaultAttachSession: String? {
-        settings.autoReattachMultiplexer ? reattachTarget : nil
     }
 
     /// The best-guess multiplexer session to reattach to — nil when none is
@@ -295,17 +309,21 @@ final class TerminalSession: Identifiable, Hashable {
         return target
     }
 
-    /// Sessions to offer in the reconnect picker (attachable ones), best guess
-    /// first. Falls back to the recorded target when the live list is empty.
-    var reattachCandidates: [String] {
-        guard resolvedMultiplexer.attachTemplate != nil else { return [] }
-        var names = availableSessions
-        if names.isEmpty, let t = reattachTarget { names = [t] }
-        if let best = reattachTarget, let i = names.firstIndex(of: best), i != 0 {
-            names.remove(at: i); names.insert(best, at: 0)  // best guess first
-        }
-        return names
+    /// Set while connected when several live sessions exist and the user must
+    /// pick which to reattach — drives the picker overlay. Always reflects a
+    /// fresh `availableSessions` query (no stale entries).
+    var reattachChoicePending = false
+
+    /// Attach to a user-picked session over the already-open connection.
+    func attachToChosen(_ session: String) {
+        reattachChoicePending = false
+        guard state == .connected,
+              let attach = MultiplexerController.attachCommand(resolvedMultiplexer, target: session) else { return }
+        sendInput(Data(attach.utf8))
     }
+
+    /// Dismiss the picker and stay in the plain shell.
+    func dismissReattachChoice() { reattachChoicePending = false }
 
     /// Cleanly close the socket while backgrounded; tmux survives.
     func suspend() async {
@@ -389,20 +407,18 @@ final class TerminalSession: Identifiable, Hashable {
         await connection.disconnect()
     }
 
-    private func attemptLoop(maxAttempts: Int, attachSession: String?) async {
+    private func attemptLoop(maxAttempts: Int, intent: ReattachIntent) async {
         var delay = 0.5
         for attempt in 1...max(1, maxAttempts) {
             do {
+                reattachChoicePending = false
                 try await establish()
                 state = .connected
                 lastError = nil
                 // Make the PTY match the on-screen size before anything
                 // (especially a multiplexer attach) draws into it.
                 await syncWindowSize()
-                if let session = attachSession,
-                   let attach = MultiplexerController.attachCommand(resolvedMultiplexer, target: session) {
-                    try? await connection.send(attach)
-                }
+                await applyReattach(intent)
                 return
             } catch {
                 lastError = error.localizedDescription
@@ -416,6 +432,37 @@ final class TerminalSession: Identifiable, Hashable {
             }
         }
         state = .suspended
+    }
+
+    /// Resume the multiplexer after a (re)connect per `intent`. `.choose` (and a
+    /// stale explicit/auto target) consults the *live* session list so the user
+    /// never sees or lands in a session that was closed since the drop.
+    private func applyReattach(_ intent: ReattachIntent) async {
+        func attach(_ session: String) async {
+            guard let cmd = MultiplexerController.attachCommand(resolvedMultiplexer, target: session) else { return }
+            try? await connection.send(cmd)
+        }
+
+        switch intent {
+        case .freshShell:
+            return
+        case .session(let s):
+            // Explicit pick from a list the user just saw — attach directly.
+            await attach(s)
+        case .auto:
+            guard settings.autoReattachMultiplexer, let target = reattachTarget else { return }
+            await attach(target)
+        case .choose:
+            // Build the picker from a live query so closed sessions never show.
+            let live = await MultiplexerController.availableSessions(resolvedMultiplexer, on: connection)
+            availableSessions = live
+            if live.count == 1, let only = live.first {
+                await attach(only)            // unambiguous — just go there
+            } else if live.count > 1 {
+                reattachChoicePending = true  // let the user pick from the fresh list
+            }
+            // live empty → stay in the plain shell
+        }
     }
 
     private func establish() async throws {
