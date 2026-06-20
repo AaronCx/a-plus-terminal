@@ -5,10 +5,10 @@ import Observation
 /// ThemeStore.
 @Observable
 final class AppSettings {
-    /// §4.1 — after a reconnect, automatically `tmux attach` to the last
-    /// recorded target.
-    var autoReattachTmux: Bool {
-        didSet { defaults.set(autoReattachTmux, forKey: Keys.autoReattachTmux) }
+    /// §4.1 — after a reconnect, automatically reattach to the last recorded
+    /// multiplexer target (tmux/zellij/screen/…). Renamed from `autoReattachTmux`.
+    var autoReattachMultiplexer: Bool {
+        didSet { defaults.set(autoReattachMultiplexer, forKey: Keys.autoReattachMultiplexer) }
     }
 
     /// §4.3 — translate pan gestures into SGR mouse wheel events when the
@@ -17,9 +17,9 @@ final class AppSettings {
         didSet { defaults.set(scrollWheelBridge, forKey: Keys.scrollWheelBridge) }
     }
 
-    /// One-time tmux `set -g mouse on` hint (§4.3).
-    var tmuxMouseHintShown: Bool {
-        didSet { defaults.set(tmuxMouseHintShown, forKey: Keys.tmuxMouseHintShown) }
+    /// One-time "enable mouse" hint (§4.3). Renamed from `tmuxMouseHintShown`.
+    var multiplexerHintShown: Bool {
+        didSet { defaults.set(multiplexerHintShown, forKey: Keys.multiplexerHintShown) }
     }
 
     /// §4.4 — dictation auto-inserts with Return after 1.5s of silence.
@@ -27,21 +27,41 @@ final class AppSettings {
         didSet { defaults.set(autoSendDictation, forKey: Keys.autoSendDictation) }
     }
 
+    /// Global default agent profile id; "auto" detects any seeded agent.
+    var defaultAgentProfileID: String {
+        didSet { defaults.set(defaultAgentProfileID, forKey: Keys.defaultAgentProfileID) }
+    }
+
+    /// Global default multiplexer profile id; "tmux" preserves prior behavior.
+    var defaultMultiplexerProfileID: String {
+        didSet { defaults.set(defaultMultiplexerProfileID, forKey: Keys.defaultMultiplexerProfileID) }
+    }
 
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.autoReattachTmux = defaults.object(forKey: Keys.autoReattachTmux) as? Bool ?? true
+        // Migration: honor the old keys if the new ones were never written.
+        self.autoReattachMultiplexer = defaults.object(forKey: Keys.autoReattachMultiplexer) as? Bool
+            ?? defaults.object(forKey: Keys.legacyAutoReattachTmux) as? Bool
+            ?? true
         self.scrollWheelBridge = defaults.object(forKey: Keys.scrollWheelBridge) as? Bool ?? true
-        self.tmuxMouseHintShown = defaults.bool(forKey: Keys.tmuxMouseHintShown)
+        self.multiplexerHintShown = defaults.object(forKey: Keys.multiplexerHintShown) as? Bool
+            ?? defaults.bool(forKey: Keys.legacyTmuxMouseHintShown)
         self.autoSendDictation = defaults.bool(forKey: Keys.autoSendDictation)
+        self.defaultAgentProfileID = defaults.string(forKey: Keys.defaultAgentProfileID) ?? "auto"
+        self.defaultMultiplexerProfileID = defaults.string(forKey: Keys.defaultMultiplexerProfileID) ?? "tmux"
     }
 
     private enum Keys {
-        static let autoReattachTmux = "autoReattachTmux"
+        static let autoReattachMultiplexer = "autoReattachMultiplexer"
         static let scrollWheelBridge = "scrollWheelBridge"
-        static let tmuxMouseHintShown = "tmuxMouseHintShown"
+        static let multiplexerHintShown = "multiplexerHintShown"
         static let autoSendDictation = "autoSendDictation"
+        static let defaultAgentProfileID = "defaultAgentProfileID"
+        static let defaultMultiplexerProfileID = "defaultMultiplexerProfileID"
+        // Legacy keys, read-only for migration.
+        static let legacyAutoReattachTmux = "autoReattachTmux"
+        static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"
     }
 }

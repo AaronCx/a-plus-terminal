@@ -17,24 +17,41 @@ final class AppSettingsTests: XCTestCase {
 
     func testDefaults() {
         let settings = AppSettings(defaults: defaults)
-        XCTAssertTrue(settings.autoReattachTmux, "auto-reattach defaults ON (§4.1)")
+        XCTAssertTrue(settings.autoReattachMultiplexer, "auto-reattach defaults ON (§4.1)")
         XCTAssertTrue(settings.scrollWheelBridge, "wheel bridge defaults ON (§4.3)")
         XCTAssertFalse(settings.autoSendDictation, "auto-send defaults OFF (§4.4)")
-        XCTAssertFalse(settings.tmuxMouseHintShown)
+        XCTAssertFalse(settings.multiplexerHintShown)
+        XCTAssertEqual(settings.defaultAgentProfileID, "auto")
+        XCTAssertEqual(settings.defaultMultiplexerProfileID, "tmux")
     }
 
     func testPersistsAcrossInstances() {
         let settings = AppSettings(defaults: defaults)
-        settings.autoReattachTmux = false
+        settings.autoReattachMultiplexer = false
         settings.scrollWheelBridge = false
         settings.autoSendDictation = true
-        settings.tmuxMouseHintShown = true
+        settings.multiplexerHintShown = true
+        settings.defaultAgentProfileID = "codex"
+        settings.defaultMultiplexerProfileID = "zellij"
 
         let reloaded = AppSettings(defaults: defaults)
-        XCTAssertFalse(reloaded.autoReattachTmux)
+        XCTAssertFalse(reloaded.autoReattachMultiplexer)
         XCTAssertFalse(reloaded.scrollWheelBridge)
         XCTAssertTrue(reloaded.autoSendDictation)
-        XCTAssertTrue(reloaded.tmuxMouseHintShown)
+        XCTAssertTrue(reloaded.multiplexerHintShown)
+        XCTAssertEqual(reloaded.defaultAgentProfileID, "codex")
+        XCTAssertEqual(reloaded.defaultMultiplexerProfileID, "zellij")
+    }
+
+    func testMigratesLegacyKeys() {
+        // A pre-refactor install wrote the old keys; the new properties must
+        // honor them when the new keys are absent.
+        defaults.set(false, forKey: "autoReattachTmux")
+        defaults.set(true, forKey: "tmuxMouseHintShown")
+
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertFalse(settings.autoReattachMultiplexer, "legacy autoReattachTmux must carry over")
+        XCTAssertTrue(settings.multiplexerHintShown, "legacy tmuxMouseHintShown must carry over")
     }
 }
 

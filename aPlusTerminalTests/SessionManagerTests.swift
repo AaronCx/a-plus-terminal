@@ -5,22 +5,65 @@ import NIOCore
 import NIOSSH
 @testable import aPlusTerminal
 
-final class TmuxIntegrationTests: XCTestCase {
-    func testAttachCommandQuotesTarget() {
-        XCTAssertEqual(TmuxIntegration.attachCommand(target: "main"), "tmux attach -t 'main'\n")
+final class MultiplexerControllerTests: XCTestCase {
+    private let tmux = MultiplexerProfile(
+        id: "tmux", displayName: "tmux",
+        listSessionsCommand: "tmux list-sessions -F '#S'",
+        attachTemplate: "tmux attach -t {target} || tmux new -s {target}",
+        currentTargetCommand: "tmux display-message -p '#S'",
+        mouseHintCommand: "tmux set -g mouse on")
+
+    func testAttachCommandTemplatingAndNewline() {
         XCTAssertEqual(
-            TmuxIntegration.attachCommand(target: "it's"),
-            "tmux attach -t 'it'\\''s'\n",
-            "single quotes must be escaped for the shell"
-        )
+            MultiplexerController.attachCommand(tmux, target: "main"),
+            "tmux attach -t main || tmux new -s main\n")
+        let zellij = MultiplexerProfile(id: "zellij", displayName: "zellij", attachTemplate: "zellij attach {target}")
+        XCTAssertEqual(MultiplexerController.attachCommand(zellij, target: "work"), "zellij attach work\n")
+        let screen = MultiplexerProfile(id: "screen", displayName: "screen", attachTemplate: "screen -x {target}")
+        XCTAssertEqual(MultiplexerController.attachCommand(screen, target: "0.tty"), "screen -x 0.tty\n")
     }
 
-    func testAttachedSessionParsing() {
-        XCTAssertNil(TmuxIntegration.attachedSession(fromList: ""))
-        XCTAssertNil(TmuxIntegration.attachedSession(fromList: "main\t0\nwork\t0\n"))
-        XCTAssertEqual(TmuxIntegration.attachedSession(fromList: "main\t0\nwork\t1\n"), "work")
-        XCTAssertEqual(TmuxIntegration.attachedSession(fromList: "main\t2\n"), "main")
-        XCTAssertNil(TmuxIntegration.attachedSession(fromList: "garbage with no tabs"))
+    func testNoneProfileHasNoAttach() {
+        let none = MultiplexerProfile(id: "none", displayName: "None")
+        XCTAssertNil(MultiplexerController.attachCommand(none, target: "x"))
+        XCTAssertNil(none.attachCommand(target: "x"))
+    }
+
+    func testFirstTargetParsing() {
+        XCTAssertNil(MultiplexerController.firstTarget(fromOutput: ""))
+        XCTAssertNil(MultiplexerController.firstTarget(fromOutput: "\n   \n"))
+        XCTAssertEqual(MultiplexerController.firstTarget(fromOutput: "main\nwork\n"), "main")
+        XCTAssertEqual(MultiplexerController.firstTarget(fromOutput: "  spaced  \n"), "spaced")
+    }
+}
+
+@MainActor
+final class ProfileStoreTests: XCTestCase {
+    func testUserProfilesOverrideBuiltInsByID() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let userURL = dir.appendingPathComponent("profiles.json")
+        // A user file that overrides claude-code's name and adds a new agent.
+        let json = """
+        {"agents":[
+          {"id":"claude-code","displayName":"My Claude","detectionMarkers":["claude code"],"attachTemplate":"{path} "},
+          {"id":"my-bot","displayName":"My Bot","detectionMarkers":["my-bot"],"attachTemplate":"{path} "}
+        ],"multiplexers":[]}
+        """
+        try json.data(using: .utf8)!.write(to: userURL)
+
+        let store = ProfileStore(userFileURL: userURL)
+        XCTAssertEqual(store.agent(id: "claude-code")?.displayName, "My Claude", "user entry overrides built-in by id")
+        XCTAssertEqual(store.agent(id: "claude-code")?.builtIn, false)
+        XCTAssertNotNil(store.agent(id: "my-bot"), "user entry adds a new agent")
+        XCTAssertNotNil(store.multiplexer(id: "tmux"), "bundled tmux still present")
+    }
+
+    func testAttachTemplatePerAgent() {
+        let aider = AgentProfile(id: "aider", displayName: "aider", detectionMarkers: ["aider"], attachTemplate: "/add {path}\n")
+        XCTAssertEqual(aider.formatAttachment(path: "/x/y.png"), "/add /x/y.png\n")
+        let generic = AgentProfile(id: "generic", displayName: "Agent", detectionMarkers: [], attachTemplate: "{path} ")
+        XCTAssertEqual(generic.formatAttachment(path: "/x/y.png"), "/x/y.png ")
     }
 }
 
@@ -74,6 +117,7 @@ final class SessionManagerTests: XCTestCase {
     private var keyStore: KeyStore!
     private var serverStore: ServerStore!
     private var settings: AppSettings!
+    private var profiles: ProfileStore!
     private var manager: SessionManager!
     private var storedKey: SSHKey!
 
@@ -94,11 +138,26 @@ final class SessionManagerTests: XCTestCase {
         )
         let defaults = UserDefaults(suiteName: "SessionManagerTests-\(suffix)")!
         settings = AppSettings(defaults: defaults)
+        // Deterministic profiles: tmux multiplexer + generic/claude-code agents.
+        profiles = ProfileStore(
+            agents: [
+                AgentProfile(id: "generic", displayName: "Agent", detectionMarkers: [], attachTemplate: "{path} "),
+                AgentProfile(id: "claude-code", displayName: "Claude Code", detectionMarkers: ["claude code"], attachTemplate: "{path} ")
+            ],
+            multiplexers: [
+                MultiplexerProfile(id: "tmux", displayName: "tmux",
+                                   attachTemplate: "tmux attach -t {target} || tmux new -s {target}",
+                                   currentTargetCommand: "tmux display-message -p '#S'",
+                                   mouseHintCommand: "tmux set -g mouse on"),
+                MultiplexerProfile(id: "none", displayName: "None (raw shell)")
+            ]
+        )
         manager = SessionManager(
             keyStore: keyStore,
             serverStore: serverStore,
             passwords: PasswordStore(secrets: InMemorySecretStore()),
-            settings: settings
+            settings: settings,
+            profiles: profiles
         )
 
         // Seed a key whose private bytes are the test client key.
@@ -136,9 +195,9 @@ final class SessionManagerTests: XCTestCase {
         }
     }
 
-    private func makeServer(lastTmuxTarget: String? = nil) -> Server {
+    private func makeServer(lastMultiplexerTarget: String? = nil) -> Server {
         var entry = Server(name: "test", host: "127.0.0.1", port: port, username: "aplusterminal-test", keyID: storedKey.id)
-        entry.lastTmuxTarget = lastTmuxTarget
+        entry.lastMultiplexerTarget = lastMultiplexerTarget
         serverStore.add(entry)
         return entry
     }
@@ -180,12 +239,12 @@ final class SessionManagerTests: XCTestCase {
     }
 
     func testShellExitClosesSessionInsteadOfReconnecting() async throws {
-        settings.autoReattachTmux = true
-        let session = manager.open(server: makeServer(lastTmuxTarget: "main"))
+        settings.autoReattachMultiplexer = true
+        let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))
         try await waitFor("session to connect") { session.state == .connected }
-        // The reconnect contract sends `tmux attach` on every (re)connect
-        // when a target is recorded — including this first connect.
-        try await waitFor("attach after connect") { shell.received.contains("tmux attach -t 'main'") }
+        // The reconnect contract sends the multiplexer attach on every
+        // (re)connect when a target is recorded — including this first connect.
+        try await waitFor("attach after connect") { shell.received.contains("tmux attach -t main") }
 
         // The shell ending cleanly (the user typed `exit`) must close the
         // session — not resurrect it. (Transport errors still reconnect;
@@ -196,7 +255,7 @@ final class SessionManagerTests: XCTestCase {
             session.state == .closed && self.manager.sessions.isEmpty
         }
         XCTAssertEqual(
-            shell.received.components(separatedBy: "tmux attach -t 'main'").count, 2,
+            shell.received.components(separatedBy: "tmux attach -t main").count, 2,
             "no reconnect attach may follow a clean shell exit"
         )
     }
@@ -213,7 +272,10 @@ final class SessionManagerTests: XCTestCase {
         }
     }
 
-    func testForegroundReconnectFromSuspended() async throws {
+    func testForegroundDoesNotAutoReconnectSuspendedSession() async throws {
+        // New contract: a session paused in the background is NOT auto-revived
+        // on foreground — the user is offered a reattach-vs-fresh choice (the
+        // paused card), so it must stay suspended until they pick.
         let session = manager.open(server: makeServer())
         try await waitFor("session to connect") { session.state == .connected }
 
@@ -221,6 +283,60 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(session.state, .suspended)
 
         manager.appWillEnterForeground()
-        try await waitFor("foreground reconnect") { session.state == .connected }
+        // Give any (incorrect) auto-reconnect a chance to fire, then assert it didn't.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(session.state, .suspended, "must wait for the user's reconnect choice")
+
+        // Explicitly choosing reconnect brings it back.
+        await session.reconnect(reattachMultiplexer: false, maxAttempts: 1)
+        XCTAssertEqual(session.state, .connected)
+    }
+
+    func testReconnectFreshShellSkipsReattach() async throws {
+        settings.autoReattachMultiplexer = true
+        let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))
+        try await waitFor("session to connect") { session.state == .connected }
+        try await waitFor("initial attach") { self.shell.received.contains("tmux attach -t main") }
+        let attachesBefore = self.shell.received.components(separatedBy: "tmux attach -t main").count
+
+        await session.suspend()
+        // "Fresh shell" must reconnect WITHOUT sending another attach.
+        await session.reconnect(reattachMultiplexer: false, maxAttempts: 1)
+        XCTAssertEqual(session.state, .connected)
+        let attachesAfter = self.shell.received.components(separatedBy: "tmux attach -t main").count
+        XCTAssertEqual(attachesAfter, attachesBefore, "fresh-shell reconnect must not reattach the multiplexer")
+    }
+
+    func testKeepaliveEmitsPeriodicWindowChangesWhileIdle() async throws {
+        // The drop-at-~3min regression: with no typing, the keepalive must keep
+        // putting real packets on the *live PTY channel* (a no-op window-change)
+        // so NAT and the server's ClientAlive timer never fire. Set fast,
+        // deterministic timing before the async connect completes.
+        let session = manager.open(server: makeServer())
+        session.firstKeepaliveDelay = 0.1
+        session.keepaliveInterval = 0.2
+        try await waitFor("session to connect") { session.state == .connected }
+
+        // Go idle (send nothing) and watch window-change events accumulate at
+        // the server purely from the keepalive ping.
+        let baseline = shell.windowSizes.count
+        try await waitFor("keepalive window-changes to accumulate while idle", timeout: 5) {
+            self.shell.windowSizes.count >= baseline + 3
+        }
+    }
+
+    func testKeepaliveStopsAfterSuspend() async throws {
+        let session = manager.open(server: makeServer())
+        session.firstKeepaliveDelay = 0.1
+        session.keepaliveInterval = 0.2
+        try await waitFor("session to connect") { session.state == .connected }
+        try await waitFor("at least one keepalive ping") { self.shell.windowSizes.count >= 1 }
+
+        await session.suspend()
+        let afterSuspend = shell.windowSizes.count
+        // Give the (now-cancelled) keepalive several intervals to prove it is
+        // quiescent — a leaked task would keep pinging a dead channel.
+        try await Task.sleep(for: .seconds(1))
+        XCTAssertEqual(shell.windowSizes.count, afterSuspend, "keepalive must stop once suspended")
     }
 }

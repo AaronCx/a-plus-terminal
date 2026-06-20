@@ -5,8 +5,12 @@ struct ServerEditView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(ServerStore.self) private var serverStore
     @Environment(KeyStore.self) private var keyStore
+    @Environment(ProfileStore.self) private var profiles
 
     @Environment(PasswordStore.self) private var passwords
+
+    /// Sentinel tag for "use the global default" in the optional pickers.
+    private static let useDefaultTag = "__default__"
 
     enum AuthMode: String, CaseIterable, Identifiable {
         case key = "SSH Key"
@@ -108,6 +112,33 @@ struct ServerEditView: View {
                     Text(authMode == .key
                         ? "Keys are stored in this device's Keychain. View, copy, or export them any time in Settings › Manage Keys. Add the public key to the server's authorized_keys."
                         : "The password is stored in this device's Keychain only — never in the server list, never synced.")
+                }
+
+                Section {
+                    Picker("Agent", selection: Binding(
+                        get: { server.agentProfileID ?? Self.useDefaultTag },
+                        set: { server.agentProfileID = $0 == Self.useDefaultTag ? nil : $0 }
+                    )) {
+                        Text("Default").tag(Self.useDefaultTag)
+                        Text("Auto-detect").tag("auto")
+                        ForEach(profiles.agents) { agent in
+                            Text(agent.displayName).tag(agent.id)
+                        }
+                        Text("None").tag("none")
+                    }
+                    Picker("Multiplexer", selection: Binding(
+                        get: { server.multiplexerProfileID ?? Self.useDefaultTag },
+                        set: { server.multiplexerProfileID = $0 == Self.useDefaultTag ? nil : $0 }
+                    )) {
+                        Text("Default").tag(Self.useDefaultTag)
+                        ForEach(profiles.multiplexers) { mux in
+                            Text(mux.displayName).tag(mux.id)
+                        }
+                    }
+                } header: {
+                    Text("Agent & Multiplexer")
+                } footer: {
+                    Text("Override the global defaults for this server. \"Default\" follows Settings.")
                 }
 
                 if let keyID = server.keyID, let key = keyStore.key(for: keyID) {

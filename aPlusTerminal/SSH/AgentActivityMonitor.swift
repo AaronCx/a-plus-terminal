@@ -1,15 +1,20 @@
 import Foundation
 
-/// Heuristic Claude Code (and similar agent) status for a session, derived
-/// purely from the output stream — the app never inspects commands.
+/// Heuristic agent status for a session, derived purely from the output
+/// stream — the app never inspects commands. Agent identity is **data**: the
+/// monitor is handed candidate `AgentProfile`s and never names one itself.
 ///
-/// Detection: nothing is reported until an agent banner/marker appears in
-/// the output ("Claude Code", "esc to interrupt"). After that:
-/// - a sustained output burst (≥ `burstThreshold` bytes inside one quiet
-///   window) means the agent is **working** — streaming a response,
-/// - quiet for `quietInterval` means it's **waiting** for input.
-/// Keystroke echoes are a handful of bytes and never reach the burst
-/// threshold, so the user typing a reply doesn't read as "working".
+/// Detection:
+/// - If a `generic` profile (empty markers) is among the candidates — the
+///   default "auto" mode — the burst/quiet heuristic runs from the start and
+///   reports working/waiting for *any* agent, with no detected name ("Agent").
+/// - As soon as a candidate's marker substring appears in the output, that
+///   profile latches as `detected` and its display name drives the label.
+/// - Empty candidates (multiplexer/agent "none") => detection disabled.
+///
+/// Heuristic: a sustained output burst (≥ threshold bytes inside one quiet
+/// window) means **working**; quiet for the quiet interval means **waiting**.
+/// Keystroke echoes are a handful of bytes and never reach the threshold.
 @MainActor
 final class AgentActivityMonitor {
     enum Status: String {
@@ -19,35 +24,51 @@ final class AgentActivityMonitor {
     }
 
     private(set) var status: Status = .none
+    /// The profile whose marker last matched; nil under the generic heuristic.
+    /// Drives the Live Activity label.
+    private(set) var detected: AgentProfile?
     /// Fired on every status transition (main actor).
     var onChange: (() -> Void)?
 
-    /// Markers that prove an interactive agent is on-screen. Lowercased.
-    private static let markers = ["claude code", "esc to interrupt"]
     private static let tailWindow = 64
 
-    private let quietInterval: TimeInterval
-    private let burstThreshold: Int
+    private let candidates: [AgentProfile]
+    /// Candidates that carry markers — scanned to upgrade `detected`.
+    private let markerCandidates: [AgentProfile]
+    /// Whether a markerless ("generic") candidate enables the always-on heuristic.
+    private let genericFallback: Bool
 
-    private var agentSeen = false
+    private let defaultQuiet: TimeInterval
+    private let defaultBurst: Int
+
+    private var agentSeen: Bool
     private var burstBytes = 0
     private var quietTask: Task<Void, Never>?
     /// Tail of the previous chunk so markers split across reads still match.
     private var carry = ""
 
-    init(quietInterval: TimeInterval = 3, burstThreshold: Int = 200) {
-        self.quietInterval = quietInterval
-        self.burstThreshold = burstThreshold
+    init(candidates: [AgentProfile], quietInterval: TimeInterval = 3, burstThreshold: Int = 200) {
+        self.candidates = candidates
+        self.markerCandidates = candidates.filter { !$0.detectionMarkers.isEmpty }
+        self.genericFallback = candidates.contains { $0.detectionMarkers.isEmpty }
+        self.defaultQuiet = quietInterval
+        self.defaultBurst = burstThreshold
+        self.agentSeen = genericFallback
     }
 
+    private var activeQuiet: TimeInterval { detected?.quietInterval ?? defaultQuiet }
+    private var activeBurst: Int { detected?.burstThreshold ?? defaultBurst }
+
     func observe(_ bytes: [UInt8]) {
-        if !agentSeen {
+        // Keep scanning until a named profile latches, even after the generic
+        // heuristic has gone active — so "Agent" upgrades to the real name.
+        if detected == nil, !markerCandidates.isEmpty {
             scanForMarker(bytes)
         }
         guard agentSeen else { return }
 
         burstBytes += bytes.count
-        if status != .working, burstBytes >= burstThreshold {
+        if status != .working, burstBytes >= activeBurst {
             transition(to: .working)
         }
         scheduleQuiet()
@@ -56,7 +77,8 @@ final class AgentActivityMonitor {
     func reset() {
         quietTask?.cancel()
         quietTask = nil
-        agentSeen = false
+        agentSeen = genericFallback
+        detected = nil
         burstBytes = 0
         carry = ""
         if status != .none {
@@ -66,20 +88,23 @@ final class AgentActivityMonitor {
 
     private func scanForMarker(_ bytes: [UInt8]) {
         let text = carry + String(decoding: bytes, as: UTF8.self).lowercased()
-        if Self.markers.contains(where: { text.contains($0) }) {
-            agentSeen = true
-            carry = ""
-            return
+        for candidate in markerCandidates {
+            if candidate.detectionMarkers.contains(where: { text.contains($0) }) {
+                detected = candidate
+                agentSeen = true
+                carry = ""
+                return
+            }
         }
         carry = String(text.suffix(Self.tailWindow))
     }
 
     private func scheduleQuiet() {
         quietTask?.cancel()
+        let quiet = activeQuiet
         quietTask = Task { [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(nanoseconds: UInt64(self.quietInterval * 1_000_000_000))
-            guard !Task.isCancelled else { return }
+            try? await Task.sleep(nanoseconds: UInt64(quiet * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
             self.burstBytes = 0
             if self.status == .working {
                 self.transition(to: .waiting)

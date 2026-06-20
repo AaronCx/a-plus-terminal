@@ -134,7 +134,8 @@ final class SessionActivityRuntimeTests: XCTestCase {
     private func summary(id: UUID, state: String, monitor: String?) -> SessionActivityAttributes.SessionSummary {
         SessionActivityAttributes.SessionSummary(
             id: id, name: "runtime", host: "100.0.0.1", state: state, startedAt: .now,
-            agentStatus: SessionActivityAttributes.resolvedAgentStatus(sessionState: state, monitorStatus: monitor)
+            agentStatus: SessionActivityAttributes.resolvedAgentStatus(sessionState: state, monitorStatus: monitor),
+            agentName: "Claude Code"
         )
     }
 
@@ -175,7 +176,7 @@ final class SessionActivityRuntimeTests: XCTestCase {
         )
         XCTAssertEqual(started?.sessions.first?.state, "connected")
         XCTAssertEqual(started?.sessions.first?.agentStatus, "working")
-        XCTAssertEqual(started?.sessions.first?.agentLabel, "Claude: working…")
+        XCTAssertEqual(started?.sessions.first?.agentLabel, "Claude Code: working…")
 
         // 2. The connection drops (foreground reconnect). Same session id, but
         //    state → reconnecting. The stale "working" label MUST clear on the
@@ -192,7 +193,7 @@ final class SessionActivityRuntimeTests: XCTestCase {
         // 3. Reconnect succeeds and the agent is active again → label returns.
         controller.update(with: [summary(id: sid, state: "connected", monitor: "waiting")])
         let revived = await waitForLiveState { $0.sessions.first?.agentStatus == "waiting" }
-        XCTAssertEqual(revived?.sessions.first?.agentLabel, "Claude: waiting for input")
+        XCTAssertEqual(revived?.sessions.first?.agentLabel, "Claude Code: waiting for input")
 
         await controller.endNow()
         let cleared = await waitForLiveState(timeout: 3) { _ in false }

@@ -1,5 +1,5 @@
 title: a+Terminal
 description: >-
-  Privacy-first iOS SSH terminal — tmux + Claude Code ergonomics,
-  on-device dictation, Live Activities. Zero data collection.
+  Privacy-first iOS SSH terminal — tmux + CLI AI agents (Claude Code, Codex,
+  aider, Hermes…), on-device dictation, Live Activities. Zero data collection.
 theme: jekyll-theme-cayman

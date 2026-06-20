@@ -4,7 +4,13 @@ Paste a tailored version of this into App Store Connect → App Review Informati
 
 ---
 
-a+Terminal is an SSH terminal. Like other terminal apps on the App Store
+a+Terminal is an SSH terminal. It is a **general-purpose** SSH terminal, not
+tied to any one AI tool and not affiliated with any AI vendor. Agents such as
+Claude Code, Codex, aider, Gemini CLI, and Hermes are simply CLI programs the
+user may choose to run over the connection; the app ships profiles for them but
+is a plain terminal.
+
+Like other terminal apps on the App Store
 (Terminal#, Termius, Blink Shell, La Terminal), it requires the user's **own
 SSH server** — there is no demo account because there are no accounts: the
 app connects directly from the device to a server the user controls.

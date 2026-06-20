@@ -26,6 +26,8 @@ enum TerminalKey {
 struct KeyAccessoryBar: View {
     @Bindable var bridge: TerminalBridge
     var onMic: () -> Void
+    var onAttachPhoto: () -> Void
+    var onAttachFile: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
@@ -72,6 +74,26 @@ struct KeyAccessoryBar: View {
                     key("-") { bridge.sendKey(.dash) }
                     key(systemImage: "doc.on.clipboard") { bridge.paste() }
                         .accessibilityLabel("Paste")
+                    Menu {
+                        Button {
+                            onAttachPhoto()
+                        } label: {
+                            Label("Photo Library", systemImage: "photo")
+                        }
+                        Button {
+                            onAttachFile()
+                        } label: {
+                            Label("Files", systemImage: "folder")
+                        }
+                    } label: {
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 14, weight: .medium))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 7)
+                            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 6))
+                            .foregroundStyle(.primary)
+                    }
+                    .accessibilityLabel("Attach image or file")
                 }
                 .padding(.horizontal, 8)
             }
