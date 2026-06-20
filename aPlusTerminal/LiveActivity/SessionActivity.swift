@@ -23,6 +23,25 @@ final class SessionActivityController {
     private var activity: Activity<SessionActivityAttributes>?
     /// Last content pushed to ActivityKit — also the regression-test seam.
     private(set) var lastPushedState: SessionActivityAttributes.ContentState?
+    /// Count of mutations actually dispatched to ActivityKit. Test seam for the
+    /// de-duplication below — identical content must not burn the update budget.
+    private(set) var pushCount = 0
+
+    /// Serializes async ActivityKit mutations. `refreshActivity` fires from many
+    /// sites in quick succession (state changes, agent transitions, open/close),
+    /// and unstructured `Task`s do **not** preserve submission order — two rapid
+    /// updates could otherwise apply out of order and strand the Live Activity on
+    /// stale content (the same reorder hazard the terminal byte outbox fixes).
+    /// Chaining each mutation behind the previous one guarantees FIFO ordering.
+    private var applyTask: Task<Void, Never>?
+
+    private func enqueue(_ op: @escaping () async -> Void) {
+        let previous = applyTask
+        applyTask = Task { @MainActor in
+            await previous?.value
+            await op()
+        }
+    }
 
     init() {
         let survivors = Activity<SessionActivityAttributes>.activities
@@ -55,7 +74,16 @@ final class SessionActivityController {
 
     func update(with summaries: [SessionActivityAttributes.SessionSummary]) {
         let state = SessionActivityAttributes.ContentState.make(from: summaries)
+
+        // Coalesce no-ops: refreshActivity fires on every session/agent event,
+        // many of which produce byte-identical content. Re-pushing the same
+        // state wastes ActivityKit's update budget and can throttle later real
+        // updates. Always fall through, though, when an Activity still needs to
+        // be (re)started — otherwise a failed first request would never retry.
+        let needsStart = state.activeCount > 0 && activity == nil
+        if state == lastPushedState && !needsStart { return }
         lastPushedState = state
+
         let content = ActivityContent(
             state: state,
             staleDate: Date(timeIntervalSinceNow: Self.staleWindow)
@@ -63,25 +91,29 @@ final class SessionActivityController {
 
         if state.activeCount > 0 {
             if let activity {
-                Task { await activity.update(content) }
+                pushCount += 1
+                enqueue { await activity.update(content) }
             } else if ActivityAuthorizationInfo().areActivitiesEnabled {
                 // Sweep anything still on screen (an ended-but-undismissed
                 // zero state, an orphan from a previous launch) so exactly
                 // one Activity exists.
                 for stale in Activity<SessionActivityAttributes>.activities {
-                    Task { await stale.end(nil, dismissalPolicy: .immediate) }
+                    let stale = stale
+                    enqueue { await stale.end(nil, dismissalPolicy: .immediate) }
                 }
                 activity = try? Activity.request(
                     attributes: SessionActivityAttributes(),
                     content: content
                     // No pushType: local-only, zero-data posture.
                 )
+                pushCount += 1
             }
         } else if let activity {
             // Show the truthful zero state during the grace window, then let
             // the system dismiss it — works even while the app is suspended.
             self.activity = nil
-            Task {
+            pushCount += 1
+            enqueue {
                 await activity.end(
                     content,
                     dismissalPolicy: .after(Date(timeIntervalSinceNow: Self.graceWindow))
@@ -91,6 +123,10 @@ final class SessionActivityController {
     }
 
     func endNow() async {
+        // Drop any queued mutations so a late update can't resurrect the
+        // Activity after we've torn it down.
+        applyTask?.cancel()
+        applyTask = nil
         activity = nil
         for current in Activity<SessionActivityAttributes>.activities {
             await current.end(nil, dismissalPolicy: .immediate)

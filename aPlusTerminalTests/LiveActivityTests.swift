@@ -202,4 +202,63 @@ final class SessionActivityRuntimeTests: XCTestCase {
             "endNow() should immediately dismiss the Activity"
         )
     }
+
+    /// Re-pushing byte-identical content must not call ActivityKit again —
+    /// refreshActivity fires on every session/agent event, and burning the
+    /// update budget on no-ops can throttle later real updates.
+    func testIdenticalUpdatesAreCoalesced() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+
+        let s = SessionActivityAttributes.SessionSummary(
+            id: UUID(), name: "dup", host: "100.0.0.1", state: "connected",
+            startedAt: Date(timeIntervalSince1970: 1_000_000), agentStatus: "working"
+        )
+        controller.update(with: [s])
+        let afterFirst = controller.pushCount
+        XCTAssertGreaterThan(afterFirst, 0, "the first update should push")
+
+        controller.update(with: [s])  // identical
+        controller.update(with: [s])  // identical
+        XCTAssertEqual(controller.pushCount, afterFirst,
+                       "identical content must not be re-pushed to ActivityKit")
+
+        await controller.endNow()
+    }
+
+    /// A rapid burst of distinct states must leave the Activity on the LAST
+    /// one. Before serialization, unordered Tasks could land it on an earlier
+    /// value (the stall/stale-content bug).
+    func testRapidUpdatesConvergeToLatestState() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+
+        let id = UUID()
+        let started = Date(timeIntervalSince1970: 2_000_000)
+        func summ(_ agent: String?) -> SessionActivityAttributes.SessionSummary {
+            SessionActivityAttributes.SessionSummary(
+                id: id, name: "race", host: "100.0.0.1", state: "connected",
+                startedAt: started, agentStatus: agent
+            )
+        }
+
+        controller.update(with: [summ("working")])
+        controller.update(with: [summ(nil)])
+        controller.update(with: [summ("working")])
+        controller.update(with: [summ("waiting")])  // last write wins
+
+        let final = await waitForLiveState { $0.sessions.first?.agentStatus == "waiting" }
+        XCTAssertEqual(final?.sessions.first?.agentStatus, "waiting",
+                       "serialized updates must converge to the latest state, never an earlier one")
+
+        await controller.endNow()
+    }
 }
