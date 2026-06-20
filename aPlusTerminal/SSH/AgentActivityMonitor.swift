@@ -35,8 +35,17 @@ final class AgentActivityMonitor {
     private let candidates: [AgentProfile]
     /// Candidates that carry markers — scanned to upgrade `detected`.
     private let markerCandidates: [AgentProfile]
-    /// Whether a markerless ("generic") candidate enables the always-on heuristic.
-    private let genericFallback: Bool
+    /// The burst/quiet heuristic runs whenever ANY agent is configured — not
+    /// just the generic-auto case. Selecting a specific agent must still report
+    /// working/waiting, and status must NOT depend on a marker appearing in the
+    /// output: inside a multiplexer (tmux/zellij), redraws splice cursor/escape
+    /// codes through the text, so a marker like "esc to interrupt" rarely lands
+    /// as a contiguous substring — which previously left a specific-agent session
+    /// with no status for minutes, or ever.
+    private let alwaysActive: Bool
+    /// A single explicitly-chosen agent (no generic fallback): its name is known
+    /// up front, so the label is correct immediately without waiting for a marker.
+    private let explicitAgent: AgentProfile?
 
     private let defaultQuiet: TimeInterval
     private let defaultBurst: Int
@@ -47,13 +56,19 @@ final class AgentActivityMonitor {
     /// Tail of the previous chunk so markers split across reads still match.
     private var carry = ""
 
-    init(candidates: [AgentProfile], quietInterval: TimeInterval = 3, burstThreshold: Int = 200) {
+    init(candidates: [AgentProfile], quietInterval: TimeInterval = 2, burstThreshold: Int = 200) {
         self.candidates = candidates
-        self.markerCandidates = candidates.filter { !$0.detectionMarkers.isEmpty }
-        self.genericFallback = candidates.contains { $0.detectionMarkers.isEmpty }
+        let markers = candidates.filter { !$0.detectionMarkers.isEmpty }
+        let hasGeneric = candidates.contains { $0.detectionMarkers.isEmpty }
+        self.markerCandidates = markers
+        self.alwaysActive = !candidates.isEmpty
+        // Exactly one real agent and no generic fallback ⇒ an explicit pick.
+        let explicit = (!hasGeneric && markers.count == 1 && candidates.count == 1) ? markers[0] : nil
+        self.explicitAgent = explicit
         self.defaultQuiet = quietInterval
         self.defaultBurst = burstThreshold
-        self.agentSeen = genericFallback
+        self.agentSeen = !candidates.isEmpty
+        self.detected = explicit
     }
 
     private var activeQuiet: TimeInterval { detected?.quietInterval ?? defaultQuiet }
@@ -77,8 +92,8 @@ final class AgentActivityMonitor {
     func reset() {
         quietTask?.cancel()
         quietTask = nil
-        agentSeen = genericFallback
-        detected = nil
+        agentSeen = alwaysActive
+        detected = explicitAgent
         burstBytes = 0
         carry = ""
         if status != .none {

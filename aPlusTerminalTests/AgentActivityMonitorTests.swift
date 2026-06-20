@@ -13,49 +13,41 @@ final class AgentActivityMonitorTests: XCTestCase {
     private let generic = AgentProfile(
         id: "generic", displayName: "Agent", detectionMarkers: [], attachTemplate: "{path} ")
 
-    /// Marker-gated monitor (a specific agent selected — no generic fallback).
-    private func gatedMonitor(quietInterval: TimeInterval = 5, burstThreshold: Int = 200) -> AgentActivityMonitor {
+    /// An explicitly-chosen single agent (e.g. user picked "Claude Code").
+    private func explicitMonitor(quietInterval: TimeInterval = 5, burstThreshold: Int = 200) -> AgentActivityMonitor {
         AgentActivityMonitor(candidates: [claudeCode], quietInterval: quietInterval, burstThreshold: burstThreshold)
     }
 
-    func testSilentBeforeAgentMarker() {
-        let monitor = gatedMonitor(quietInterval: 0.05)
-        monitor.observe(bytes(String(repeating: "x", count: 5000)))
-        XCTAssertEqual(monitor.status, .none, "no marker yet — stream volume alone must not trigger")
-        XCTAssertNil(monitor.detected)
+    /// Auto mode: every profile + generic fallback.
+    private func autoMonitor(quietInterval: TimeInterval = 5, burstThreshold: Int = 200) -> AgentActivityMonitor {
+        AgentActivityMonitor(candidates: [claudeCode, hermes, generic], quietInterval: quietInterval, burstThreshold: burstThreshold)
     }
 
-    func testMarkerPlusBurstMeansWorkingAndSetsDetected() {
-        let monitor = gatedMonitor()
-        monitor.observe(bytes("Welcome to Claude Code v2.1\n"))
-        monitor.observe(bytes(String(repeating: "output ", count: 50)))
-        XCTAssertEqual(monitor.status, .working)
+    // MARK: - Explicit agent: status WITHOUT needing a marker (the tmux fix)
+
+    func testExplicitAgentReportsWorkingOnBurstWithoutMarker() {
+        // The regression: a specific agent selected + running inside tmux, where
+        // the marker text is fragmented by redraw escapes and never matches as a
+        // substring. Status must still fire on output, and the name is known up
+        // front (no marker required).
+        let monitor = explicitMonitor()
+        XCTAssertEqual(monitor.detected?.id, "claude-code", "explicit pick names the agent immediately")
+        monitor.observe(bytes(String(repeating: "x", count: 5000)))  // no marker present
+        XCTAssertEqual(monitor.status, .working, "explicit agent must report status without a marker")
         XCTAssertEqual(monitor.detected?.id, "claude-code")
     }
 
-    func testMarkerSplitAcrossChunksStillDetects() {
-        let monitor = gatedMonitor()
-        monitor.observe(bytes("...Clau"))
-        monitor.observe(bytes("de Code session\n"))
-        monitor.observe(bytes(String(repeating: "y", count: 300)))
-        XCTAssertEqual(monitor.status, .working)
-    }
-
     func testKeystrokeEchoesDoNotReadAsWorking() {
-        let monitor = gatedMonitor(burstThreshold: 200)
-        monitor.observe(bytes("esc to interrupt"))
-        for _ in 0..<10 {
-            monitor.observe(bytes("a"))  // user typing a reply
-        }
+        let monitor = explicitMonitor(burstThreshold: 200)
+        for _ in 0..<10 { monitor.observe(bytes("a")) }  // user typing a reply
         XCTAssertEqual(monitor.status, .none, "small echoes must stay below the burst threshold")
     }
 
     func testQuietAfterWorkingMeansWaiting() async {
-        let monitor = gatedMonitor(quietInterval: 0.1)
+        let monitor = explicitMonitor(quietInterval: 0.1)
         var transitions: [AgentActivityMonitor.Status] = []
         monitor.onChange = { transitions.append(monitor.status) }
 
-        monitor.observe(bytes("Claude Code\n"))
         monitor.observe(bytes(String(repeating: "stream", count: 100)))
         XCTAssertEqual(monitor.status, .working)
 
@@ -65,8 +57,7 @@ final class AgentActivityMonitorTests: XCTestCase {
     }
 
     func testNewBurstAfterWaitingReturnsToWorking() async {
-        let monitor = gatedMonitor(quietInterval: 0.1)
-        monitor.observe(bytes("Claude Code\n"))
+        let monitor = explicitMonitor(quietInterval: 0.1)
         monitor.observe(bytes(String(repeating: "a", count: 300)))
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(monitor.status, .waiting)
@@ -75,36 +66,41 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.status, .working)
     }
 
-    func testResetClearsEverything() {
-        let monitor = gatedMonitor()
-        monitor.observe(bytes("Claude Code\n"))
+    func testResetReArmsExplicitAgent() {
+        let monitor = explicitMonitor()
         monitor.observe(bytes(String(repeating: "a", count: 300)))
         XCTAssertEqual(monitor.status, .working)
-        XCTAssertEqual(monitor.detected?.id, "claude-code")
         monitor.reset()
         XCTAssertEqual(monitor.status, .none)
-        XCTAssertNil(monitor.detected)
-        monitor.observe(bytes(String(repeating: "a", count: 5000)))
-        XCTAssertEqual(monitor.status, .none, "marker gate must re-arm after reset")
+        XCTAssertEqual(monitor.detected?.id, "claude-code", "reset re-arms the explicit agent name")
+        monitor.observe(bytes(String(repeating: "a", count: 300)))
+        XCTAssertEqual(monitor.status, .working, "heuristic must re-arm after reset")
     }
 
     // MARK: - Auto mode (multiple candidates + generic fallback)
 
-    func testAutoDetectsHermesByMarker() {
-        let monitor = AgentActivityMonitor(candidates: [claudeCode, hermes, generic], burstThreshold: 200)
+    func testAutoReportsWorkingBeforeAnyMarkerWithGenericName() {
+        // Auto: status fires on a burst even with no marker yet; the name stays
+        // generic (nil → "Agent") until a marker identifies the agent.
+        let monitor = autoMonitor()
+        monitor.observe(bytes(String(repeating: "q", count: 300)))
+        XCTAssertEqual(monitor.status, .working)
+        XCTAssertNil(monitor.detected)
+    }
+
+    func testAutoUpgradesNameOnMarker() {
+        let monitor = autoMonitor()
         monitor.observe(bytes("hermes --tui ready\n"))
         monitor.observe(bytes(String(repeating: "z", count: 300)))
         XCTAssertEqual(monitor.detected?.id, "hermes")
         XCTAssertEqual(monitor.status, .working)
     }
 
-    func testGenericFallbackYieldsWorkingWithoutMarker() {
-        // With a generic candidate, the heuristic runs immediately and reports
-        // working on a burst, but detected stays nil (label → "Agent").
-        let monitor = AgentActivityMonitor(candidates: [claudeCode, generic], burstThreshold: 200)
-        monitor.observe(bytes(String(repeating: "q", count: 300)))
-        XCTAssertEqual(monitor.status, .working)
-        XCTAssertNil(monitor.detected)
+    func testMarkerSplitAcrossChunksStillNamesAgent() {
+        let monitor = autoMonitor()
+        monitor.observe(bytes("...Clau"))
+        monitor.observe(bytes("de Code session\n"))
+        XCTAssertEqual(monitor.detected?.id, "claude-code", "markers split across reads still name the agent")
     }
 
     func testEmptyCandidatesDisablesDetection() {
