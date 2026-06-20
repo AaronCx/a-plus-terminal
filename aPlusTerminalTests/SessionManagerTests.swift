@@ -35,6 +35,25 @@ final class MultiplexerControllerTests: XCTestCase {
         XCTAssertEqual(MultiplexerController.firstTarget(fromOutput: "main\nwork\n"), "main")
         XCTAssertEqual(MultiplexerController.firstTarget(fromOutput: "  spaced  \n"), "spaced")
     }
+
+    func testDiscoveryCommandAugmentsPathForNonLoginExec() {
+        // Regression: target discovery runs over a non-interactive SSH exec
+        // channel whose PATH omits Homebrew/Nix/per-user bins, so a bare
+        // `tmux display-message` is "command not found" → no target → reattach
+        // silently falls back to a fresh shell. The discovery command must
+        // prepend a PATH that covers the usual multiplexer locations.
+        let cmd = MultiplexerController.discoveryCommand(tmux)
+        let c = try! XCTUnwrap(cmd)
+        XCTAssertTrue(c.contains("/opt/homebrew/bin"), "Apple-Silicon Homebrew path must be on PATH")
+        XCTAssertTrue(c.contains("/usr/local/bin"), "Intel Homebrew / common path must be on PATH")
+        XCTAssertTrue(c.contains("$HOME/bin"), "per-user bin must be on PATH")
+        XCTAssertTrue(c.contains("tmux display-message -p '#S'"), "must still run the profile's command")
+        XCTAssertTrue(c.contains("|| true"), "must stay exit-0 when no server/session")
+
+        // A profile with no target command discovers nothing.
+        let none = MultiplexerProfile(id: "none", displayName: "None")
+        XCTAssertNil(MultiplexerController.discoveryCommand(none))
+    }
 }
 
 @MainActor
