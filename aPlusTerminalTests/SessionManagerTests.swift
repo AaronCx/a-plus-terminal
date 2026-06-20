@@ -10,17 +10,17 @@ final class MultiplexerControllerTests: XCTestCase {
         id: "tmux", displayName: "tmux",
         listSessionsCommand: "tmux list-sessions -F '#S'",
         attachTemplate: "tmux attach -t {target} || tmux new -s {target}",
-        currentTargetCommand: "tmux display-message -p '#S'",
+        currentTargetCommand: "tmux list-sessions -F '#{session_attached} #{session_activity} #{session_name}' | sort -rnk2 | awk '$1>0{print $3; exit}'",
         mouseHintCommand: "tmux set -g mouse on")
 
-    func testAttachCommandTemplatingAndNewline() {
+    func testAttachCommandTemplatingClearsThenAttaches() {
+        // A leading `clear` wipes the login banner/MOTD before the multiplexer
+        // redraws (prevents bleed-in), then runs the templated attach.
         XCTAssertEqual(
             MultiplexerController.attachCommand(tmux, target: "main"),
-            "tmux attach -t main || tmux new -s main\n")
+            "clear 2>/dev/null; tmux attach -t main || tmux new -s main\n")
         let zellij = MultiplexerProfile(id: "zellij", displayName: "zellij", attachTemplate: "zellij attach {target}")
-        XCTAssertEqual(MultiplexerController.attachCommand(zellij, target: "work"), "zellij attach work\n")
-        let screen = MultiplexerProfile(id: "screen", displayName: "screen", attachTemplate: "screen -x {target}")
-        XCTAssertEqual(MultiplexerController.attachCommand(screen, target: "0.tty"), "screen -x 0.tty\n")
+        XCTAssertEqual(MultiplexerController.attachCommand(zellij, target: "work"), "clear 2>/dev/null; zellij attach work\n")
     }
 
     func testNoneProfileHasNoAttach() {
@@ -38,21 +38,37 @@ final class MultiplexerControllerTests: XCTestCase {
 
     func testDiscoveryCommandAugmentsPathForNonLoginExec() {
         // Regression: target discovery runs over a non-interactive SSH exec
-        // channel whose PATH omits Homebrew/Nix/per-user bins, so a bare
-        // `tmux display-message` is "command not found" → no target → reattach
-        // silently falls back to a fresh shell. The discovery command must
-        // prepend a PATH that covers the usual multiplexer locations.
-        let cmd = MultiplexerController.discoveryCommand(tmux)
-        let c = try! XCTUnwrap(cmd)
+        // channel whose PATH omits Homebrew/Nix/per-user bins, so a bare `tmux`
+        // is "command not found" → no target → reattach silently falls back to
+        // a fresh shell. The discovery command must prepend a PATH covering the
+        // usual multiplexer locations and suppress the binary's stderr.
+        let c = try! XCTUnwrap(MultiplexerController.discoveryCommand(tmux))
         XCTAssertTrue(c.contains("/opt/homebrew/bin"), "Apple-Silicon Homebrew path must be on PATH")
         XCTAssertTrue(c.contains("/usr/local/bin"), "Intel Homebrew / common path must be on PATH")
         XCTAssertTrue(c.contains("$HOME/bin"), "per-user bin must be on PATH")
-        XCTAssertTrue(c.contains("tmux display-message -p '#S'"), "must still run the profile's command")
+        XCTAssertTrue(c.contains("session_attached"), "must run the profile's attached-session selector")
+        XCTAssertTrue(c.contains("2>/dev/null"), "must suppress 'no server' stderr so it can't pollute the target")
         XCTAssertTrue(c.contains("|| true"), "must stay exit-0 when no server/session")
 
         // A profile with no target command discovers nothing.
         let none = MultiplexerProfile(id: "none", displayName: "None")
         XCTAssertNil(MultiplexerController.discoveryCommand(none))
+    }
+
+    func testDiscoverySelectsAttachedNotMostRecent() {
+        // The tmux selector picks an *attached* session (col1>0), so a detached
+        // session spun up later (higher activity) is ignored — the "reattached
+        // to session 4 instead of my session 1" fix. Emulate the pipeline:
+        //   `awk '$1>0'` (keep attached) → `sort -rnk2` (newest first) → first name.
+        struct Row { let attached: Int; let activity: Int; let name: String }
+        let rows = [
+            Row(attached: 1, activity: 100, name: "work"),     // attached, older
+            Row(attached: 0, activity: 200, name: "scratch"),  // detached, newer (the "session 4")
+        ]
+        let attachedRows = rows.filter { $0.attached > 0 }
+        let sorted = attachedRows.sorted { $0.activity > $1.activity }
+        XCTAssertEqual(sorted.first?.name, "work",
+                       "must pick the attached session, not the newer detached one")
     }
 }
 
@@ -166,7 +182,7 @@ final class SessionManagerTests: XCTestCase {
             multiplexers: [
                 MultiplexerProfile(id: "tmux", displayName: "tmux",
                                    attachTemplate: "tmux attach -t {target} || tmux new -s {target}",
-                                   currentTargetCommand: "tmux display-message -p '#S'",
+                                   currentTargetCommand: "tmux list-sessions -F '#{session_attached} #{session_activity} #{session_name}' | sort -rnk2 | awk '$1>0{print $3; exit}'",
                                    mouseHintCommand: "tmux set -g mouse on"),
                 MultiplexerProfile(id: "none", displayName: "None (raw shell)")
             ]

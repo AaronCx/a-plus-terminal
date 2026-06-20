@@ -56,7 +56,7 @@
       "displayName": "tmux",
       "listSessionsCommand": "tmux list-sessions -F '#S'",
       "attachTemplate": "tmux attach -t {target} || tmux new -s {target}",
-      "currentTargetCommand": "tmux display-message -p '#S'",
+      "currentTargetCommand": "tmux list-sessions -F '#{session_attached} #{session_activity} #{session_name}' | sort -rnk2 | awk '$1>0{print $3; exit}'",
       "mouseHintCommand": "tmux set -g mouse on",
       "builtIn": true
     },
