@@ -64,8 +64,8 @@
       "id": "zellij",
       "displayName": "zellij",
       "listSessionsCommand": "zellij list-sessions -s",
-      "attachTemplate": "zellij attach {target}",
-      "currentTargetCommand": "printf '%s' \"$ZELLIJ_SESSION_NAME\"",
+      "attachTemplate": "zellij attach --create {target}",
+      "currentTargetCommand": null,
       "mouseHintCommand": null,
       "builtIn": true
     },
