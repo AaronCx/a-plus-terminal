@@ -1,12 +1,9 @@
 import SwiftUI
 import StoreKit
 
-/// Settings row (§4.6): single entry point for tips and the supporter
-/// subscription — tapping it opens `SupportScreen`. Shows the badge inline
-/// so supporters see their status without drilling in.
+/// Settings row (§4.6): single entry point for tips — tapping it opens
+/// `SupportScreen`. Nothing is paywalled; tips are a pure thank-you.
 struct SupportCardLink: View {
-    @Environment(TipStore.self) private var store
-
     var body: some View {
         Section {
             NavigationLink {
@@ -19,13 +16,9 @@ struct SupportCardLink: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Support a+Terminal")
                             .font(.body.weight(.medium))
-                        Text("Tips and a supporter subscription — every feature stays free.")
+                        Text("Leave a tip — every feature stays free.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    }
-                    if store.isSupporter {
-                        Spacer()
-                        SupporterBadge()
                     }
                 }
                 .padding(.vertical, 2)
@@ -34,8 +27,7 @@ struct SupportCardLink: View {
     }
 }
 
-/// Support screen: one-time tips and the auto-renewing supporter
-/// subscription in one place. Purely donations — nothing is paywalled.
+/// Support screen: one-time tips only. Purely donations — nothing is paywalled.
 struct SupportScreen: View {
     @Environment(TipStore.self) private var store
 
@@ -43,15 +35,10 @@ struct SupportScreen: View {
         Form {
             Section {
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Label("Support a+Terminal", systemImage: "heart.fill")
-                            .font(.headline)
-                            .foregroundStyle(.pink)
-                        if store.isSupporter {
-                            SupporterBadge()
-                        }
-                    }
-                    Text("a+Terminal is free and collects zero data. If it saves you time, a tip or a supporter subscription helps fund development — neither unlocks anything, ever.")
+                    Label("Support a+Terminal", systemImage: "heart.fill")
+                        .font(.headline)
+                        .foregroundStyle(.pink)
+                    Text("a+Terminal is free and collects zero data. If it saves you time, a tip helps fund development — it unlocks nothing, because nothing is paywalled, ever.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -86,25 +73,13 @@ struct SupportScreen: View {
                             .foregroundStyle(.pink)
                     }
                 }
-
-                Section("Supporter Subscription") {
-                    ForEach(store.subscriptionProducts) { product in
-                        productRow(product, priceLabel: subscriptionPriceLabel(for: product))
-                    }
-                }
             }
 
-            // Always present, independent of product availability: restore
-            // works without a product list, and App Review Guideline 3.1.2
-            // requires the auto-renewal terms and functional Privacy Policy /
-            // Terms of Use links with the subscription UI.
             Section {
-                Button("Restore Purchases") {
-                    Task { await store.restorePurchases() }
-                }
-                .font(.subheadline)
+                Link("Privacy Policy", destination: URL(string: "https://aaroncx.github.io/a-plus-terminal/privacy/")!)
+                    .font(.subheadline)
             } footer: {
-                Text("Subscriptions renew automatically until cancelled. Manage or cancel any time in Settings › Apple Account › Subscriptions. [Privacy Policy](https://aaroncx.github.io/a-plus-terminal/privacy) · [Terms of Use (EULA)](https://www.apple.com/legal/internet-services/itunes/dev/stdeula/)")
+                Text("Tips are one-time purchases. Nothing is paywalled, and nothing renews.")
             }
         }
         .navigationTitle("Support")
@@ -128,28 +103,5 @@ struct SupportScreen: View {
                     .monospacedDigit()
             }
         }
-    }
-
-    private func subscriptionPriceLabel(for product: Product) -> String {
-        guard let period = product.subscription?.subscriptionPeriod else {
-            return product.displayPrice
-        }
-        switch period.unit {
-        case .month: return "\(product.displayPrice)/mo"
-        case .year: return "\(product.displayPrice)/yr"
-        default: return product.displayPrice
-        }
-    }
-}
-
-struct SupporterBadge: View {
-    var body: some View {
-        Text("SUPPORTER")
-            .font(.caption2.weight(.bold))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(.yellow.opacity(0.25), in: Capsule())
-            .foregroundStyle(.orange)
-            .accessibilityLabel("Supporter badge")
     }
 }

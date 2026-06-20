@@ -2,23 +2,21 @@ import Foundation
 import Observation
 import StoreKit
 
-/// Product identifiers for the Tip Jar and Supporter subscription (§4.6).
+/// Product identifiers for the Tip Jar (§4.6). Tips are **consumables** — there
+/// is no subscription, and nothing in the app is ever paywalled.
 /// Must match App Store Connect and aPlusTerminal.storekit.
 enum StoreProducts {
     static let tipSmall = "com.aaroncx.aplusterminal.tip.small"
     static let tipMedium = "com.aaroncx.aplusterminal.tip.medium"
     static let tipLarge = "com.aaroncx.aplusterminal.tip.large"
-    static let supporterMonthly = "com.aaroncx.aplusterminal.supporter.monthly"
-    static let supporterYearly = "com.aaroncx.aplusterminal.supporter.yearly"
 
     static let tips = [tipSmall, tipMedium, tipLarge]
-    static let subscriptions = [supporterMonthly, supporterYearly]
-    static let all = tips + subscriptions
+    static let all = tips
 }
 
-/// StoreKit 2 front-end: loads products, performs purchases, tracks the
-/// supporter entitlement, listens for transaction updates. No receipts ever
-/// leave the device beyond Apple's own infrastructure.
+/// StoreKit 2 front-end for the Tip Jar: loads consumable tip products,
+/// performs purchases, and surfaces a brief thank-you. No receipts ever leave
+/// the device beyond Apple's own infrastructure.
 @MainActor
 @Observable
 final class TipStore {
@@ -30,9 +28,6 @@ final class TipStore {
 
     private(set) var loadState: LoadState = .loading
     private(set) var tipProducts: [Product] = []
-    private(set) var subscriptionProducts: [Product] = []
-    /// True when a supporter subscription is active — shows the badge (§4.6).
-    private(set) var isSupporter = false
     /// Set briefly after a successful tip for a thank-you moment.
     var lastTipThanked = false
 
@@ -57,16 +52,7 @@ final class TipStore {
             tipProducts = products
                 .filter { StoreProducts.tips.contains($0.id) }
                 .sorted { $0.price < $1.price }
-            subscriptionProducts = products
-                .filter { StoreProducts.subscriptions.contains($0.id) }
-                .sorted { $0.price < $1.price }
-            loadState = Self.postLoadState(
-                tipCount: tipProducts.count,
-                subscriptionCount: subscriptionProducts.count
-            )
-            if loadState == .loaded {
-                await refreshSupporterStatus()
-            }
+            loadState = Self.postLoadState(tipCount: tipProducts.count)
         } catch {
             loadState = .failed("Couldn't load products: \(error.localizedDescription)")
         }
@@ -92,16 +78,11 @@ final class TipStore {
     /// (transient hiccup right after launch). Treating that as "loaded"
     /// would latch an empty screen forever — every view .task guards on
     /// != .loaded, so nothing would ever retry.
-    static func postLoadState(tipCount: Int, subscriptionCount: Int) -> LoadState {
-        if tipCount == 0 && subscriptionCount == 0 {
+    static func postLoadState(tipCount: Int) -> LoadState {
+        if tipCount == 0 {
             return .failed("The App Store didn't return any products. Check your connection and try again.")
         }
         return .loaded
-    }
-
-    func restorePurchases() async {
-        try? await AppStore.sync()
-        await refreshSupporterStatus()
     }
 
     private func process(_ verification: VerificationResult<Transaction>) async {
@@ -110,18 +91,5 @@ final class TipStore {
             lastTipThanked = true
         }
         await transaction.finish()
-        await refreshSupporterStatus()
-    }
-
-    func refreshSupporterStatus() async {
-        var active = false
-        for await entitlement in Transaction.currentEntitlements {
-            if case .verified(let transaction) = entitlement,
-               StoreProducts.subscriptions.contains(transaction.productID),
-               transaction.revocationDate == nil {
-                active = true
-            }
-        }
-        isSupporter = active
     }
 }

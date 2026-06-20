@@ -10,11 +10,7 @@ final class StoreProductsTests: XCTestCase {
             "com.aaroncx.aplusterminal.tip.medium",
             "com.aaroncx.aplusterminal.tip.large",
         ])
-        XCTAssertEqual(StoreProducts.subscriptions, [
-            "com.aaroncx.aplusterminal.supporter.monthly",
-            "com.aaroncx.aplusterminal.supporter.yearly",
-        ])
-        XCTAssertEqual(StoreProducts.all.count, 5)
+        XCTAssertEqual(StoreProducts.all.count, 3, "tips only — no subscription")
     }
 
     // NOTE: a TipStore.load() happy-path test via StoreKitTest.SKTestSession
@@ -29,14 +25,12 @@ final class StoreProductsTests: XCTestCase {
     /// until the app is force-quit.
     @MainActor
     func testEmptyProductResponseIsFailureNotLoaded() {
-        if case .failed = TipStore.postLoadState(tipCount: 0, subscriptionCount: 0) {
+        if case .failed = TipStore.postLoadState(tipCount: 0) {
             // expected
         } else {
             XCTFail("empty product response must map to .failed, not .loaded")
         }
-        XCTAssertEqual(TipStore.postLoadState(tipCount: 3, subscriptionCount: 2), .loaded)
-        // Partial results still render whatever arrived.
-        XCTAssertEqual(TipStore.postLoadState(tipCount: 3, subscriptionCount: 0), .loaded)
+        XCTAssertEqual(TipStore.postLoadState(tipCount: 3), .loaded)
     }
 
     func testStoreKitConfigurationListsEveryProduct() throws {

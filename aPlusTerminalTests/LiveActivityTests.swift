@@ -86,3 +86,35 @@ final class SessionActivityControllerTests: XCTestCase {
         XCTAssertEqual(controller.lastPushedState?.activeCount, 2, "new sessions must produce live content after a zero state")
     }
 }
+
+/// Regression coverage for the agent label leaking onto a session that is no
+/// longer connected (the "Live Activity didn't update when the connection
+/// closed" bug). The gating lives in `resolvedAgentStatus`; `SessionManager`
+/// routes every summary through it.
+final class ResolvedAgentStatusTests: XCTestCase {
+    func testConnectedSessionKeepsAgentStatus() {
+        XCTAssertEqual(
+            SessionActivityAttributes.resolvedAgentStatus(sessionState: "connected", monitorStatus: "working"),
+            "working"
+        )
+        XCTAssertEqual(
+            SessionActivityAttributes.resolvedAgentStatus(sessionState: "connected", monitorStatus: "waiting"),
+            "waiting"
+        )
+    }
+
+    func testNonConnectedSessionDropsAgentStatus() {
+        for state in ["reconnecting", "suspended", "connecting", "closed"] {
+            XCTAssertNil(
+                SessionActivityAttributes.resolvedAgentStatus(sessionState: state, monitorStatus: "working"),
+                "\(state) must not surface a stale agent label"
+            )
+        }
+    }
+
+    func testNoDetectionStaysNil() {
+        XCTAssertNil(
+            SessionActivityAttributes.resolvedAgentStatus(sessionState: "connected", monitorStatus: nil)
+        )
+    }
+}

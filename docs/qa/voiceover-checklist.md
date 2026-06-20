@@ -17,7 +17,6 @@ Status from the PR 12 audit. Re-verify on device with VoiceOver on
 | Waveform | "Microphone level" | DictationSheet |
 | Font sliders | Visible text labels via `Slider(label:)` | SettingsScreen |
 | Terminal preview | "Terminal font preview" | SettingsScreen |
-| Supporter badge | "Supporter badge" | TipJarView |
 | tmux hint dismiss | "Dismiss Hint" | TmuxMouseHintBanner |
 
 ## Reads correctly via visible text (no extra labels needed)
