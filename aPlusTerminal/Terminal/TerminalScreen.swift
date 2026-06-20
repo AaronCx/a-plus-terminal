@@ -52,6 +52,7 @@ struct TerminalScreen: View {
                     // us). Reconnect queries the *live* sessions, then attaches
                     // or shows the picker — so the choices are never stale.
                     SessionPausedView(
+                        reattachEnabled: session.reattachEnabled,
                         onReconnect: { Task { await session.reconnectChoosingSession() } },
                         onFreshShell: { Task { await session.reconnect(attachTo: nil) } },
                         onClose: {
@@ -198,6 +199,10 @@ struct TmuxMouseHintBanner: View {
 /// app, so the socket was suspended). The server-side session survives; the
 /// user chooses how to come back — reattach the multiplexer or a fresh shell.
 struct SessionPausedView: View {
+    /// Whether the reattach feature is on ("Auto-reattach multiplexer"). When
+    /// off, Reconnect lands in a fresh shell, so the separate "New Shell" button
+    /// would be redundant and is hidden.
+    var reattachEnabled: Bool
     var onReconnect: () -> Void
     var onFreshShell: () -> Void
     var onClose: () -> Void
@@ -209,7 +214,9 @@ struct SessionPausedView: View {
                 .foregroundStyle(.secondary)
             Text("Session Paused")
                 .font(.headline)
-            Text("iOS paused this connection in the background. Your work is still running on the server.")
+            Text(reattachEnabled
+                 ? "iOS paused this connection in the background. Your work is still running on the server."
+                 : "iOS paused this connection in the background. Reconnect when you're ready.")
                 .font(.callout)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -218,10 +225,12 @@ struct SessionPausedView: View {
                     Label("Reconnect", systemImage: "arrow.uturn.backward").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                Button(action: onFreshShell) {
-                    Label("New Shell", systemImage: "plus.square").frame(maxWidth: .infinity)
+                if reattachEnabled {
+                    Button(action: onFreshShell) {
+                        Label("New Shell", systemImage: "plus.square").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
                 Button("Close", role: .cancel, action: onClose)
                     .frame(maxWidth: .infinity)
             }

@@ -257,11 +257,15 @@ final class TerminalSession: Identifiable, Hashable {
         case choose            // query live sessions, then attach one / offer a fresh picker
     }
 
-    /// Initial connection; also the retry path for a failed first connect.
+    /// Initial connection for a freshly-opened session: always a fresh shell,
+    /// never an auto-reattach. Opening a server is "give me a new terminal";
+    /// reattaching is for *resuming* after a drop (the reconnect paths), not for
+    /// a deliberate new session. (Otherwise every new session lands in the last
+    /// tmux — the "it booted me into session 1/12" bug.)
     func connect() async {
         guard state == .connecting || state == .suspended else { return }
         state = .connecting
-        await attemptLoop(maxAttempts: 1, intent: .auto)
+        await attemptLoop(maxAttempts: 1, intent: .freshShell)
     }
 
     /// Reconnect contract (§4.1): exponential backoff 0.5s → 1s → 2s.
@@ -283,10 +287,15 @@ final class TerminalSession: Identifiable, Hashable {
     /// Reconnect, then decide from the *live* session list: attach the only one,
     /// or surface a fresh picker if several exist. The paused card's "Reconnect"
     /// uses this so the choices are never stale (a session closed since the drop
-    /// won't appear).
+    /// won't appear). Honors the "Auto-reattach multiplexer" master switch — when
+    /// it's off, reconnecting lands in a fresh shell and never reattaches.
     func reconnectChoosingSession(maxAttempts: Int = 3) async {
-        await reconnect(intent: .choose, maxAttempts: maxAttempts)
+        await reconnect(intent: reattachEnabled ? .choose : .freshShell, maxAttempts: maxAttempts)
     }
+
+    /// The "Auto-reattach multiplexer" setting: the master on/off for the whole
+    /// reattach feature (auto on connect/drop AND the paused-card picker).
+    var reattachEnabled: Bool { settings.autoReattachMultiplexer }
 
     private func reconnect(intent: ReattachIntent, maxAttempts: Int) async {
         guard state == .suspended || state == .reconnecting else { return }

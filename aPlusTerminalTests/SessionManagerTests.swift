@@ -287,26 +287,42 @@ final class SessionManagerTests: XCTestCase {
         try await waitFor("session to close") { session.state == .closed }
     }
 
-    func testShellExitClosesSessionInsteadOfReconnecting() async throws {
+    func testFreshOpenIsAShellNotAReattach() async throws {
+        // Opening a server is "new terminal": even with a recorded target and
+        // auto-reattach on, the fresh open must NOT reattach (the "it booted me
+        // into session 1/12" bug). Reattach is for resuming after a drop.
         settings.autoReattachMultiplexer = true
         let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))
         try await waitFor("session to connect") { session.state == .connected }
-        // The reconnect contract sends the multiplexer attach on every
-        // (re)connect when a target is recorded — including this first connect.
-        try await waitFor("attach after connect") { shell.received.contains("tmux attach -t main") }
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertFalse(shell.received.contains("tmux attach"),
+                       "a freshly-opened session must land in a fresh shell, not reattach")
+    }
+
+    func testShellExitClosesSessionInsteadOfReconnecting() async throws {
+        let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))
+        try await waitFor("session to connect") { session.state == .connected }
 
         // The shell ending cleanly (the user typed `exit`) must close the
-        // session — not resurrect it. (Transport errors still reconnect;
-        // that path is covered by the suspend/foreground test, since the
-        // in-process server can only end channels cleanly.)
+        // session — not resurrect/reattach it.
         session.sendInput(Data("DROP-CHANNEL\n".utf8))
         try await waitFor("session to close after shell exit", timeout: 15) {
             session.state == .closed && self.manager.sessions.isEmpty
         }
-        XCTAssertEqual(
-            shell.received.components(separatedBy: "tmux attach -t main").count, 2,
-            "no reconnect attach may follow a clean shell exit"
-        )
+        XCTAssertFalse(shell.received.contains("tmux attach"),
+                       "a clean shell exit must never trigger a reattach")
+    }
+
+    func testReconnectReattachesWhenEnabled() async throws {
+        // After a drop, reconnect (.auto) DOES reattach the recorded session
+        // when the toggle is on — the resume-after-disconnect behavior.
+        settings.autoReattachMultiplexer = true
+        let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))
+        try await waitFor("session to connect") { session.state == .connected }
+        await session.suspend()
+        await session.reconnect(maxAttempts: 1)   // .auto → reattach best guess
+        XCTAssertEqual(session.state, .connected)
+        try await waitFor("reattach on reconnect") { self.shell.received.contains("tmux attach -t main") }
     }
 
     func testWindowSizeReplayedAfterConnect() async throws {
@@ -341,19 +357,30 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(session.state, .connected)
     }
 
+    func testAutoReattachToggleOffSkipsReattachOnReconnect() async throws {
+        // Master switch off → even a reconnect (.auto) must NOT reattach.
+        settings.autoReattachMultiplexer = false
+        let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))
+        try await waitFor("session to connect") { session.state == .connected }
+        XCTAssertFalse(session.reattachEnabled, "toggle off → reattach disabled")
+        await session.suspend()
+        await session.reconnect(maxAttempts: 1)   // .auto, but toggle off
+        XCTAssertEqual(session.state, .connected)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(shell.received.contains("tmux attach"),
+                       "with auto-reattach off, reconnect must not reattach")
+    }
+
     func testReconnectFreshShellSkipsReattach() async throws {
         settings.autoReattachMultiplexer = true
         let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))
         try await waitFor("session to connect") { session.state == .connected }
-        try await waitFor("initial attach") { self.shell.received.contains("tmux attach -t main") }
-        let attachesBefore = self.shell.received.components(separatedBy: "tmux attach -t main").count
-
         await session.suspend()
-        // "Fresh shell" must reconnect WITHOUT sending another attach.
+        // Explicit "fresh shell" reconnect must not reattach.
         await session.reconnect(attachTo: nil, maxAttempts: 1)
         XCTAssertEqual(session.state, .connected)
-        let attachesAfter = self.shell.received.components(separatedBy: "tmux attach -t main").count
-        XCTAssertEqual(attachesAfter, attachesBefore, "fresh-shell reconnect must not reattach the multiplexer")
+        XCTAssertFalse(shell.received.contains("tmux attach"),
+                       "fresh-shell reconnect must not reattach the multiplexer")
     }
 
     func testReconnectAttachesToTheChosenSession() async throws {
