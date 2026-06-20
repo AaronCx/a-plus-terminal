@@ -72,9 +72,9 @@
     {
       "id": "screen",
       "displayName": "screen",
-      "listSessionsCommand": "screen -ls",
-      "attachTemplate": "screen -x {target}",
-      "currentTargetCommand": "printf '%s' \"$STY\"",
+      "listSessionsCommand": "screen -ls | grep -oE '[0-9]+\\.[^[:space:]]+'",
+      "attachTemplate": "screen -r {target} || screen -x {target}",
+      "currentTargetCommand": "screen -ls | grep -E '\\(Attached\\)' | grep -oE '[0-9]+\\.[^[:space:]]+' | head -1",
       "mouseHintCommand": null,
       "builtIn": true
     },

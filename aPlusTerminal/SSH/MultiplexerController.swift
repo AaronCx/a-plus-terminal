@@ -55,14 +55,14 @@ enum MultiplexerController {
         guard let command = listCommand(mux), mux.attachTemplate != nil else { return [] }
         guard let output = try? await connection.runCommand(command) else { return [] }
         return output.split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
 
     /// Pure parser (testable): first non-blank trimmed line, or nil.
     static func firstTarget(fromOutput output: String) -> String? {
         for line in output.split(whereSeparator: \.isNewline) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { return trimmed }
         }
         return nil
