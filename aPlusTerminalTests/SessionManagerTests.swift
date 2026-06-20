@@ -94,6 +94,20 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertNotNil(store.multiplexer(id: "tmux"), "bundled tmux still present")
     }
 
+    func testBundledMultiplexersCanListAndAttach() {
+        // Guards the shipped profiles.json: every multiplexer that offers a
+        // reconnect picker needs both a list and an attach command.
+        let store = ProfileStore()
+        for id in ["tmux", "screen", "zellij"] {
+            let m = store.multiplexer(id: id)
+            XCTAssertNotNil(m, "\(id) profile must ship")
+            XCTAssertNotNil(m?.listSessionsCommand, "\(id) must list sessions for the picker")
+            XCTAssertNotNil(m?.attachTemplate, "\(id) must support attach")
+        }
+        // `none` is intentionally inert.
+        XCTAssertNil(store.multiplexer(id: "none")?.attachTemplate)
+    }
+
     func testAttachTemplatePerAgent() {
         let aider = AgentProfile(id: "aider", displayName: "aider", detectionMarkers: ["aider"], attachTemplate: "/add {path}\n")
         XCTAssertEqual(aider.formatAttachment(path: "/x/y.png"), "/add /x/y.png\n")
