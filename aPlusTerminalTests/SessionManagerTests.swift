@@ -341,6 +341,18 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(session.state, .connected)
     }
 
+    func testAutoReattachToggleOffSkipsReattach() async throws {
+        // The "Auto-reattach multiplexer" master switch off → connecting must
+        // NOT reattach the recorded session, even though one exists.
+        settings.autoReattachMultiplexer = false
+        let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))
+        try await waitFor("session to connect") { session.state == .connected }
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(session.reattachEnabled, "toggle off → reattach disabled")
+        XCTAssertFalse(self.shell.received.contains("tmux attach -t main"),
+                       "with auto-reattach off, connect must land in a fresh shell")
+    }
+
     func testReconnectFreshShellSkipsReattach() async throws {
         settings.autoReattachMultiplexer = true
         let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))

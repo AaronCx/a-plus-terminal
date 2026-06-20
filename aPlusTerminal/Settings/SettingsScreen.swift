@@ -80,7 +80,7 @@ struct SettingsScreen: View {
                 } header: {
                     Text("Scrolling & Behavior")
                 } footer: {
-                    Text("Swipes scroll your multiplexer and agent output natively when the app requests mouse reporting. Dictation is processed entirely on this device.")
+                    Text("Auto-reattach multiplexer: when a connection resumes, return to your running session (tmux/zellij/screen) instead of a fresh shell — picking from your live sessions when more than one is open. Off = always a fresh shell. Swipes scroll natively when the app requests mouse reporting; dictation is processed entirely on this device.")
                 }
 
                 Section("SSH Keys") {
