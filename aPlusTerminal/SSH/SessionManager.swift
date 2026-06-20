@@ -31,7 +31,12 @@ final class TerminalSession: Identifiable, Hashable {
     let startedAt = Date()
     private(set) var server: Server
     private(set) var state: SessionState = .connecting {
-        didSet { if oldValue != state { onStateChange?() } }
+        didSet {
+            guard oldValue != state else { return }
+            onStateChange?()
+            // Keepalive runs only while genuinely connected.
+            if state == .connected { startKeepalive() } else { stopKeepalive() }
+        }
     }
     private(set) var lastError: String?
     /// SessionManager hook for Live Activity updates (§4.5).
@@ -55,6 +60,12 @@ final class TerminalSession: Identifiable, Hashable {
     private var scrollBridge: ScrollBridge?
     private var pumpTask: Task<Void, Never>?
     private var reconnectLoop: Task<Void, Never>?
+    private var keepaliveTask: Task<Void, Never>?
+    /// Idle SSH keepalive cadence. A foreground PTY with no typing produces no
+    /// traffic, so NAT/router/server idle timeouts (often only a few minutes)
+    /// silently drop the connection; we tick well under that. Citadel has no
+    /// built-in keepalive, so this is app-level.
+    static let keepaliveInterval: TimeInterval = 60
     private(set) var lastRequestedSize: (cols: Int, rows: Int)?
 
     /// Outbound writes (keystrokes, resizes) flow through one FIFO stream
@@ -159,6 +170,30 @@ final class TerminalSession: Identifiable, Hashable {
         guard let target = await TmuxIntegration.currentTarget(on: connection) else { return }
         server.lastTmuxTarget = target
         serverStore.update(server)
+    }
+
+    /// Periodic SSH keepalive + tmux-target refresh while connected. Running
+    /// `tmux list-sessions` on a side channel generates traffic that resets the
+    /// connection's NAT/idle timer (so an idle foreground session doesn't drop
+    /// after a few minutes) AND keeps `lastTmuxTarget` current, so any later
+    /// reconnect reattaches to the live tmux session instead of dropping into a
+    /// fresh login shell. Recording must happen *while still attached* — once the
+    /// socket drops, tmux reads the session as detached and it can't be identified.
+    private func startKeepalive() {
+        keepaliveTask?.cancel()
+        let interval = Self.keepaliveInterval
+        keepaliveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled, let self, self.state == .connected else { return }
+                await self.recordTmuxTarget()
+            }
+        }
+    }
+
+    private func stopKeepalive() {
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
     }
 
     func close() async {
