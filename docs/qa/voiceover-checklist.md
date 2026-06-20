@@ -22,7 +22,7 @@ Status from the PR 12 audit. Re-verify on device with VoiceOver on
 ## Reads correctly via visible text (no extra labels needed)
 
 - Settings toggles (Toggle uses its title), theme picker, legal links,
-  support link, tip/subscription product buttons (name + price),
+  support link, tip product buttons (name + price),
   server rows (name + user@host), session rows (name + start time).
 
 ## Known limitations (V1)

@@ -5,8 +5,9 @@ auto-scaled from them. Capture in the simulator (`Cmd+S`) or on device.
 
 ## Shot list (in display order)
 
-- [ ] 1. Terminal session running Claude Code inside tmux (the hero shot) —
-      caption: "Claude Code, in your pocket"
+- [x] 1. Terminal session running a CLI agent inside tmux (the hero shot) —
+      caption: "Your AI agent, in your pocket" (brand-neutral — no third-party
+      trademark in the marketing caption, per Guideline 5.2.1; uploaded to ASC)
 - [ ] 2. Mid-scroll transcript with momentum — caption: "Scrolling that
       finally works in tmux"
 - [ ] 3. Dictation sheet with live waveform + transcript — caption: "Speak

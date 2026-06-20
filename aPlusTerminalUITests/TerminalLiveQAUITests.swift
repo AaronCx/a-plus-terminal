@@ -244,29 +244,38 @@ final class TerminalLiveQAUITests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["APLUSTERMINAL_SCREENSHOTS"] == "1")
         openSession()
 
-        // Scene: terminal + keyboard + accessory bar (C-b visible)
-        type("clear\n")
-        shot("shot-05-keyboard")
-
-        // Scene: tmux running Claude Code's CLI (the hero)
+        // Hero: a real tmux session with a generic, colorful dev command —
+        // brand-neutral (no third-party CLI), shows tmux + SSH on a phone.
         type("tmux kill-session -t shots 2>/dev/null; tmux new -s shots\n", settle: 4)
-        type("export PATH=$PATH:$HOME/.local/bin; clear; claude --help\n", settle: 5)
-        shot("shot-01-hero-tmux-claude")
+        type("clear; git -C ~/Developer/github/a-plus-terminal log --graph --oneline -16 --color=always 2>/dev/null || ls -la\n", settle: 4)
+        shot("shot-01-hero")
 
-        // Scene: scrollable output
-        type("clear; seq 1 40\n", settle: 3)
+        // Scrollable output
+        type("clear; seq 1 80\n", settle: 3)
         shot("shot-02-scroll")
-        type("tmux kill-session 2>/dev/null\n", settle: 2)
 
-        // Scene: sessions + servers list
+        // Clean terminal + accessory bar (paperclip attach, mic, keyboard)
+        type("clear; echo 'a+Terminal — SSH + tmux + any CLI agent'\n", settle: 2)
+        shot("shot-06-terminal")
+        type("tmux kill-session -t shots 2>/dev/null\n", settle: 2)
+
+        // Sessions + servers list
         app.navigationBars.buttons.firstMatch.tap()
         sleep(2)
         shot("shot-03-list")
 
-        // Scene: settings with the tip jar (StoreKit config loads products)
+        // Settings — top: Support / Tip jar + privacy posture
         app.buttons["Settings"].tap()
-        sleep(4)
-        shot("shot-04-settings")
+        sleep(3)
+        shot("shot-04-tipjar")
+
+        // Settings — Agent & Multiplexer pickers (the build-13 agent-agnostic
+        // feature). Scroll down to reveal the section.
+        app.swipeUp()
+        sleep(1)
+        app.swipeUp()
+        sleep(2)
+        shot("shot-05-agentmux")
     }
 
     func testTmuxTypingKeyboardCycleAndAppSwitch() {

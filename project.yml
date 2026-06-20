@@ -129,7 +129,7 @@ schemes:
         aPlusTerminal: all
     run:
       config: Debug
-      # Local StoreKit config so tips/subscriptions are testable in the
+      # Local StoreKit config so the tips are testable in the
       # simulator without App Store Connect.
       storeKitConfiguration: aPlusTerminal.storekit
     test:
