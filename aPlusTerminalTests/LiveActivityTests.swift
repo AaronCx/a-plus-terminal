@@ -261,4 +261,40 @@ final class SessionActivityRuntimeTests: XCTestCase {
 
         await controller.endNow()
     }
+
+    /// A connected-but-idle session (no further state/agent events) must not
+    /// slide past the stale window: the heartbeat re-pushes current content with
+    /// a fresh staleDate. When the Activity ends, the heartbeat must stop.
+    func testHeartbeatKeepsIdleActivityFresh() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController(heartbeatInterval: 0.2)
+        await controller.endNow()
+
+        let s = SessionActivityAttributes.SessionSummary(
+            id: UUID(), name: "idle", host: "100.0.0.1", state: "connected",
+            startedAt: Date(timeIntervalSince1970: 3_000_000), agentStatus: nil
+        )
+        controller.update(with: [s])  // starts the Activity + heartbeat
+        let pushesAfterStart = controller.pushCount
+        let staleAfterStart = Activity<SessionActivityAttributes>.activities.first?.content.staleDate
+
+        // No further update(with:) calls — only the heartbeat should fire.
+        try await Task.sleep(nanoseconds: 700_000_000)  // ~3 heartbeat ticks
+        XCTAssertGreaterThan(controller.pushCount, pushesAfterStart,
+                             "heartbeat must re-push to keep an idle Activity alive")
+        let staleNow = Activity<SessionActivityAttributes>.activities.first?.content.staleDate
+        if let a = staleAfterStart, let b = staleNow {
+            XCTAssertGreaterThan(b, a, "heartbeat must advance the staleDate")
+        }
+
+        // Once the Activity ends, the heartbeat must stop firing.
+        await controller.endNow()
+        let pushesAfterEnd = controller.pushCount
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(controller.pushCount, pushesAfterEnd,
+                       "heartbeat must stop after the Activity ends")
+    }
 }
