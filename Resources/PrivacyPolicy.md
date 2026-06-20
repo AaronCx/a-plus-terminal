@@ -10,6 +10,8 @@
 
 The only network traffic a+Terminal produces is the SSH connection **you** initiate to **your own** servers. That traffic is end-to-end encrypted with standard SSH and goes directly from your iPhone to your server — never through us, because there is no "us" in the middle.
 
+**Attaching an image or file** sends the selected item over that same existing SSH connection to your own server; it is sent nowhere else.
+
 **Voice dictation** is transcribed entirely on your iPhone using Apple's on-device speech recognition. a+Terminal refuses to run dictation if on-device recognition is unavailable — it never falls back to cloud transcription.
 
 **Your keys and servers** stay on your device: SSH private keys live in the iOS Keychain (this device only, excluded from backups; they leave the Keychain only when you explicitly reveal, copy, or export them in Manage Keys), and your server list is a local file containing no secrets.

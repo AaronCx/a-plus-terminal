@@ -168,6 +168,41 @@ actor SSHConnection {
         return String(buffer: buffer)
     }
 
+    /// Uploads `data` to the per-user inbox under `filename` over SFTP — a
+    /// separate channel on the same authenticated session, so it overlaps the
+    /// PTY without disturbing it. Returns the absolute remote path (agents read
+    /// the literal string and won't expand `~`). The inbox is private (0700)
+    /// and files are owner-only (0600). Filenames are generated collision-free
+    /// and space-free upstream, so the returned path needs no quoting.
+    func uploadToInbox(_ data: Data, filename: String) async throws -> String {
+        guard let client else { throw SSHConnectionError.notConnected }
+        let sftp = try await client.openSFTP()
+        defer { Task { try? await sftp.close() } }
+
+        let dir = ".aplusterminal-inbox"
+        var dirAttrs = SFTPFileAttributes()
+        dirAttrs.permissions = 0o700
+        // Best-effort: already-exists is fine; a real failure surfaces on open.
+        try? await sftp.createDirectory(atPath: dir, attributes: dirAttrs)
+
+        let path = "\(dir)/\(filename)"
+        var fileAttrs = SFTPFileAttributes()
+        fileAttrs.permissions = 0o600
+        let file = try await sftp.openFile(
+            filePath: path,
+            flags: [.create, .write, .truncate],
+            attributes: fileAttrs
+        )
+        do {
+            try await file.write(ByteBuffer(bytes: data))
+            try await file.close()
+        } catch {
+            try? await file.close()
+            throw error
+        }
+        return (try? await sftp.getRealPath(atPath: path)) ?? path
+    }
+
     func resize(cols: Int, rows: Int) async throws {
         guard let writer else { throw SSHConnectionError.notConnected }
         try await writer.changeSize(cols: cols, rows: rows, pixelWidth: 0, pixelHeight: 0)
