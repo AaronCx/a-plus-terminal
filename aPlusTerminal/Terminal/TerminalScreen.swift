@@ -1,4 +1,6 @@
 import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
 
 /// Full-screen terminal for one session: emulator + accessory bar, with
 /// state overlays for connecting / reconnecting / suspended.
@@ -10,15 +12,18 @@ struct TerminalScreen: View {
     let session: TerminalSession
 
     @State private var showDictation = false
+    @State private var showPhotoPicker = false
+    @State private var showFileImporter = false
+    @State private var pickedPhoto: PhotosPickerItem?
 
     var body: some View {
         ZStack {
             TerminalHostView(session: session, fontSize: theme.terminalFontSize)
 
-            if session.showTmuxMouseHint {
+            if session.showMultiplexerHint {
                 VStack {
                     TmuxMouseHintBanner {
-                        session.showTmuxMouseHint = false
+                        session.showMultiplexerHint = false
                     }
                     Spacer()
                 }
@@ -34,11 +39,26 @@ struct TerminalScreen: View {
                     ProgressView("Reconnecting…")
                 }
             case .suspended:
-                ConnectionFailureView(message: session.lastError ?? "Disconnected.") {
-                    Task { await session.reconnect(maxAttempts: 1) }
-                } onClose: {
-                    sessionManager.close(session)
-                    dismiss()
+                if let error = session.lastError {
+                    // An actual connection failure (host-key mismatch, auth, …).
+                    ConnectionFailureView(message: error) {
+                        Task { await session.reconnect(maxAttempts: 1) }
+                    } onClose: {
+                        sessionManager.close(session)
+                        dismiss()
+                    }
+                } else {
+                    // Cleanly paused (backgrounded long enough that iOS froze
+                    // us). Let the user pick how to come back.
+                    SessionPausedView(
+                        target: session.reattachTarget,
+                        onReattach: { Task { await session.reconnect(reattachMultiplexer: true) } },
+                        onFreshShell: { Task { await session.reconnect(reattachMultiplexer: false) } },
+                        onClose: {
+                            sessionManager.close(session)
+                            dismiss()
+                        }
+                    )
                 }
             case .connected, .closed:
                 EmptyView()
@@ -47,16 +67,45 @@ struct TerminalScreen: View {
         .navigationTitle(session.server.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
+        .overlay(alignment: .top) {
+            if session.isAttaching {
+                uploadingIndicator
+            }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if session.state == .connected {
-                KeyAccessoryBar(bridge: session.bridge) {
-                    showDictation = true
-                }
+                KeyAccessoryBar(
+                    bridge: session.bridge,
+                    onMic: { showDictation = true },
+                    onAttachPhoto: { showPhotoPicker = true },
+                    onAttachFile: { showFileImporter = true }
+                )
             }
         }
         .sheet(isPresented: $showDictation) {
             DictationSheet { text, appendReturn in
                 session.sendInput(Data((appendReturn ? text + "\n" : text).utf8))
+            }
+        }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $pickedPhoto, matching: .images)
+        .onChange(of: pickedPhoto) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "png"
+                    await session.attach(data, suggestedName: "shot.\(ext)", kind: .image)
+                }
+                pickedPhoto = nil
+            }
+        }
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item]) { result in
+            guard case .success(let url) = result else { return }
+            Task {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                if let data = try? Data(contentsOf: url) {
+                    await session.attach(data, suggestedName: url.lastPathComponent, kind: .file)
+                }
             }
         }
         .onChange(of: session.state) { _, newState in
@@ -72,13 +121,28 @@ struct TerminalScreen: View {
             case .connected:
                 session.bridge.focus()
             case .suspended:
-                // Arriving via Live Activity tap or session list: reconnect
-                // immediately rather than waiting for user input (§4.5).
-                Task { await session.reconnect() }
+                // Arriving via Live Activity tap or session list at a paused
+                // session: show the reattach-vs-fresh choice (the .suspended
+                // card) rather than silently reconnecting for them.
+                break
             default:
                 break
             }
         }
+    }
+
+    private var uploadingIndicator: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+            Text("Uploading…")
+                .font(.subheadline.weight(.medium))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: Capsule())
+        .padding(.top, 8)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .accessibilityLabel("Uploading attachment")
     }
 
     private func statusCard(@ViewBuilder content: () -> some View) -> some View {
@@ -118,6 +182,64 @@ struct TmuxMouseHintBanner: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .padding(.horizontal, 12)
         .padding(.top, 6)
+    }
+}
+
+/// Shown when a session was cleanly paused in the background (iOS froze the
+/// app, so the socket was suspended). The server-side session survives; the
+/// user chooses how to come back — reattach the multiplexer or a fresh shell.
+struct SessionPausedView: View {
+    /// The multiplexer session available to reattach, or nil if none.
+    let target: String?
+    var onReattach: () -> Void
+    var onFreshShell: () -> Void
+    var onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "pause.circle.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(.secondary)
+            Text("Session Paused")
+                .font(.headline)
+            Text(target == nil
+                 ? "iOS paused this connection in the background. Reconnect when you're ready."
+                 : "iOS paused this connection in the background. Your session is still running on the server.")
+                .font(.callout)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            VStack(spacing: 10) {
+                if let target {
+                    Button {
+                        onReattach()
+                    } label: {
+                        Label("Reattach “\(target)”", systemImage: "arrow.uturn.backward")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button {
+                        onFreshShell()
+                    } label: {
+                        Label("New Shell", systemImage: "plus.square")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Button {
+                        onFreshShell()
+                    } label: {
+                        Label("Reconnect", systemImage: "arrow.uturn.backward")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                Button("Close", role: .cancel, action: onClose)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding(24)
     }
 }
 

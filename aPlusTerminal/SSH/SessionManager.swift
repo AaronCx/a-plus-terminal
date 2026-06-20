@@ -46,26 +46,43 @@ final class TerminalSession: Identifiable, Hashable {
 
     let bridge = TerminalBridge()
     let terminalView = TerminalEmulatorView(frame: .zero)
-    /// Claude Code working/waiting heuristic for the Live Activity (§4.5).
-    let agentMonitor = AgentActivityMonitor()
-    /// One-time `set -g mouse on` hint banner trigger (§4.3).
-    var showTmuxMouseHint = false
+    /// Agent working/waiting heuristic for the Live Activity (§4.5). Built from
+    /// the resolved agent candidates — never names an agent in code.
+    let agentMonitor: AgentActivityMonitor
+    /// One-time "enable mouse" hint banner trigger (§4.3).
+    var showMultiplexerHint = false
 
     private(set) var connection = SSHConnection()
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore
     private let settings: AppSettings
+    private let profiles: ProfileStore
     private var io: SessionIO?
     private var scrollBridge: ScrollBridge?
     private var pumpTask: Task<Void, Never>?
     private var reconnectLoop: Task<Void, Never>?
     private var keepaliveTask: Task<Void, Never>?
-    /// Idle SSH keepalive cadence. A foreground PTY with no typing produces no
-    /// traffic, so NAT/router/server idle timeouts (often only a few minutes)
-    /// silently drop the connection; we tick well under that. Citadel has no
-    /// built-in keepalive, so this is app-level.
-    static let keepaliveInterval: TimeInterval = 60
+    /// Idle keepalive cadence. A foreground PTY with no typing produces no
+    /// traffic, so NAT/router idle timeouts AND the server's sshd ClientAlive
+    /// check (often only a few minutes) silently drop the connection; we tick
+    /// well under that. Citadel exposes no protocol-level keepalive, so this is
+    /// app-level — and the liveness ping rides the *existing* PTY channel (a
+    /// no-op window-change) rather than a separate exec channel. A separate
+    /// exec channel can be server-restricted and, per build-5 on-device
+    /// evidence, did not hold the link; the PTY channel is the one the user is
+    /// already typing on, so a packet on it is guaranteed to traverse the wire.
+    static let defaultKeepaliveInterval: TimeInterval = 25
+    /// First tick fires fast so the link is held through the initial idle
+    /// window AND `lastMultiplexerTarget` is recorded early — a drop within the
+    /// first minute must still reattach to the live session.
+    static let defaultFirstKeepaliveDelay: TimeInterval = 10
+    /// Target discovery is heavier (a side channel) than the window-change ping,
+    /// so refresh the reattach target every Nth tick, not every tick.
+    static let multiplexerRefreshEveryTicks = 3
+    /// Overridable in tests for fast, deterministic keepalive assertions.
+    var keepaliveInterval = TerminalSession.defaultKeepaliveInterval
+    var firstKeepaliveDelay = TerminalSession.defaultFirstKeepaliveDelay
     private(set) var lastRequestedSize: (cols: Int, rows: Int)?
 
     /// Outbound writes (keystrokes, resizes) flow through one FIFO stream
@@ -83,12 +100,16 @@ final class TerminalSession: Identifiable, Hashable {
     private let outboxContinuation: AsyncStream<Outbound>.Continuation
     private var outboxTask: Task<Void, Never>?
 
-    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings) {
+    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
         self.server = server
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.passwords = passwords
         self.settings = settings
+        self.profiles = profiles
+        self.agentMonitor = AgentActivityMonitor(
+            candidates: Self.resolveAgentCandidates(server: server, settings: settings, profiles: profiles)
+        )
         (outboxStream, outboxContinuation) = AsyncStream.makeStream(of: Outbound.self)
         startOutbox()
 
@@ -109,9 +130,12 @@ final class TerminalSession: Identifiable, Hashable {
             wheelBridgeEnabled: { [weak settings] in settings?.scrollWheelBridge ?? true }
         )
         scrollBridge.onModeBTriggered = { [weak self] in
-            guard let self, !self.settings.tmuxMouseHintShown else { return }
-            self.settings.tmuxMouseHintShown = true
-            self.showTmuxMouseHint = true
+            guard let self, !self.settings.multiplexerHintShown,
+                  // Only multiplexers that advertise a mouse-hint command (tmux)
+                  // show the banner; zellij/screen/none stay silent.
+                  self.resolvedMultiplexer.mouseHintCommand != nil else { return }
+            self.settings.multiplexerHintShown = true
+            self.showMultiplexerHint = true
         }
         scrollBridge.attach(to: terminalView)
         self.scrollBridge = scrollBridge
@@ -130,28 +154,134 @@ final class TerminalSession: Identifiable, Hashable {
         outboxContinuation.yield(.resize(cols: cols, rows: rows))
     }
 
+    // MARK: - Attachments (image or file)
+
+    enum AttachmentKind { case image, file }
+    /// Drives the transient "Uploading…" indicator in the terminal screen.
+    private(set) var isAttaching = false
+
+    /// Uploads a picked image or file to the remote inbox over SFTP (the
+    /// existing authenticated session, nowhere else), then types the absolute
+    /// remote path — plus a trailing space, no Enter — into the PTY so the user
+    /// can wrap it for whichever agent they run. Agent-agnostic by design.
+    func attach(_ raw: Data, suggestedName: String, kind: AttachmentKind) async {
+        guard state == .connected else { return }
+        isAttaching = true
+        defer { isAttaching = false }
+        do {
+            let payload: Data
+            let name: String
+            switch kind {
+            case .image:
+                let (data, ext) = ImageNormalizer.normalize(
+                    raw, sourceExt: (suggestedName as NSString).pathExtension
+                )
+                payload = data
+                name = "img-\(Self.stamp())-\(Self.shortID()).\(ext)"
+            case .file:
+                payload = raw
+                name = "\(Self.shortID())-\(Self.sanitize(suggestedName))"
+            }
+            let path = try await connection.uploadToInbox(payload, filename: name)
+            // Insert using the resolved agent's template (aider → `/add {path}\n`,
+            // everyone else → bare path + space). Ordered via the FIFO outbox.
+            let insertion = resolvedAttachAgent?.formatAttachment(path: path)
+                ?? Self.formatAttachment(path: path)
+            sendInput(Data(insertion.utf8))
+        } catch {
+            lastError = "Attachment failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Default agent-agnostic insertion: bare path + trailing space, no newline.
+    static func formatAttachment(path: String) -> String { "\(path) " }
+
+    /// Collapses anything outside a safe, space-free set to `_` so the inserted
+    /// path never needs shell quoting; preserves the extension.
+    static func sanitize(_ name: String) -> String {
+        let ok = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+        let cleaned = String(name.map { ok.contains($0) ? $0 : "_" })
+        return cleaned.isEmpty ? "file" : cleaned
+    }
+
+    private static func stamp() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        return f.string(from: Date())
+    }
+
+    private static func shortID() -> String {
+        String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
+    }
+
+    // MARK: - Profile resolution (per-server override → global default)
+
+    /// Agent candidates fed to the monitor. "auto" → every profile (generic
+    /// fallback included); a specific id → just that profile; "none"/unknown
+    /// "none" → empty (detection disabled).
+    static func resolveAgentCandidates(server: Server, settings: AppSettings, profiles: ProfileStore) -> [AgentProfile] {
+        let id = server.agentProfileID ?? settings.defaultAgentProfileID
+        switch id {
+        case "auto": return profiles.agents
+        case "none": return []
+        default:
+            if let profile = profiles.agent(id: id) { return [profile] }
+            return profiles.agents  // unknown id behaves like auto rather than going dark
+        }
+    }
+
+    /// The multiplexer profile for this session (per-server → default → `none`).
+    var resolvedMultiplexer: MultiplexerProfile {
+        let id = server.multiplexerProfileID ?? settings.defaultMultiplexerProfileID
+        return profiles.multiplexer(id: id)
+            ?? profiles.multiplexer(id: "none")
+            ?? MultiplexerProfile(id: "none", displayName: "None (raw shell)")
+    }
+
+    /// The agent whose attach template to use: in "auto" mode, whichever one was
+    /// detected (nil → default template); otherwise the explicitly chosen one.
+    private var resolvedAttachAgent: AgentProfile? {
+        let id = server.agentProfileID ?? settings.defaultAgentProfileID
+        if id == "auto" { return agentMonitor.detected }
+        return profiles.agent(id: id)
+    }
+
     /// Initial connection; also the retry path for a failed first connect.
     func connect() async {
         guard state == .connecting || state == .suspended else { return }
         state = .connecting
-        await attemptLoop(maxAttempts: 1)
+        await attemptLoop(maxAttempts: 1, reattach: settings.autoReattachMultiplexer)
     }
 
     /// Reconnect contract (§4.1): exponential backoff 0.5s → 1s → 2s.
     /// Single-flight: a dropped channel, the foreground handler, and the retry
     /// button can all request a reconnect around the same moment — running two
     /// loops opens two PTYs that paint over each other on one screen.
-    func reconnect(maxAttempts: Int = 3) async {
+    ///
+    /// `reattachMultiplexer` overrides the global setting for this reconnect —
+    /// the paused-session card passes `true` ("reattach tmux") or `false`
+    /// ("fresh shell"); nil follows the user's default.
+    func reconnect(reattachMultiplexer: Bool? = nil, maxAttempts: Int = 3) async {
         guard state == .suspended || state == .reconnecting else { return }
         if let reconnectLoop {
             await reconnectLoop.value
             return
         }
         state = .reconnecting
-        let loop = Task { await attemptLoop(maxAttempts: maxAttempts) }
+        let reattach = reattachMultiplexer ?? settings.autoReattachMultiplexer
+        let loop = Task { await attemptLoop(maxAttempts: maxAttempts, reattach: reattach) }
         reconnectLoop = loop
         await loop.value
         reconnectLoop = nil
+    }
+
+    /// The multiplexer session a reconnect could reattach to — nil when none is
+    /// recorded or the active profile can't attach (e.g. the `none` profile).
+    var reattachTarget: String? {
+        guard let target = server.lastMultiplexerTarget,
+              resolvedMultiplexer.attachCommand(target: target) != nil else { return nil }
+        return target
     }
 
     /// Cleanly close the socket while backgrounded; tmux survives.
@@ -164,31 +294,54 @@ final class TerminalSession: Identifiable, Hashable {
         state = .suspended
     }
 
-    /// Record which tmux session this PTY is attached to, for auto-reattach.
-    func recordTmuxTarget() async {
+    /// Record which multiplexer session this PTY is attached to, for
+    /// auto-reattach. No-op for the `none` profile (no target command).
+    func recordMultiplexerTarget() async {
         guard state == .connected else { return }
-        guard let target = await TmuxIntegration.currentTarget(on: connection) else { return }
-        server.lastTmuxTarget = target
+        guard let target = await MultiplexerController.currentTarget(resolvedMultiplexer, on: connection) else { return }
+        server.lastMultiplexerTarget = target
         serverStore.update(server)
     }
 
-    /// Periodic SSH keepalive + tmux-target refresh while connected. Running
-    /// `tmux list-sessions` on a side channel generates traffic that resets the
-    /// connection's NAT/idle timer (so an idle foreground session doesn't drop
-    /// after a few minutes) AND keeps `lastTmuxTarget` current, so any later
-    /// reconnect reattaches to the live tmux session instead of dropping into a
-    /// fresh login shell. Recording must happen *while still attached* — once the
-    /// socket drops, tmux reads the session as detached and it can't be identified.
+    /// Periodic keepalive + multiplexer-target refresh while connected. The
+    /// liveness ping is a no-op window-change on the live PTY channel (see the
+    /// keepalive constants); separately, every Nth tick refreshes
+    /// `lastMultiplexerTarget` over a side channel so any later reconnect
+    /// reattaches to the live session instead of a fresh login shell. Recording
+    /// must happen *while still attached* — once the socket drops, the session
+    /// reads as detached and can't be identified.
     private func startKeepalive() {
         keepaliveTask?.cancel()
-        let interval = Self.keepaliveInterval
+        let interval = keepaliveInterval
+        let firstDelay = firstKeepaliveDelay
         keepaliveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(firstDelay))
+            var tick = 0
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                guard !Task.isCancelled, let self, self.state == .connected else { return }
-                await self.recordTmuxTarget()
+                guard let self, self.state == .connected else { return }
+                // Liveness ping on the already-open PTY channel: a no-op
+                // window-change emits a real SSH packet that resets NAT idle
+                // timers and the server's ClientAlive counter, without opening
+                // a new channel or injecting visible input. A same-size
+                // window-change is a no-op to tmux/readline, so nothing redraws.
+                self.sendKeepalivePing()
+                // Less often, refresh the multiplexer reattach target over a
+                // side channel so a later reconnect lands back in the live session.
+                if tick % Self.multiplexerRefreshEveryTicks == 0 {
+                    await self.recordMultiplexerTarget()
+                }
+                tick &+= 1
+                try? await Task.sleep(for: .seconds(interval))
             }
         }
+    }
+
+    /// No-op window-change on the live PTY channel — see `startKeepalive`.
+    /// Routed through the FIFO outbox so it always targets the current
+    /// connection and serializes with any in-flight keystrokes/resizes.
+    private func sendKeepalivePing() {
+        let size = currentWindowSize()
+        resize(cols: size.cols, rows: size.rows)
     }
 
     private func stopKeepalive() {
@@ -206,7 +359,7 @@ final class TerminalSession: Identifiable, Hashable {
         await connection.disconnect()
     }
 
-    private func attemptLoop(maxAttempts: Int) async {
+    private func attemptLoop(maxAttempts: Int, reattach: Bool) async {
         var delay = 0.5
         for attempt in 1...max(1, maxAttempts) {
             do {
@@ -214,10 +367,11 @@ final class TerminalSession: Identifiable, Hashable {
                 state = .connected
                 lastError = nil
                 // Make the PTY match the on-screen size before anything
-                // (especially tmux attach) draws into it.
+                // (especially a multiplexer attach) draws into it.
                 await syncWindowSize()
-                if settings.autoReattachTmux, let target = server.lastTmuxTarget {
-                    try? await connection.send(TmuxIntegration.attachCommand(target: target))
+                if reattach, let target = server.lastMultiplexerTarget,
+                   let attach = MultiplexerController.attachCommand(resolvedMultiplexer, target: target) {
+                    try? await connection.send(attach)
                 }
                 return
             } catch {
@@ -400,15 +554,17 @@ final class SessionManager {
     private let serverStore: ServerStore
     private let passwords: PasswordStore
     private let settings: AppSettings
+    private let profiles: ProfileStore
     private let activityController = SessionActivityController()
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
-    init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings) {
+    init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.passwords = passwords
         self.settings = settings
+        self.profiles = profiles
         // A surviving Live Activity from a previous launch must reflect this
         // process's truth (no sessions yet) instead of stale ones (§4.5).
         refreshActivity()
@@ -421,7 +577,8 @@ final class SessionManager {
             keyStore: keyStore,
             serverStore: serverStore,
             passwords: passwords,
-            settings: settings
+            settings: settings,
+            profiles: profiles
         )
         session.onStateChange = { [weak self] in
             self?.refreshActivity()
@@ -486,7 +643,8 @@ final class SessionManager {
                     agentStatus: SessionActivityAttributes.resolvedAgentStatus(
                         sessionState: stateString,
                         monitorStatus: monitorStatus
-                    )
+                    ),
+                    agentName: session.agentMonitor.detected?.displayName
                 )
             }
         activityController.update(with: summaries)
@@ -496,21 +654,26 @@ final class SessionManager {
         sessions.first { $0.id == id }
     }
 
-    /// Keep sockets alive ~25s for quick app switches; record tmux targets,
-    /// then close cleanly. tmux survives the disconnect.
+    /// Hold sockets open for the *entire* background allowance iOS grants
+    /// (~30s) so a quick app-switch keeps the live session, then close cleanly
+    /// only when iOS is about to suspend us. The multiplexer target is recorded
+    /// up front so even a forced suspend can reattach. The session survives the
+    /// disconnect server-side; the user chooses reattach-vs-fresh on return.
     func appDidEnterBackground() {
         guard sessions.contains(where: { $0.state == .connected }) else { return }
+        // iOS calls this expiration handler just before reclaiming our
+        // background time — that's the latest safe moment to suspend cleanly.
         backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "aplusterminal.session-grace") { [weak self] in
             self?.finishGrace()
         }
         graceTask = Task { [weak self] in
             guard let self else { return }
+            // Record targets immediately, while definitely still attached.
             for session in self.sessions where session.state == .connected {
-                await session.recordTmuxTarget()
+                await session.recordMultiplexerTarget()
             }
-            try? await Task.sleep(for: .seconds(22))
-            guard !Task.isCancelled else { return }
-            self.finishGrace()
+            // No fixed timer: leave the sockets open until iOS fires the
+            // expiration handler above, maximizing the quick-switch window.
         }
     }
 
@@ -522,9 +685,8 @@ final class SessionManager {
         // Push the Activity's stale horizon out — content only goes stale
         // when the process is killed or frozen long enough to stop updating.
         refreshActivity()
-        for session in sessions where session.state == .suspended {
-            Task { await session.reconnect() }
-        }
+        // Do NOT auto-reconnect: a session that was suspended in the background
+        // shows a paused card so the user picks reattach-tmux vs. fresh shell.
     }
 
     private func finishGrace() {
