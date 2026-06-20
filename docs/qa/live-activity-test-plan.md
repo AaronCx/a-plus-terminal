@@ -1,12 +1,23 @@
-# Live Activity — on-device test plan
+# Live Activity — test plan (Simulator + device)
 
-Live Activities cannot be exercised in the simulator; run this on a physical
-iPhone with Dynamic Island (to also cover compact/minimal presentations) and
-once on a non-Island device (Lock Screen only). The unit tests cover the agent
-status-gating logic; this matrix covers the runtime lifecycle they can't.
+Local Live Activities run in the iOS Simulator: they start/update/end and render
+on the Lock Screen, and the compact/minimal/expanded Dynamic Island
+presentations show on a Dynamic-Island-capable simulator (iPhone 15 Pro+).
+a+Terminal's Live Activity is local-only (no push tokens), so this entire matrix
+is exercisable in the Simulator — only ActivityKit *push* updates would require a
+physical device, and this app doesn't use them.
 
-Setup: a Mac running tmux + Claude Code reachable over Tailscale, plus a way to
-kill the network (toggle Wi-Fi / airplane mode) and to stop the server's sshd.
+Do a final pass on a physical iPhone before release to confirm real
+Dynamic-Island hardware behaviour and real network-drop timing, and run once on
+a non-Island device for the Lock Screen-only presentation. The unit tests cover
+the agent status-gating logic; this matrix covers the runtime lifecycle they
+can't.
+
+Setup: a Mac running tmux + Claude Code reachable over SSH (Tailscale, or
+127.0.0.1 against this Mac's sshd for the Simulator), plus a way to kill the
+connection. On device: toggle Wi-Fi / airplane mode. In the Simulator: stop the
+server's sshd, or use the macOS Network Link Conditioner — the Simulator has no
+airplane-mode toggle, but dropping the SSH connection is what the test needs.
 
 ## A. Agent status (working / waiting)
 
