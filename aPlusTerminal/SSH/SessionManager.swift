@@ -77,9 +77,11 @@ final class TerminalSession: Identifiable, Hashable {
     /// window AND `lastMultiplexerTarget` is recorded early — a drop within the
     /// first minute must still reattach to the live session.
     static let defaultFirstKeepaliveDelay: TimeInterval = 10
-    /// Target discovery is heavier (a side channel) than the window-change ping,
-    /// so refresh the reattach target every Nth tick, not every tick.
-    static let multiplexerRefreshEveryTicks = 3
+    /// Refresh the reattach target on every keepalive tick (~25s). It must be
+    /// captured *while the user is attached*; refreshing too rarely means a
+    /// session entered and dropped between ticks records no target, so the
+    /// reconnect can't offer a reattach. The exec is cheap.
+    static let multiplexerRefreshEveryTicks = 1
     /// Overridable in tests for fast, deterministic keepalive assertions.
     var keepaliveInterval = TerminalSession.defaultKeepaliveInterval
     var firstKeepaliveDelay = TerminalSession.defaultFirstKeepaliveDelay
