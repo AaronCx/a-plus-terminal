@@ -5,11 +5,14 @@ import Foundation
 /// currently-attached target before a drop and rebuilds the attach command
 /// after reconnecting. The multiplexer itself survives the disconnect.
 enum MultiplexerController {
-    /// Attach command for `target` (already newline-terminated for the PTY),
-    /// or nil when the profile doesn't support attaching (e.g. `none`).
+    /// Attach command for `target`, typed into the (login-shell) PTY and
+    /// newline-terminated. A leading `clear` wipes the login banner/MOTD and the
+    /// fresh prompt so they don't bleed into the multiplexer's redraw. nil when
+    /// the profile doesn't support attaching (e.g. `none`).
     static func attachCommand(_ mux: MultiplexerProfile, target: String) -> String? {
         guard let command = mux.attachCommand(target: target) else { return nil }
-        return command.hasSuffix("\n") ? command : command + "\n"
+        let withClear = "clear 2>/dev/null; \(command)"
+        return withClear.hasSuffix("\n") ? withClear : withClear + "\n"
     }
 
     /// Locations a multiplexer binary commonly lives that a *non-interactive*
@@ -22,11 +25,13 @@ enum MultiplexerController {
 
     /// The exact shell string used for discovery: PATH-augmented (exec channels
     /// are non-login, so the user's interactive PATH is absent) and tolerant of
-    /// a missing multiplexer/server (`|| true` keeps exit 0). nil if the profile
-    /// reports no target command. Pure/testable.
+    /// a missing multiplexer/server. The brace group routes *all* stderr —
+    /// including the multiplexer binary's "no server running" — to /dev/null so
+    /// it can't pollute the parsed target; `|| true` keeps exit 0. nil if the
+    /// profile reports no target command. Pure/testable.
     static func discoveryCommand(_ mux: MultiplexerProfile) -> String? {
         guard let command = mux.currentTargetCommand else { return nil }
-        return "\(pathPrefix) \(command) 2>/dev/null || true"
+        return "{ \(pathPrefix) \(command) ; } 2>/dev/null || true"
     }
 
     /// First non-empty line of the profile's `currentTargetCommand` output —
