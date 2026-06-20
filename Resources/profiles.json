@@ -1,0 +1,100 @@
+{
+  "agents": [
+    {
+      "id": "generic",
+      "displayName": "Agent",
+      "detectionMarkers": [],
+      "attachTemplate": "{path} ",
+      "builtIn": true
+    },
+    {
+      "id": "claude-code",
+      "displayName": "Claude Code",
+      "detectionMarkers": ["claude code", "esc to interrupt"],
+      "attachTemplate": "{path} ",
+      "builtIn": true
+    },
+    {
+      "id": "codex",
+      "displayName": "Codex",
+      "detectionMarkers": ["openai codex", "codex"],
+      "attachTemplate": "{path} ",
+      "builtIn": true
+    },
+    {
+      "id": "aider",
+      "displayName": "aider",
+      "detectionMarkers": ["aider"],
+      "attachTemplate": "/add {path}\n",
+      "builtIn": true
+    },
+    {
+      "id": "gemini-cli",
+      "displayName": "Gemini CLI",
+      "detectionMarkers": ["gemini"],
+      "attachTemplate": "{path} ",
+      "builtIn": true
+    },
+    {
+      "id": "opencode",
+      "displayName": "opencode",
+      "detectionMarkers": ["opencode"],
+      "attachTemplate": "{path} ",
+      "builtIn": true
+    },
+    {
+      "id": "hermes",
+      "displayName": "Hermes",
+      "detectionMarkers": ["hermes"],
+      "attachTemplate": "{path} ",
+      "builtIn": true
+    }
+  ],
+  "multiplexers": [
+    {
+      "id": "tmux",
+      "displayName": "tmux",
+      "listSessionsCommand": "tmux list-sessions -F '#S'",
+      "attachTemplate": "tmux attach -t {target} || tmux new -s {target}",
+      "currentTargetCommand": "tmux display-message -p '#S'",
+      "mouseHintCommand": "tmux set -g mouse on",
+      "builtIn": true
+    },
+    {
+      "id": "zellij",
+      "displayName": "zellij",
+      "listSessionsCommand": "zellij list-sessions -s",
+      "attachTemplate": "zellij attach {target}",
+      "currentTargetCommand": "printf '%s' \"$ZELLIJ_SESSION_NAME\"",
+      "mouseHintCommand": null,
+      "builtIn": true
+    },
+    {
+      "id": "screen",
+      "displayName": "screen",
+      "listSessionsCommand": "screen -ls",
+      "attachTemplate": "screen -x {target}",
+      "currentTargetCommand": "printf '%s' \"$STY\"",
+      "mouseHintCommand": null,
+      "builtIn": true
+    },
+    {
+      "id": "dtach",
+      "displayName": "dtach",
+      "listSessionsCommand": null,
+      "attachTemplate": "dtach -a {target}",
+      "currentTargetCommand": null,
+      "mouseHintCommand": null,
+      "builtIn": true
+    },
+    {
+      "id": "none",
+      "displayName": "None (raw shell)",
+      "listSessionsCommand": null,
+      "attachTemplate": null,
+      "currentTargetCommand": null,
+      "mouseHintCommand": null,
+      "builtIn": true
+    }
+  ]
+}

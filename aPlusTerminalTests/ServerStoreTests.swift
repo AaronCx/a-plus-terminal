@@ -19,6 +19,21 @@ final class ServerStoreTests: XCTestCase {
         XCTAssertTrue(ServerStore(fileURL: fileURL).servers.isEmpty)
     }
 
+    func testMigratesLegacyTmuxTargetKey() throws {
+        // A server saved by a pre-refactor build used "lastTmuxTarget".
+        let json = """
+        {"id":"\(UUID().uuidString)","name":"old","host":"h","port":22,"username":"u","lastTmuxTarget":"work"}
+        """
+        let server = try JSONDecoder().decode(Server.self, from: Data(json.utf8))
+        XCTAssertEqual(server.lastMultiplexerTarget, "work", "legacy lastTmuxTarget must migrate")
+
+        // And it re-encodes under the new key only (no legacy key leaks back).
+        let reencoded = try JSONEncoder().encode(server)
+        let dict = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        XCTAssertEqual(dict?["lastMultiplexerTarget"] as? String, "work")
+        XCTAssertNil(dict?["lastTmuxTarget"], "must not re-write the legacy key")
+    }
+
     func testAddPersistsAcrossInstances() {
         let store = ServerStore(fileURL: fileURL)
         let server = Server(name: "Mac mini", host: "100.79.92.82", username: "acx", keyID: UUID())
@@ -33,12 +48,12 @@ final class ServerStoreTests: XCTestCase {
         var server = Server(name: "Mac mini", host: "100.79.92.82", username: "acx")
         store.add(server)
 
-        server.lastTmuxTarget = "main"
+        server.lastMultiplexerTarget = "main"
         server.knownHostKey = "ssh-ed25519 AAAAexample"
         store.update(server)
 
         let reloaded = ServerStore(fileURL: fileURL)
-        XCTAssertEqual(reloaded.servers.first?.lastTmuxTarget, "main")
+        XCTAssertEqual(reloaded.servers.first?.lastMultiplexerTarget, "main")
         XCTAssertEqual(reloaded.servers.first?.knownHostKey, "ssh-ed25519 AAAAexample")
     }
 

@@ -11,16 +11,20 @@ struct SessionActivityAttributes: ActivityAttributes {
         /// "connected" / "suspended" / "reconnecting" / "connecting"
         var state: String
         var startedAt: Date
-        /// "working" / "waiting" when a Claude-Code-style agent is detected
-        /// in the session's output, nil otherwise. Optional so payloads from
-        /// older builds keep decoding.
+        /// "working" / "waiting" when an agent is detected in the session's
+        /// output, nil otherwise. Optional so payloads from older builds decode.
         var agentStatus: String?
+        /// Detected agent's display name (e.g. "Claude Code"); nil → "Agent".
+        /// Optional (default nil) so older payloads and call sites still work.
+        var agentName: String? = nil
 
         var isConnected: Bool { state == "connected" }
         var agentLabel: String? {
+            guard let agentStatus else { return nil }
+            let who = agentName ?? "Agent"
             switch agentStatus {
-            case "working": return "Claude: working…"
-            case "waiting": return "Claude: waiting for input"
+            case "working": return "\(who): working…"
+            case "waiting": return "\(who): waiting for input"
             default: return nil
             }
         }

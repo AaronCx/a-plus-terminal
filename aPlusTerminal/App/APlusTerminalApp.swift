@@ -12,6 +12,7 @@ struct APlusTerminalApp: App {
     @State private var keys: KeyStore
     @State private var passwords = PasswordStore()
     @State private var settings: AppSettings
+    @State private var profiles: ProfileStore
     @State private var sessions: SessionManager
     @State private var router = DeepLinkRouter()
     @State private var tipStore = TipStore()
@@ -21,13 +22,15 @@ struct APlusTerminalApp: App {
         let servers = ServerStore()
         let keys = KeyStore()
         let settings = AppSettings()
+        let profiles = ProfileStore()
         _theme = State(initialValue: theme)
         _servers = State(initialValue: servers)
         _keys = State(initialValue: keys)
         _settings = State(initialValue: settings)
+        _profiles = State(initialValue: profiles)
         let passwords = PasswordStore()
         _passwords = State(initialValue: passwords)
-        _sessions = State(initialValue: SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings))
+        _sessions = State(initialValue: SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles))
         #if DEBUG
         TestSeed.applyIfRequested(servers: servers, keys: keys)
         #endif
@@ -41,6 +44,7 @@ struct APlusTerminalApp: App {
             .environment(keys)
             .environment(passwords)
             .environment(settings)
+            .environment(profiles)
             .environment(sessions)
             .environment(router)
             .environment(tipStore)

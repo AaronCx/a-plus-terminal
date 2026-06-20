@@ -7,6 +7,7 @@ struct SettingsScreen: View {
     @Environment(ThemeStore.self) private var theme
     @Environment(AppSettings.self) private var settings
     @Environment(TipStore.self) private var tipStore
+    @Environment(ProfileStore.self) private var profiles
 
     private let supportURL = URL(string: "https://github.com/AaronCx/a-plus-terminal/issues")!
     private let privacyPolicyURL = URL(string: "https://aaroncx.github.io/a-plus-terminal/privacy")!
@@ -54,13 +55,32 @@ struct SettingsScreen: View {
                 }
 
                 Section {
+                    Picker("Default agent", selection: $settings.defaultAgentProfileID) {
+                        Text("Auto-detect").tag("auto")
+                        ForEach(profiles.agents) { agent in
+                            Text(agent.displayName).tag(agent.id)
+                        }
+                        Text("None").tag("none")
+                    }
+                    Picker("Default multiplexer", selection: $settings.defaultMultiplexerProfileID) {
+                        ForEach(profiles.multiplexers) { mux in
+                            Text(mux.displayName).tag(mux.id)
+                        }
+                    }
+                } header: {
+                    Text("Agent & Multiplexer")
+                } footer: {
+                    Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server.")
+                }
+
+                Section {
                     Toggle("Send scroll as mouse wheel in full-screen apps", isOn: $settings.scrollWheelBridge)
-                    Toggle("Auto-reattach tmux", isOn: $settings.autoReattachTmux)
+                    Toggle("Auto-reattach multiplexer", isOn: $settings.autoReattachMultiplexer)
                     Toggle("Auto-send dictation after 1.5s silence", isOn: $settings.autoSendDictation)
                 } header: {
                     Text("Scrolling & Behavior")
                 } footer: {
-                    Text("Swipes scroll tmux and Claude Code history natively when the app requests mouse reporting. Dictation is processed entirely on this device.")
+                    Text("Swipes scroll your multiplexer and agent output natively when the app requests mouse reporting. Dictation is processed entirely on this device.")
                 }
 
                 Section("SSH Keys") {

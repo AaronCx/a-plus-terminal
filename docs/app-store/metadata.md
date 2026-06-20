@@ -3,7 +3,7 @@
 ## Identity
 
 - **Name:** a+Terminal — SSH Terminal
-- **Subtitle:** tmux & Claude Code on the go
+- **Subtitle:** SSH terminal for AI agents
 - **Bundle ID:** `com.aaroncx.aplusterminal`
 - **SKU:** `aplusterminal-ios`
 - **Primary category:** Developer Tools
@@ -13,12 +13,15 @@
 
 ## Description (draft)
 
-a+Terminal is a privacy-first SSH terminal built for one workflow: working on your
-own machines from your iPhone — especially tmux and AI coding agents like
-Claude Code.
+a+Terminal is a privacy-first SSH terminal for working on your own machines
+from your iPhone — built around tmux and CLI AI coding agents. It's
+**agent-agnostic**: run Claude Code, Codex, aider, Gemini CLI, Hermes, or any
+other CLI agent, with plug-and-play profiles you can extend yourself.
+(Not affiliated with Anthropic, OpenAI, Google, or Nous Research; product
+names are trademarks of their respective owners.)
 
 **Scrolling that actually works.** Swipes become real mouse-wheel events, so
-tmux and Claude Code history scroll natively, with momentum — no more
+tmux and your agent's output scroll natively, with momentum — no more
 fighting copy-mode.
 
 **Speak your prompts.** Push-to-talk dictation inserts straight into the
@@ -27,7 +30,7 @@ device.
 
 **Never lose your session.** Live Activities and the Dynamic Island show your
 active sessions at a glance. Tap to jump back in — a+Terminal reconnects and
-re-attaches tmux automatically.
+re-attaches your session multiplexer (tmux, zellij, and more) automatically.
 
 **Zero data collection.** No analytics, no accounts, no crash SDKs, no
 servers of ours. The App Privacy label says "Data Not Collected" because
@@ -41,12 +44,16 @@ tip jar. Nothing is paywalled, ever.
   never in backups)
 - Trust-on-first-use host key pinning with hard mismatch failures
 - Sticky Ctrl key, Esc/Tab/arrows accessory bar
+- Attach an image or file from your phone over the existing SSH connection
+- Plug-and-play agent & multiplexer profiles — Claude Code, Codex, aider,
+  Gemini CLI, Hermes, tmux, zellij, screen — or define your own, no update
+  required
 - Multiple simultaneous sessions
 - Light, dark, and follow-system themes
 
 ## Keywords
 
-`ssh,terminal,tmux,claude,shell,console,server,sysadmin,developer,vim,remote,cli`
+`ssh,terminal,tmux,ssh client,shell,console,server,sysadmin,developer,vim,remote,cli,ai agent`
 
 ## URLs
 
