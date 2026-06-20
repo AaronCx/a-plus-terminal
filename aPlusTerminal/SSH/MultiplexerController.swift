@@ -42,6 +42,23 @@ enum MultiplexerController {
         return firstTarget(fromOutput: output)
     }
 
+    /// PATH-augmented, stderr-suppressed `listSessionsCommand`. nil if the
+    /// profile can't list (e.g. `dtach`/`none`).
+    static func listCommand(_ mux: MultiplexerProfile) -> String? {
+        guard let command = mux.listSessionsCommand else { return nil }
+        return "{ \(pathPrefix) \(command) ; } 2>/dev/null || true"
+    }
+
+    /// All attachable session names (one per non-blank output line), so the
+    /// reconnect UI can offer a picker when more than one session exists.
+    static func availableSessions(_ mux: MultiplexerProfile, on connection: SSHConnection) async -> [String] {
+        guard let command = listCommand(mux), mux.attachTemplate != nil else { return [] }
+        guard let output = try? await connection.runCommand(command) else { return [] }
+        return output.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
     /// Pure parser (testable): first non-blank trimmed line, or nil.
     static func firstTarget(fromOutput output: String) -> String? {
         for line in output.split(whereSeparator: \.isNewline) {

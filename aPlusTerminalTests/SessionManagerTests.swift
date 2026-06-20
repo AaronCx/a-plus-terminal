@@ -323,7 +323,7 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(session.state, .suspended, "must wait for the user's reconnect choice")
 
         // Explicitly choosing reconnect brings it back.
-        await session.reconnect(reattachMultiplexer: false, maxAttempts: 1)
+        await session.reconnect(attachTo: nil, maxAttempts: 1)
         XCTAssertEqual(session.state, .connected)
     }
 
@@ -336,10 +336,28 @@ final class SessionManagerTests: XCTestCase {
 
         await session.suspend()
         // "Fresh shell" must reconnect WITHOUT sending another attach.
-        await session.reconnect(reattachMultiplexer: false, maxAttempts: 1)
+        await session.reconnect(attachTo: nil, maxAttempts: 1)
         XCTAssertEqual(session.state, .connected)
         let attachesAfter = self.shell.received.components(separatedBy: "tmux attach -t main").count
         XCTAssertEqual(attachesAfter, attachesBefore, "fresh-shell reconnect must not reattach the multiplexer")
+    }
+
+    func testReconnectAttachesToTheChosenSession() async throws {
+        // The picker passes an explicit session — reconnect must attach to THAT
+        // one, not the recorded best-guess (the multi-session fix). Auto-reattach
+        // off so the only attach in the transcript is the explicit pick.
+        settings.autoReattachMultiplexer = false
+        let session = manager.open(server: makeServer(lastMultiplexerTarget: "main"))
+        try await waitFor("session to connect") { session.state == .connected }
+        await session.suspend()
+
+        await session.reconnect(attachTo: "other", maxAttempts: 1)
+        XCTAssertEqual(session.state, .connected)
+        try await waitFor("attach to the chosen session") {
+            self.shell.received.contains("tmux attach -t other")
+        }
+        XCTAssertFalse(self.shell.received.contains("tmux attach -t main"),
+                       "must attach to the picked session, not the best-guess")
     }
 
     func testKeepaliveEmitsPeriodicWindowChangesWhileIdle() async throws {

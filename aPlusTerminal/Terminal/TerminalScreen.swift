@@ -49,11 +49,11 @@ struct TerminalScreen: View {
                     }
                 } else {
                     // Cleanly paused (backgrounded long enough that iOS froze
-                    // us). Let the user pick how to come back.
+                    // us). Let the user pick which session to come back to.
                     SessionPausedView(
-                        target: session.reattachTarget,
-                        onReattach: { Task { await session.reconnect(reattachMultiplexer: true) } },
-                        onFreshShell: { Task { await session.reconnect(reattachMultiplexer: false) } },
+                        sessions: session.reattachCandidates,
+                        onReattach: { picked in Task { await session.reconnect(attachTo: picked) } },
+                        onFreshShell: { Task { await session.reconnect(attachTo: nil) } },
                         onClose: {
                             sessionManager.close(session)
                             dismiss()
@@ -189,9 +189,9 @@ struct TmuxMouseHintBanner: View {
 /// app, so the socket was suspended). The server-side session survives; the
 /// user chooses how to come back — reattach the multiplexer or a fresh shell.
 struct SessionPausedView: View {
-    /// The multiplexer session available to reattach, or nil if none.
-    let target: String?
-    var onReattach: () -> Void
+    /// Attachable sessions, best guess first. Empty → only a fresh shell.
+    let sessions: [String]
+    var onReattach: (String) -> Void
     var onFreshShell: () -> Void
     var onClose: () -> Void
 
@@ -202,40 +202,43 @@ struct SessionPausedView: View {
                 .foregroundStyle(.secondary)
             Text("Session Paused")
                 .font(.headline)
-            Text(target == nil
+            Text(sessions.isEmpty
                  ? "iOS paused this connection in the background. Reconnect when you're ready."
-                 : "iOS paused this connection in the background. Your session is still running on the server.")
+                 : (sessions.count == 1
+                    ? "iOS paused this connection in the background. Your session is still running on the server."
+                    : "iOS paused this connection. Pick the session to reattach — your work is still running on the server."))
                 .font(.callout)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             VStack(spacing: 10) {
-                if let target {
-                    Button {
-                        onReattach()
-                    } label: {
-                        Label("Reattach “\(target)”", systemImage: "arrow.uturn.backward")
-                            .frame(maxWidth: .infinity)
+                // One button per available session; the best guess (index 0) is
+                // prominent. Tap any to reattach to exactly that session.
+                ForEach(Array(sessions.enumerated()), id: \.element) { index, name in
+                    let label = Label(sessions.count == 1 ? "Reattach “\(name)”" : name,
+                                      systemImage: "arrow.uturn.backward")
+                        .frame(maxWidth: .infinity)
+                    if index == 0 {
+                        Button { onReattach(name) } label: { label }
+                            .buttonStyle(.borderedProminent)
+                    } else {
+                        Button { onReattach(name) } label: { label }
+                            .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.borderedProminent)
-                    Button {
-                        onFreshShell()
-                    } label: {
-                        Label("New Shell", systemImage: "plus.square")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                } else {
-                    Button {
-                        onFreshShell()
-                    } label: {
-                        Label("Reconnect", systemImage: "arrow.uturn.backward")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
                 }
+
+                let freshLabel = Label(sessions.isEmpty ? "Reconnect" : "New Shell",
+                                       systemImage: sessions.isEmpty ? "arrow.uturn.backward" : "plus.square")
+                    .frame(maxWidth: .infinity)
+                if sessions.isEmpty {
+                    Button(action: onFreshShell) { freshLabel }.buttonStyle(.borderedProminent)
+                } else {
+                    Button(action: onFreshShell) { freshLabel }.buttonStyle(.bordered)
+                }
+
                 Button("Close", role: .cancel, action: onClose)
                     .frame(maxWidth: .infinity)
             }
+            .frame(maxWidth: 320)
         }
         .padding(24)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
