@@ -253,37 +253,58 @@ final class TerminalSession: Identifiable, Hashable {
     func connect() async {
         guard state == .connecting || state == .suspended else { return }
         state = .connecting
-        await attemptLoop(maxAttempts: 1, reattach: settings.autoReattachMultiplexer)
+        await attemptLoop(maxAttempts: 1, attachSession: defaultAttachSession)
     }
 
     /// Reconnect contract (§4.1): exponential backoff 0.5s → 1s → 2s.
     /// Single-flight: a dropped channel, the foreground handler, and the retry
     /// button can all request a reconnect around the same moment — running two
     /// loops opens two PTYs that paint over each other on one screen.
-    ///
-    /// `reattachMultiplexer` overrides the global setting for this reconnect —
-    /// the paused-session card passes `true` ("reattach tmux") or `false`
-    /// ("fresh shell"); nil follows the user's default.
-    func reconnect(reattachMultiplexer: Bool? = nil, maxAttempts: Int = 3) async {
+    /// Uses the default attach behavior (auto-reattach the best-guess session if
+    /// enabled). Used by the drop/foreground/retry paths.
+    func reconnect(maxAttempts: Int = 3) async {
+        await reconnect(attachTo: defaultAttachSession, maxAttempts: maxAttempts)
+    }
+
+    /// Reconnect and attach to a *specific* session (or `nil` for a fresh
+    /// shell). The paused card passes the user's explicit pick.
+    func reconnect(attachTo session: String?, maxAttempts: Int = 3) async {
         guard state == .suspended || state == .reconnecting else { return }
         if let reconnectLoop {
             await reconnectLoop.value
             return
         }
         state = .reconnecting
-        let reattach = reattachMultiplexer ?? settings.autoReattachMultiplexer
-        let loop = Task { await attemptLoop(maxAttempts: maxAttempts, reattach: reattach) }
+        let loop = Task { await attemptLoop(maxAttempts: maxAttempts, attachSession: session) }
         reconnectLoop = loop
         await loop.value
         reconnectLoop = nil
     }
 
-    /// The multiplexer session a reconnect could reattach to — nil when none is
+    /// Best-guess session for the auto/default reconnect paths: the recorded
+    /// target when auto-reattach is on and the profile can attach.
+    private var defaultAttachSession: String? {
+        settings.autoReattachMultiplexer ? reattachTarget : nil
+    }
+
+    /// The best-guess multiplexer session to reattach to — nil when none is
     /// recorded or the active profile can't attach (e.g. the `none` profile).
     var reattachTarget: String? {
         guard let target = server.lastMultiplexerTarget,
               resolvedMultiplexer.attachCommand(target: target) != nil else { return nil }
         return target
+    }
+
+    /// Sessions to offer in the reconnect picker (attachable ones), best guess
+    /// first. Falls back to the recorded target when the live list is empty.
+    var reattachCandidates: [String] {
+        guard resolvedMultiplexer.attachTemplate != nil else { return [] }
+        var names = availableSessions
+        if names.isEmpty, let t = reattachTarget { names = [t] }
+        if let best = reattachTarget, let i = names.firstIndex(of: best), i != 0 {
+            names.remove(at: i); names.insert(best, at: 0)  // best guess first
+        }
+        return names
     }
 
     /// Cleanly close the socket while backgrounded; tmux survives.
@@ -296,10 +317,17 @@ final class TerminalSession: Identifiable, Hashable {
         state = .suspended
     }
 
-    /// Record which multiplexer session this PTY is attached to, for
-    /// auto-reattach. No-op for the `none` profile (no target command).
+    /// All sessions available to reattach, captured live so the paused card can
+    /// offer a picker (we can't query once the socket is gone). Empty for
+    /// profiles that can't list/attach (e.g. `none`).
+    private(set) var availableSessions: [String] = []
+
+    /// Record the multiplexer session this PTY is attached to (best-guess
+    /// auto-reattach target) plus the full session list for the picker. No-op
+    /// for the `none` profile.
     func recordMultiplexerTarget() async {
         guard state == .connected else { return }
+        availableSessions = await MultiplexerController.availableSessions(resolvedMultiplexer, on: connection)
         guard let target = await MultiplexerController.currentTarget(resolvedMultiplexer, on: connection) else { return }
         server.lastMultiplexerTarget = target
         serverStore.update(server)
@@ -361,7 +389,7 @@ final class TerminalSession: Identifiable, Hashable {
         await connection.disconnect()
     }
 
-    private func attemptLoop(maxAttempts: Int, reattach: Bool) async {
+    private func attemptLoop(maxAttempts: Int, attachSession: String?) async {
         var delay = 0.5
         for attempt in 1...max(1, maxAttempts) {
             do {
@@ -371,8 +399,8 @@ final class TerminalSession: Identifiable, Hashable {
                 // Make the PTY match the on-screen size before anything
                 // (especially a multiplexer attach) draws into it.
                 await syncWindowSize()
-                if reattach, let target = server.lastMultiplexerTarget,
-                   let attach = MultiplexerController.attachCommand(resolvedMultiplexer, target: target) {
+                if let session = attachSession,
+                   let attach = MultiplexerController.attachCommand(resolvedMultiplexer, target: session) {
                     try? await connection.send(attach)
                 }
                 return
