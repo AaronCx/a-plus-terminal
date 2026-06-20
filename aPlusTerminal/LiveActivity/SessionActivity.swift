@@ -43,7 +43,16 @@ final class SessionActivityController {
         }
     }
 
-    init() {
+    /// While the app is alive with active sessions, the current content is
+    /// re-pushed on this cadence so a live-but-idle session never reaches
+    /// `staleWindow` and renders as "stale". Must be < staleWindow. A force-quit
+    /// app stops firing this (its tasks die with it), so the staleDate still
+    /// elapses for genuine death — force-quit detection is preserved.
+    private let heartbeatInterval: TimeInterval
+    private var heartbeatTask: Task<Void, Never>?
+
+    init(heartbeatInterval: TimeInterval = 240) {
+        self.heartbeatInterval = heartbeatInterval
         let survivors = Activity<SessionActivityAttributes>.activities
         activity = survivors.first
         for orphan in survivors.dropFirst() {
@@ -120,11 +129,48 @@ final class SessionActivityController {
                 )
             }
         }
+
+        // Keep an idle-but-live Activity fresh; stop once there's nothing live.
+        if self.activity != nil {
+            startHeartbeat()
+        } else {
+            stopHeartbeat()
+        }
+    }
+
+    /// Re-push the current content on a cadence so a connected-but-idle session
+    /// (no state/agent events) doesn't slide past `staleWindow` and render as
+    /// stale. Bypasses the `update(with:)` coalescing on purpose — the intent is
+    /// to bump the stale window, not to change state. Reset on every real push.
+    private func startHeartbeat() {
+        heartbeatTask?.cancel()
+        let interval = heartbeatInterval
+        heartbeatTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled, let self,
+                      let activity = self.activity,
+                      let state = self.lastPushedState, state.activeCount > 0
+                else { return }
+                let content = ActivityContent(
+                    state: state,
+                    staleDate: Date(timeIntervalSinceNow: Self.staleWindow)
+                )
+                self.pushCount += 1
+                self.enqueue { await activity.update(content) }
+            }
+        }
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
     }
 
     func endNow() async {
         // Drop any queued mutations so a late update can't resurrect the
         // Activity after we've torn it down.
+        stopHeartbeat()
         applyTask?.cancel()
         applyTask = nil
         activity = nil
