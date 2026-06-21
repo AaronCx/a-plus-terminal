@@ -11,7 +11,7 @@ set -g mouse on
 Then reload tmux (`tmux source-file ~/.tmux.conf` or restart the server).
 
 With mouse mode on, a swipe in a+Terminal scrolls tmux's own copy-mode history —
-the Claude Code transcript scrolls exactly like on desktop, with momentum.
+your agent's transcript scrolls exactly like on desktop, with momentum.
 
 Without it, a+Terminal falls back to sending arrow keys on the alternate screen
 (3 lines per ~18pt of travel), which works for `less`/`vim` but can't reach
