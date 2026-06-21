@@ -83,6 +83,16 @@ struct SettingsScreen: View {
                     Text("Auto-reattach multiplexer: when a connection resumes, return to your running session (tmux/zellij/screen) instead of a fresh shell — picking from your live sessions when more than one is open. Off = always a fresh shell. Swipes scroll natively when the app requests mouse reporting; dictation is processed entirely on this device.")
                 }
 
+                Section {
+                    NavigationLink("Customize key bar") {
+                        KeyBarSettingsView()
+                    }
+                } header: {
+                    Text("Keyboard")
+                } footer: {
+                    Text("Add, remove, or reorder the keys shown in the bar above the keyboard (Esc, Ctrl, C-b, arrows…). The mic and keyboard buttons always stay.")
+                }
+
                 Section("SSH Keys") {
                     NavigationLink("Manage Keys") {
                         KeysView()
@@ -140,6 +150,51 @@ struct LabeledSlider: View {
             }
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// Build 14 — edit the accessory key bar: reorder, remove, add, reset.
+struct KeyBarSettingsView: View {
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        List {
+            Section {
+                ForEach(settings.keyBarItems) { item in
+                    Text(item.label)
+                }
+                .onMove { settings.keyBarItems.move(fromOffsets: $0, toOffset: $1) }
+                .onDelete { settings.keyBarItems.remove(atOffsets: $0) }
+            } header: {
+                Text("In the bar")
+            } footer: {
+                Text("Drag to reorder, swipe to remove.")
+            }
+
+            let available = KeyBarItem.allCases.filter { !settings.keyBarItems.contains($0) }
+            if !available.isEmpty {
+                Section("Add a key") {
+                    ForEach(available) { item in
+                        Button {
+                            settings.keyBarItems.append(item)
+                        } label: {
+                            Label(item.label, systemImage: "plus.circle")
+                        }
+                    }
+                }
+            }
+
+            Section {
+                Button("Reset to default") {
+                    settings.keyBarItems = KeyBarItem.defaultItems
+                }
+                .disabled(settings.keyBarItems == KeyBarItem.defaultItems)
+            }
+        }
+        .navigationTitle("Key Bar")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { EditButton() }
     }
 }
 
