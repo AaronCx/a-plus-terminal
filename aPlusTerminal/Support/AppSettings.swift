@@ -37,6 +37,12 @@ final class AppSettings {
         didSet { defaults.set(defaultMultiplexerProfileID, forKey: Keys.defaultMultiplexerProfileID) }
     }
 
+    /// Build 14 — the accessory key bar's items and order. Defaults to the
+    /// original bar; user-editable in Settings.
+    var keyBarItems: [KeyBarItem] {
+        didSet { defaults.set(keyBarItems.map(\.rawValue), forKey: Keys.keyBarItems) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -51,6 +57,12 @@ final class AppSettings {
         self.autoSendDictation = defaults.bool(forKey: Keys.autoSendDictation)
         self.defaultAgentProfileID = defaults.string(forKey: Keys.defaultAgentProfileID) ?? "auto"
         self.defaultMultiplexerProfileID = defaults.string(forKey: Keys.defaultMultiplexerProfileID) ?? "tmux"
+        if let raw = defaults.array(forKey: Keys.keyBarItems) as? [String] {
+            let items = raw.compactMap(KeyBarItem.init(rawValue:))
+            self.keyBarItems = items.isEmpty ? KeyBarItem.defaultItems : items
+        } else {
+            self.keyBarItems = KeyBarItem.defaultItems
+        }
     }
 
     private enum Keys {
@@ -60,6 +72,7 @@ final class AppSettings {
         static let autoSendDictation = "autoSendDictation"
         static let defaultAgentProfileID = "defaultAgentProfileID"
         static let defaultMultiplexerProfileID = "defaultMultiplexerProfileID"
+        static let keyBarItems = "keyBarItems"
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"
