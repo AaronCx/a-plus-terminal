@@ -1,21 +1,29 @@
 # Security Policy
 
-## Supported Versions
+a+Terminal is a privacy-first SSH client. It collects no data, makes no
+third-party network calls, and keeps all keys and passwords in the iOS
+Keychain on-device. Because security is core to the app, vulnerability reports
+are very welcome.
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+## Supported versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+The latest App Store / TestFlight release is supported. Fixes ship in a new
+release rather than as back-patches.
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-Use this section to tell people how to report a vulnerability.
+Please report security issues **privately** rather than opening a public issue:
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+- Preferred: open a [GitHub Security Advisory](https://github.com/AaronCx/a-plus-terminal/security/advisories/new)
+  (Security → Advisories → "Report a vulnerability").
+
+Include steps to reproduce and the affected version/build where possible. You
+can expect an initial response within a few days. Confirmed issues are fixed in
+the next release and credited unless you prefer to remain anonymous.
+
+## Scope
+
+In scope: the app's handling of SSH credentials/keys, host-key verification
+(trust-on-first-use pinning), Keychain storage, attachment upload, and any path
+that could leak data off-device. Out of scope: vulnerabilities in the user's
+own SSH servers or networks, and issues requiring a jailbroken device.

@@ -36,7 +36,7 @@ final class ServerStoreTests: XCTestCase {
 
     func testAddPersistsAcrossInstances() {
         let store = ServerStore(fileURL: fileURL)
-        let server = Server(name: "Mac mini", host: "100.79.92.82", username: "acx", keyID: UUID())
+        let server = Server(name: "Mac mini", host: "mini.local", username: "user", keyID: UUID())
         store.add(server)
 
         let reloaded = ServerStore(fileURL: fileURL)
@@ -45,7 +45,7 @@ final class ServerStoreTests: XCTestCase {
 
     func testUpdateReplacesMatchingServer() {
         let store = ServerStore(fileURL: fileURL)
-        var server = Server(name: "Mac mini", host: "100.79.92.82", username: "acx")
+        var server = Server(name: "Mac mini", host: "mini.local", username: "user")
         store.add(server)
 
         server.lastMultiplexerTarget = "main"
@@ -59,7 +59,7 @@ final class ServerStoreTests: XCTestCase {
 
     func testRemoveDeletesServer() {
         let store = ServerStore(fileURL: fileURL)
-        let server = Server(name: "Mac mini", host: "100.79.92.82", username: "acx")
+        let server = Server(name: "Mac mini", host: "mini.local", username: "user")
         store.add(server)
         store.remove(id: server.id)
 
@@ -93,7 +93,7 @@ final class ServerStoreTests: XCTestCase {
 
     func testStoredJSONContainsNoPrivateKeyMaterial() throws {
         let store = ServerStore(fileURL: fileURL)
-        store.add(Server(name: "Mac mini", host: "100.79.92.82", username: "acx", keyID: UUID()))
+        store.add(Server(name: "Mac mini", host: "mini.local", username: "user", keyID: UUID()))
 
         let json = try String(contentsOf: fileURL, encoding: .utf8)
         // The server file references keys only by UUID — no key blobs.
