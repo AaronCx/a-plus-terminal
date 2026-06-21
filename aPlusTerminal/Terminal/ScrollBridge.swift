@@ -82,6 +82,10 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
     private var core = ScrollBridgeCore()
     private var activeMode: ScrollBridgeCore.Mode = .native
     private var momentumTask: Task<Void, Never>?
+    /// Build 14 — while a long-press (text selection) is held, the scroll pan
+    /// stands down so SwiftTerm's selection isn't hijacked into a scroll.
+    private var isSuspended = false
+    private weak var selectionPress: UILongPressGestureRecognizer?
 
     init(sendData: @escaping (Data) -> Void, wheelBridgeEnabled: @escaping () -> Bool) {
         self.sendData = sendData
@@ -101,13 +105,28 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
             if existing is UIPanGestureRecognizer {
                 existing.require(toFail: pan)
             }
+            // Snappier selection: SwiftTerm ships its long-press at 0.7s.
+            if let stPress = existing as? UILongPressGestureRecognizer {
+                stPress.minimumPressDuration = 0.4
+            }
         }
+        // A short hold suspends the scroll pan so a stationary press becomes a
+        // text selection (SwiftTerm's long-press) instead of a scroll. A moving
+        // finger fails this fast (small allowableMovement), leaving scroll intact.
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress))
+        press.minimumPressDuration = 0.3
+        press.delegate = self
+        press.cancelsTouchesInView = false
+        view.addGestureRecognizer(press)
+        selectionPress = press
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard let view = terminalView, let pan = gestureRecognizer as? UIPanGestureRecognizer else {
-            return false
-        }
+        guard let view = terminalView else { return false }
+        // Non-pan recognizers we own (the selection long-press) always begin.
+        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
+        // Hold in progress → let the selection / native gestures have the touch.
+        if isSuspended { return false }
         let velocity = pan.velocity(in: view)
         guard abs(velocity.y) > abs(velocity.x) else { return false }
 
@@ -121,6 +140,25 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
             onModeBTriggered?()
         }
         return activeMode != .native
+    }
+
+    /// Let our selection long-press coexist with SwiftTerm's own gestures (its
+    /// long-press, taps) without disturbing the scroll-pan/mouse-pan exclusivity.
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        g === selectionPress || other === selectionPress
+    }
+
+    @objc private func handleLongPress(_ press: UILongPressGestureRecognizer) {
+        switch press.state {
+        case .began:
+            momentumTask?.cancel()
+            isSuspended = true
+        case .ended, .cancelled, .failed:
+            isSuspended = false
+        default:
+            break
+        }
     }
 
     @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
