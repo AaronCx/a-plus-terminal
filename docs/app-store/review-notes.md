@@ -20,8 +20,12 @@ To evaluate the app without a server:
 1. All UI is reachable without a connection: server management (Settings →
    keys are generated on-device), the Settings tab, the dictation sheet
    (works fully offline — speech recognition is on-device only).
-2. A demo video showing the full connect → tmux → scroll → dictate → Live
-   Activity flow is available at: **[VIDEO LINK — record before submission]**
+2. A demo video showing the app connecting over SSH and running a live tmux
+   session (typing, output, the accessory bar) is available at:
+   https://github.com/AaronCx/a-plus-terminal/releases/download/review-demo/aplus-demo.mp4
+   (Recorded in the iOS Simulator against a local SSH server. Dictation and
+   Live Activities are on-device features; dictation works offline via Apple's
+   on-device speech recognition.)
 
 Notes for specific features:
 
