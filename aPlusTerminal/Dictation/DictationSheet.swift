@@ -107,7 +107,13 @@ struct DictationSheet: View {
         autoSendTask = Task {
             try? await Task.sleep(for: .milliseconds(1500))
             guard !Task.isCancelled else { return }
-            insert(appendReturn: true)
+            // Finalize before sending so a partial the recognizer would still
+            // revise isn't typed into the live shell and executed.
+            let finalText = await engine.finishForAutoSend()
+            guard !Task.isCancelled, !finalText.isEmpty else { return }
+            onInsert(finalText, true)
+            engine.stop()
+            dismiss()
         }
     }
 }
