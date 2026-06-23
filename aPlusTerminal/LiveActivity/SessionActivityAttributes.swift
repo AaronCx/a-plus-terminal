@@ -7,7 +7,6 @@ struct SessionActivityAttributes: ActivityAttributes {
     struct SessionSummary: Codable, Hashable, Identifiable {
         var id: UUID
         var name: String
-        var host: String
         /// "connected" / "suspended" / "reconnecting" / "connecting"
         var state: String
         var startedAt: Date

@@ -50,6 +50,9 @@ final class SessionActivityController {
     /// elapses for genuine death — force-quit detection is preserved.
     private let heartbeatInterval: TimeInterval
     private var heartbeatTask: Task<Void, Never>?
+    /// Retained so it can be deregistered; otherwise the block-based observer
+    /// outlives the controller with no way to remove it.
+    private var terminateObserver: NSObjectProtocol?
 
     init(heartbeatInterval: TimeInterval = 240) {
         self.heartbeatInterval = heartbeatInterval
@@ -65,11 +68,14 @@ final class SessionActivityController {
         // end the Activity before the process goes away. The work runs on a
         // detached task (main is the thread being torn down) with a short
         // blocking wait, which is acceptable in a dying process.
-        NotificationCenter.default.addObserver(
+        terminateObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willTerminateNotification,
             object: nil,
             queue: nil
         ) { _ in
+            // Best-effort: the system gives ~5s on terminate. The 3s wait may
+            // not always flush under IPC pressure, but a force-quit orphan is
+            // also covered by the staleDate mechanism above.
             let semaphore = DispatchSemaphore(value: 0)
             Task.detached(priority: .userInitiated) {
                 for activity in Activity<SessionActivityAttributes>.activities {
@@ -78,6 +84,12 @@ final class SessionActivityController {
                 semaphore.signal()
             }
             _ = semaphore.wait(timeout: .now() + 3)
+        }
+    }
+
+    deinit {
+        if let terminateObserver {
+            NotificationCenter.default.removeObserver(terminateObserver)
         }
     }
 
@@ -104,8 +116,11 @@ final class SessionActivityController {
                 enqueue { await activity.update(content) }
             } else if ActivityAuthorizationInfo().areActivitiesEnabled {
                 // Sweep anything still on screen (an ended-but-undismissed
-                // zero state, an orphan from a previous launch) so exactly
-                // one Activity exists.
+                // zero state, an orphan from a previous launch) so exactly one
+                // Activity exists. The sweep enumerates only the *pre-existing*
+                // activities, so the new request below is never in that set; the
+                // request stays synchronous (not enqueued) so `activity` is set
+                // immediately and a rapid second update can't double-request.
                 for stale in Activity<SessionActivityAttributes>.activities {
                     let stale = stale
                     enqueue { await stale.end(nil, dismissalPolicy: .immediate) }
@@ -115,7 +130,9 @@ final class SessionActivityController {
                     content: content
                     // No pushType: local-only, zero-data posture.
                 )
-                pushCount += 1
+                // Only count a push that actually started an Activity — a failed
+                // request (activities disabled, per-app limit) leaves activity nil.
+                if activity != nil { pushCount += 1 }
             }
         } else if let activity {
             // Show the truthful zero state during the grace window, then let
@@ -167,6 +184,23 @@ final class SessionActivityController {
         heartbeatTask = nil
     }
 
+    /// Re-push the current content with a fresh staleDate without changing
+    /// state. Called on foreground after a background freeze (where the
+    /// heartbeat couldn't fire): `update(with:)` would coalesce away an
+    /// unchanged session list and leave the stale horizon where it was.
+    func refreshStaleHorizon() {
+        guard let activity, let state = lastPushedState, state.activeCount > 0 else { return }
+        let content = ActivityContent(
+            state: state,
+            staleDate: Date(timeIntervalSinceNow: Self.staleWindow)
+        )
+        pushCount += 1
+        enqueue { await activity.update(content) }
+    }
+
+    /// Test-only: immediate teardown for deterministic assertions. Runtime
+    /// teardown goes through `update(with:)`'s graceful zero-state + system
+    /// dismissal instead, so this is intentionally not wired to `closeAll()`.
     func endNow() async {
         // Drop any queued mutations so a late update can't resurrect the
         // Activity after we've torn it down.
