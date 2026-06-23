@@ -47,12 +47,13 @@ enum ImageNormalizer {
     /// Encodes `image`, downscaling the longest side in steps until the result
     /// fits `limit`. Returns nil only if no encoding step fits.
     private static func encode(_ image: UIImage, preferPNG: Bool, within limit: Int) -> (data: Data, ext: String)? {
-        var current = image
-        // Try the native size first, then progressively smaller.
+        // Each scale is a fraction of the ORIGINAL — resize from `image` every
+        // step. Resizing the previously-scaled result instead compounds the
+        // factors (0.75·0.5·0.35·… ≈ 0.5% by the last step), shrinking images
+        // to thumbnails when only a modest downscale was needed.
         let scales: [CGFloat] = [1.0, 0.75, 0.5, 0.35, 0.25, 0.15]
         for scale in scales {
-            let scaled = scale == 1.0 ? current : ImageNormalizer.resize(current, scale: scale)
-            current = scaled
+            let scaled = scale == 1.0 ? image : ImageNormalizer.resize(image, scale: scale)
             if preferPNG, let png = clamp(scaled), let data = png.pngData(), data.count <= limit {
                 return (data, "png")
             }
