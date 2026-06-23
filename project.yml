@@ -10,12 +10,17 @@ settings:
     TARGETED_DEVICE_FAMILY: "1"
     CODE_SIGN_STYLE: Automatic
 packages:
+  # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
+  # floats to the latest matching tag, so CI and each developer could silently
+  # resolve a different version of the SSH/terminal stack.
   Citadel:
     url: https://github.com/orlandos-nl/Citadel.git
-    from: "0.12.1"
+    minorVersion: "0.12.1"   # >=0.12.1, <0.13.0 — patch updates only
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm.git
-    from: "1.13.0"
+    # Hard-pinned: TerminalEmulatorView documents a workaround for a glyph bug
+    # whose upstream fix landed *after* 1.13.0, so a 1.x bump must be deliberate.
+    exactVersion: "1.13.0"
 targets:
   aPlusTerminal:
     type: application
