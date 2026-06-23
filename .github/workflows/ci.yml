@@ -27,6 +27,14 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      # Resolve SPM packages as an explicit, fail-fast step against the
+      # committed Package.resolved, so a dependency-resolution problem is
+      # distinguishable from a compile failure in the Build step below.
+      - name: Resolve packages
+        run: |
+          make generate
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal -resolvePackageDependencies
+
       - name: Build
         run: make build
 

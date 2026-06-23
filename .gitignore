@@ -3,6 +3,19 @@ aPlusTerminal.xcodeproj/
 aPlusTerminal/Info.plist
 aPlusTerminalWidgets/Info.plist
 
+# …except the resolved SPM lockfile: committing it pins the exact
+# (transitive) dependency versions for reproducible builds and lets GitHub's
+# dependency graph raise security alerts on the SSH/terminal stack.
+!aPlusTerminal.xcodeproj/
+aPlusTerminal.xcodeproj/*
+!aPlusTerminal.xcodeproj/project.xcworkspace/
+aPlusTerminal.xcodeproj/project.xcworkspace/*
+!aPlusTerminal.xcodeproj/project.xcworkspace/xcshareddata/
+aPlusTerminal.xcodeproj/project.xcworkspace/xcshareddata/*
+!aPlusTerminal.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+aPlusTerminal.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
+!aPlusTerminal.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
 # Xcode
 DerivedData/
 build/

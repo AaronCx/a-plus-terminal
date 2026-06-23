@@ -8,7 +8,9 @@
 • No advertising or tracking SDKs
 • No servers operated by us
 
-The only network traffic a+Terminal produces is the SSH connection **you** initiate to **your own** servers. That traffic is end-to-end encrypted with standard SSH and goes directly from your iPhone to your server — never through us, because there is no "us" in the middle.
+The only traffic a+Terminal sends off your network is the SSH connection **you** initiate to **your own** servers. That traffic is end-to-end encrypted with standard SSH and goes directly from your iPhone to your server — never through us, because there is no "us" in the middle.
+
+**On your local network**, a few convenience features talk only to your own machines and never to any third party: server status indicators (and the optional Home-screen widget) check reachability by briefly opening a TCP connection to a saved server's host and port — no data is sent in that probe; "Discover on Network" browses for advertised SSH services when you open it; and "Wake Server" sends a Wake-on-LAN packet when you tap it. All of this stays on your network.
 
 **Attaching an image or file** sends the selected item over that same existing SSH connection to your own server; it is sent nowhere else.
 
