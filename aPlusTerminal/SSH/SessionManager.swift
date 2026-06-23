@@ -77,11 +77,6 @@ final class TerminalSession: Identifiable, Hashable {
     /// window AND `lastMultiplexerTarget` is recorded early — a drop within the
     /// first minute must still reattach to the live session.
     static let defaultFirstKeepaliveDelay: TimeInterval = 10
-    /// Refresh the reattach target on every keepalive tick (~25s). It must be
-    /// captured *while the user is attached*; refreshing too rarely means a
-    /// session entered and dropped between ticks records no target, so the
-    /// reconnect can't offer a reattach. The exec is cheap.
-    static let multiplexerRefreshEveryTicks = 1
     /// Overridable in tests for fast, deterministic keepalive assertions.
     var keepaliveInterval = TerminalSession.defaultKeepaliveInterval
     var firstKeepaliveDelay = TerminalSession.defaultFirstKeepaliveDelay
@@ -373,7 +368,6 @@ final class TerminalSession: Identifiable, Hashable {
         let firstDelay = firstKeepaliveDelay
         keepaliveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(firstDelay))
-            var tick = 0
             while !Task.isCancelled {
                 guard let self, self.state == .connected else { return }
                 // Liveness ping on the already-open PTY channel: a no-op
@@ -382,12 +376,12 @@ final class TerminalSession: Identifiable, Hashable {
                 // a new channel or injecting visible input. A same-size
                 // window-change is a no-op to tmux/readline, so nothing redraws.
                 self.sendKeepalivePing()
-                // Less often, refresh the multiplexer reattach target over a
-                // side channel so a later reconnect lands back in the live session.
-                if tick % Self.multiplexerRefreshEveryTicks == 0 {
-                    await self.recordMultiplexerTarget()
-                }
-                tick &+= 1
+                // Refresh the multiplexer reattach target each tick over a side
+                // channel so a later reconnect lands back in the live session.
+                // It must be captured *while the user is attached* — a session
+                // entered and dropped between ticks would otherwise record no
+                // target — and the exec is cheap.
+                await self.recordMultiplexerTarget()
                 try? await Task.sleep(for: .seconds(interval))
             }
         }
@@ -572,6 +566,9 @@ final class TerminalSession: Identifiable, Hashable {
             if case .disconnected(let error) = await endedConnection.state {
                 transportError = error
             }
+            // The user may have closed or suspended this session during the
+            // await above; never resurrect a connection they tore down.
+            guard state == .connected else { return }
             // A non-zero shell exit surfaces as CommandFailed — still `exit`.
             if let transportError, !(transportError is SSHClient.CommandFailed) {
                 state = .reconnecting
@@ -676,6 +673,12 @@ final class SessionManager {
             guard let self, let session else { return }
             self.sessions.removeAll { $0.id == session.id }
             self.refreshActivity()
+            // Tear the session down like the X button does. Dropping it from
+            // the list alone leaks the SSH connection (its socket is never
+            // disconnected) and the outbox Task — which holds the session
+            // strongly for the life of its never-finished stream — so every
+            // natural `exit` would accumulate a leaked session + live socket.
+            Task { await session.close() }
         }
         sessions.append(session)
         Task { await session.connect() }
