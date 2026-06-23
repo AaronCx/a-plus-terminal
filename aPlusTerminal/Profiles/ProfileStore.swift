@@ -44,21 +44,6 @@ final class ProfileStore {
         multiplexers = Self.merge(builtIn: bundled.multiplexers, user: user.multiplexers, id: \.id)
     }
 
-    /// Persists the user-defined (`builtIn == false`) profiles, leaving the
-    /// bundled set untouched, then reloads the merged view.
-    func saveUserProfiles(agents userAgents: [AgentProfile], multiplexers userMux: [MultiplexerProfile]) {
-        let bundle = ProfileBundle(
-            agents: userAgents.filter { !$0.builtIn },
-            multiplexers: userMux.filter { !$0.builtIn }
-        )
-        if let data = try? JSONEncoder().encode(bundle) {
-            try? FileManager.default.createDirectory(
-                at: userFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: userFileURL, options: .atomic)
-        }
-        reload()
-    }
-
     // MARK: - Loading
 
     private static func merge<T>(builtIn: [T], user: [T], id: (T) -> String) -> [T] {
