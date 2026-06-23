@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Observation
+import os
 import Security
 
 struct SSHKey: Codable, Identifiable, Equatable {
@@ -93,6 +94,7 @@ final class KeychainSecretStore: SecretStore {
 /// the server list JSON never contains them.
 @Observable
 final class PasswordStore {
+    private static let log = Logger(subsystem: "com.aaroncx.aplusterminal", category: "keychain")
     private let secrets: SecretStore
 
     init(secrets: SecretStore = KeychainSecretStore(service: "com.aaroncx.aplusterminal.passwords")) {
@@ -104,12 +106,23 @@ final class PasswordStore {
     }
 
     func password(for ref: UUID) -> String? {
-        guard let data = try? secrets.secret(for: ref.uuidString) else { return nil }
-        return String(data: data, encoding: .utf8)
+        do {
+            guard let data = try secrets.secret(for: ref.uuidString) else { return nil }
+            return String(data: data, encoding: .utf8)
+        } catch {
+            // A genuine Keychain failure (e.g. locked device) is distinct from
+            // "no password stored" — log it instead of silently returning nil.
+            Self.log.error("password load failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     func removePassword(for ref: UUID) {
-        try? secrets.removeSecret(for: ref.uuidString)
+        do {
+            try secrets.removeSecret(for: ref.uuidString)
+        } catch {
+            Self.log.error("password removal failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }
 

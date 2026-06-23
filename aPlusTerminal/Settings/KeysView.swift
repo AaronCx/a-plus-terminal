@@ -99,6 +99,9 @@ struct KeysView: View {
             Text("Creates a new ed25519 key pair on this device.")
         }
         .sheet(isPresented: $showImport) {
+            // The imported key id is intentionally unused here: the keys list
+            // observes KeyStore and refreshes itself, so there's nothing to do
+            // with it (unlike ServerEditView, which selects the new key).
             KeyImportView { _ in }
         }
     }

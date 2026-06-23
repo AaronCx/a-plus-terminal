@@ -338,6 +338,13 @@ struct KeyImportView: View {
             guard let url = try result.get().first else { return }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            // Key files are tiny; reject anything implausibly large before
+            // reading it fully into memory (a mis-picked huge file would spike
+            // memory on the main actor).
+            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 64 * 1024 {
+                errorMessage = "That file is too large to be an SSH key."
+                return
+            }
             pem = try String(contentsOf: url, encoding: .utf8)
             if name.trimmingCharacters(in: .whitespaces).isEmpty {
                 name = url.lastPathComponent

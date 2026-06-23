@@ -61,6 +61,7 @@ final class ServerStore {
         persist()
     }
 
+    /// Lookup by id. Used only by tests today; kept as a natural accessor.
     func server(for id: UUID) -> Server? {
         servers.first { $0.id == id }
     }
