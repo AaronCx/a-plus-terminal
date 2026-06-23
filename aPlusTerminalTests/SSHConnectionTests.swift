@@ -176,8 +176,14 @@ final class SSHConnectionTests: XCTestCase {
             try await connection.connect(makeConfig().with(privateKey: Curve25519.Signing.PrivateKey()))
             XCTFail("connect should have failed with an unauthorized key")
         } catch {
-            // Any auth failure is acceptable; it must not be a host key mismatch.
-            XCTAssertFalse(error is SSHConnectionError)
+            // Must not be a host-key mismatch. The hermetic test server accepts
+            // connections (see testPasswordAuthConnects), so reaching
+            // .disconnected(error) means auth was attempted and rejected — not a
+            // transport/bind problem that would also satisfy a looser check.
+            XCTAssertFalse(error is SSHConnectionError, "expected an auth failure, not a host-key mismatch")
+            guard case .disconnected(let err) = await connection.state, err != nil else {
+                return XCTFail("expected .disconnected(error) after auth rejection")
+            }
         }
     }
 
@@ -196,7 +202,10 @@ final class SSHConnectionTests: XCTestCase {
             try await connection.connect(makeConfig().with(password: "wrong"))
             XCTFail("connect should have failed with a wrong password")
         } catch {
-            XCTAssertFalse(error is SSHConnectionError)
+            XCTAssertFalse(error is SSHConnectionError, "expected an auth failure, not a host-key mismatch")
+            guard case .disconnected(let err) = await connection.state, err != nil else {
+                return XCTFail("expected .disconnected(error) after auth rejection")
+            }
         }
     }
 
