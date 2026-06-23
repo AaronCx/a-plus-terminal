@@ -18,6 +18,11 @@ struct ScrollBridgeCore {
     /// Arrow lines sent per tick in Mode B.
     static let linesPerArrowTick = 3
 
+    // Note: SwiftTerm 1.13.0 doesn't publicly expose the negotiated mouse
+    // *encoding* (only `mouseMode`), so Mode A always emits SGR (1006) wheel
+    // events. That's correct for effectively all modern apps that enable mouse
+    // reporting; a legacy app that enables mouse without SGR (X10 only) would
+    // misparse the wheel bytes. Revisit if SwiftTerm exposes `mouseProtocol`.
     static func mode(altScreen: Bool, mouseReporting: Bool, wheelBridgeEnabled: Bool) -> Mode {
         if mouseReporting && wheelBridgeEnabled {
             return .sgrWheel
@@ -92,15 +97,21 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
         self.wheelBridgeEnabled = wheelBridgeEnabled
     }
 
+    deinit {
+        // A flick can leave momentum emitting after the view/session goes away.
+        momentumTask?.cancel()
+    }
+
     func attach(to view: TerminalEmulatorView) {
         terminalView = view
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan))
         pan.delegate = self
         pan.maximumNumberOfTouches = 1
-        view.addGestureRecognizer(pan)
-        // Existing pans yield to the bridge; `priorityPan` makes pans that
-        // SwiftTerm registers later (mouse-mode pan) yield too.
+        // Set priorityPan *before* adding, so the addGestureRecognizer override
+        // already knows our pan when it (and any pan SwiftTerm registers later,
+        // e.g. its mouse-mode pan) is wired to require(toFail:) ours.
         view.priorityPan = pan
+        view.addGestureRecognizer(pan)
         for existing in view.gestureRecognizers ?? [] where existing !== pan {
             if existing is UIPanGestureRecognizer {
                 existing.require(toFail: pan)
@@ -213,6 +224,10 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    /// Approximate 1-based cell under `point`, assuming the grid fills the
+    /// view's bounds with uniform cells (no content inset, single pane). That
+    /// holds for the common full-screen terminal; SwiftTerm 1.13.0 doesn't
+    /// expose precise cell metrics/origin to refine multi-pane targeting.
     private func cellCoordinate(for point: CGPoint, in view: UIView, cols: Int, rows: Int) -> (col: Int, row: Int) {
         guard cols > 0, rows > 0, view.bounds.width > 0, view.bounds.height > 0 else { return (1, 1) }
         let col = min(max(Int(point.x / (view.bounds.width / CGFloat(cols))) + 1, 1), cols)

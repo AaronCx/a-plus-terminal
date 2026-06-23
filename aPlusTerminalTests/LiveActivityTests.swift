@@ -7,7 +7,6 @@ final class SessionActivityContentStateTests: XCTestCase {
         SessionActivityAttributes.SessionSummary(
             id: UUID(),
             name: name,
-            host: "100.0.0.1",
             state: state,
             startedAt: startedAt
         )
@@ -61,7 +60,7 @@ final class DeepLinkRouterTests: XCTestCase {
 final class SessionActivityControllerTests: XCTestCase {
     private func summary() -> SessionActivityAttributes.SessionSummary {
         SessionActivityAttributes.SessionSummary(
-            id: UUID(), name: "mini", host: "100.0.0.1", state: "connected", startedAt: .now
+            id: UUID(), name: "mini", state: "connected", startedAt: .now
         )
     }
 
@@ -133,7 +132,7 @@ final class SessionActivityRuntimeTests: XCTestCase {
     /// label is routed through `resolvedAgentStatus`, so connection state gates it.
     private func summary(id: UUID, state: String, monitor: String?) -> SessionActivityAttributes.SessionSummary {
         SessionActivityAttributes.SessionSummary(
-            id: id, name: "runtime", host: "100.0.0.1", state: state, startedAt: .now,
+            id: id, name: "runtime", state: state, startedAt: .now,
             agentStatus: SessionActivityAttributes.resolvedAgentStatus(sessionState: state, monitorStatus: monitor),
             agentName: "Claude Code"
         )
@@ -216,7 +215,7 @@ final class SessionActivityRuntimeTests: XCTestCase {
         await controller.endNow()
 
         let s = SessionActivityAttributes.SessionSummary(
-            id: UUID(), name: "dup", host: "100.0.0.1", state: "connected",
+            id: UUID(), name: "dup", state: "connected",
             startedAt: Date(timeIntervalSince1970: 1_000_000), agentStatus: "working"
         )
         controller.update(with: [s])
@@ -246,7 +245,7 @@ final class SessionActivityRuntimeTests: XCTestCase {
         let started = Date(timeIntervalSince1970: 2_000_000)
         func summ(_ agent: String?) -> SessionActivityAttributes.SessionSummary {
             SessionActivityAttributes.SessionSummary(
-                id: id, name: "race", host: "100.0.0.1", state: "connected",
+                id: id, name: "race", state: "connected",
                 startedAt: started, agentStatus: agent
             )
         }
@@ -275,7 +274,7 @@ final class SessionActivityRuntimeTests: XCTestCase {
         await controller.endNow()
 
         let s = SessionActivityAttributes.SessionSummary(
-            id: UUID(), name: "idle", host: "100.0.0.1", state: "connected",
+            id: UUID(), name: "idle", state: "connected",
             startedAt: Date(timeIntervalSince1970: 3_000_000), agentStatus: nil
         )
         controller.update(with: [s])  // starts the Activity + heartbeat

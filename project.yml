@@ -9,13 +9,22 @@ settings:
     SWIFT_VERSION: "5.10"
     TARGETED_DEVICE_FAMILY: "1"
     CODE_SIGN_STYLE: Automatic
+    # One source of truth for both targets — the app and widget MUST ship with
+    # identical versions or App Store Connect rejects the upload.
+    CURRENT_PROJECT_VERSION: "14"
+    MARKETING_VERSION: "1.0"
 packages:
+  # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
+  # floats to the latest matching tag, so CI and each developer could silently
+  # resolve a different version of the SSH/terminal stack.
   Citadel:
     url: https://github.com/orlandos-nl/Citadel.git
-    from: "0.12.1"
+    minorVersion: "0.12.1"   # >=0.12.1, <0.13.0 — patch updates only
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm.git
-    from: "1.13.0"
+    # Hard-pinned: TerminalEmulatorView documents a workaround for a glyph bug
+    # whose upstream fix landed *after* 1.13.0, so a 1.x bump must be deliberate.
+    exactVersion: "1.13.0"
 targets:
   aPlusTerminal:
     type: application
@@ -44,8 +53,6 @@ targets:
         # Empty by default (automatic signing). The TestFlight upload script
         # passes CODE_SIGN_STYLE=Manual and these per-target profile names.
         PROVISIONING_PROFILE_SPECIFIER: "$(APLUSTERMINAL_PROFILE_APP)"
-        CURRENT_PROJECT_VERSION: "14"
-        MARKETING_VERSION: "1.0"
     info:
       path: aPlusTerminal/Info.plist
       properties:
@@ -88,8 +95,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.aplusterminal.widgets
         TARGETED_DEVICE_FAMILY: "1"
         PROVISIONING_PROFILE_SPECIFIER: "$(APLUSTERMINAL_PROFILE_WIDGET)"
-        CURRENT_PROJECT_VERSION: "14"
-        MARKETING_VERSION: "1.0"
     info:
       path: aPlusTerminalWidgets/Info.plist
       properties:

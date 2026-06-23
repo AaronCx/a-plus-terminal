@@ -16,11 +16,13 @@ final class MultiplexerControllerTests: XCTestCase {
     func testAttachCommandTemplatingClearsThenAttaches() {
         // A leading `clear` wipes the login banner/MOTD before the multiplexer
         // redraws (prevents bleed-in), then runs the templated attach.
+        // The target is shell-quoted so a name with spaces/metacharacters stays
+        // one literal argument.
         XCTAssertEqual(
             MultiplexerController.attachCommand(tmux, target: "main"),
-            "clear 2>/dev/null; tmux attach -t main || tmux new -s main\n")
+            "clear 2>/dev/null; tmux attach -t 'main' || tmux new -s 'main'\n")
         let zellij = MultiplexerProfile(id: "zellij", displayName: "zellij", attachTemplate: "zellij attach {target}")
-        XCTAssertEqual(MultiplexerController.attachCommand(zellij, target: "work"), "clear 2>/dev/null; zellij attach work\n")
+        XCTAssertEqual(MultiplexerController.attachCommand(zellij, target: "work"), "clear 2>/dev/null; zellij attach 'work'\n")
     }
 
     func testNoneProfileHasNoAttach() {
@@ -56,19 +58,14 @@ final class MultiplexerControllerTests: XCTestCase {
     }
 
     func testDiscoverySelectsAttachedNotMostRecent() {
-        // The tmux selector picks an *attached* session (col1>0), so a detached
-        // session spun up later (higher activity) is ignored — the "reattached
-        // to session 4 instead of my session 1" fix. Emulate the pipeline:
-        //   `awk '$1>0'` (keep attached) → `sort -rnk2` (newest first) → first name.
-        struct Row { let attached: Int; let activity: Int; let name: String }
-        let rows = [
-            Row(attached: 1, activity: 100, name: "work"),     // attached, older
-            Row(attached: 0, activity: 200, name: "scratch"),  // detached, newer (the "session 4")
-        ]
-        let attachedRows = rows.filter { $0.attached > 0 }
-        let sorted = attachedRows.sorted { $0.activity > $1.activity }
-        XCTAssertEqual(sorted.first?.name, "work",
-                       "must pick the attached session, not the newer detached one")
+        // The selection (keep *attached* sessions, newest first, take one) lives
+        // in the profile's currentTargetCommand shell pipeline — the "reattached
+        // to session 4 instead of my session 1" fix. Assert the real command
+        // encodes it, rather than re-implementing the logic in the test.
+        let command = try! XCTUnwrap(MultiplexerController.discoveryCommand(tmux))
+        XCTAssertTrue(command.contains("$1>0"), "must keep only attached sessions (col 1 > 0)")
+        XCTAssertTrue(command.contains("sort -rnk2"), "must order by activity, newest first")
+        XCTAssertTrue(command.contains("exit"), "must take just the first (the attached, newest) name")
     }
 }
 
@@ -322,7 +319,7 @@ final class SessionManagerTests: XCTestCase {
         await session.suspend()
         await session.reconnect(maxAttempts: 1)   // .auto → reattach best guess
         XCTAssertEqual(session.state, .connected)
-        try await waitFor("reattach on reconnect") { self.shell.received.contains("tmux attach -t main") }
+        try await waitFor("reattach on reconnect") { self.shell.received.contains("tmux attach -t 'main'") }
     }
 
     func testWindowSizeReplayedAfterConnect() async throws {
@@ -348,13 +345,15 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(session.state, .suspended)
 
         manager.appWillEnterForeground()
-        // Give any (incorrect) auto-reconnect a chance to fire, then assert it didn't.
-        try await Task.sleep(for: .milliseconds(500))
+        // Deterministic: foreground drives no reconnect, so the counter stays 0
+        // (no fixed sleep needed to "prove the negative").
+        XCTAssertEqual(session.reconnectAttempts, 0, "foreground must not auto-reconnect")
         XCTAssertEqual(session.state, .suspended, "must wait for the user's reconnect choice")
 
         // Explicitly choosing reconnect brings it back.
         await session.reconnect(attachTo: nil, maxAttempts: 1)
         XCTAssertEqual(session.state, .connected)
+        XCTAssertEqual(session.reconnectAttempts, 1, "exactly the one explicit reconnect ran")
     }
 
     func testAutoReattachToggleOffSkipsReattachOnReconnect() async throws {
@@ -395,9 +394,9 @@ final class SessionManagerTests: XCTestCase {
         await session.reconnect(attachTo: "other", maxAttempts: 1)
         XCTAssertEqual(session.state, .connected)
         try await waitFor("attach to the chosen session") {
-            self.shell.received.contains("tmux attach -t other")
+            self.shell.received.contains("tmux attach -t 'other'")
         }
-        XCTAssertFalse(self.shell.received.contains("tmux attach -t main"),
+        XCTAssertFalse(self.shell.received.contains("tmux attach -t 'main'"),
                        "must attach to the picked session, not the best-guess")
     }
 

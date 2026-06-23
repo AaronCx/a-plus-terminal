@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import UIKit
 import UniformTypeIdentifiers
 
@@ -28,6 +29,14 @@ enum ImageNormalizer {
             return (data, ext == "jpeg" ? "jpg" : ext)
         }
 
+        // An animated GIF over the cap can't be losslessly downscaled with
+        // UIKit; re-encoding flattens it to a single still frame. Pass the
+        // original bytes through instead (the agent enforces its own size cap)
+        // rather than silently dropping the animation.
+        if ext == "gif", Self.isAnimated(data) {
+            return (data, "gif")
+        }
+
         guard let image = UIImage(data: data) else {
             // Undecodable here means we can't improve it; ship the original
             // bytes with a best-effort extension rather than dropping the file.
@@ -47,12 +56,13 @@ enum ImageNormalizer {
     /// Encodes `image`, downscaling the longest side in steps until the result
     /// fits `limit`. Returns nil only if no encoding step fits.
     private static func encode(_ image: UIImage, preferPNG: Bool, within limit: Int) -> (data: Data, ext: String)? {
-        var current = image
-        // Try the native size first, then progressively smaller.
+        // Each scale is a fraction of the ORIGINAL — resize from `image` every
+        // step. Resizing the previously-scaled result instead compounds the
+        // factors (0.75·0.5·0.35·… ≈ 0.5% by the last step), shrinking images
+        // to thumbnails when only a modest downscale was needed.
         let scales: [CGFloat] = [1.0, 0.75, 0.5, 0.35, 0.25, 0.15]
         for scale in scales {
-            let scaled = scale == 1.0 ? current : ImageNormalizer.resize(current, scale: scale)
-            current = scaled
+            let scaled = scale == 1.0 ? image : ImageNormalizer.resize(image, scale: scale)
             if preferPNG, let png = clamp(scaled), let data = png.pngData(), data.count <= limit {
                 return (data, "png")
             }
@@ -78,6 +88,12 @@ enum ImageNormalizer {
         let longest = max(image.size.width, image.size.height)
         guard longest > maxDimension else { return image }
         return resize(image, scale: maxDimension / longest)
+    }
+
+    /// True when `data` decodes to more than one frame (animated GIF).
+    private static func isAnimated(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return false }
+        return CGImageSourceGetCount(source) > 1
     }
 
     private static func resize(_ image: UIImage, scale: CGFloat) -> UIImage {

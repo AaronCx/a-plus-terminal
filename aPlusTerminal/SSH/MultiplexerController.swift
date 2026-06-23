@@ -1,10 +1,13 @@
 import Foundation
+import os
 
 /// Drives the multiplexer side of the reconnect contract (§4.1) from a
 /// `MultiplexerProfile` — no multiplexer is named in code. Discovers the
 /// currently-attached target before a drop and rebuilds the attach command
 /// after reconnecting. The multiplexer itself survives the disconnect.
 enum MultiplexerController {
+    private static let log = Logger(subsystem: "com.aaroncx.aplusterminal", category: "multiplexer")
+
     /// Attach command for `target`, typed into the (login-shell) PTY and
     /// newline-terminated. A leading `clear` wipes the login banner/MOTD and the
     /// fresh prompt so they don't bleed into the multiplexer's redraw. nil when
@@ -38,8 +41,15 @@ enum MultiplexerController {
     /// the session name to reattach to. nil if the profile can't report one.
     static func currentTarget(_ mux: MultiplexerProfile, on connection: SSHConnection) async -> String? {
         guard let command = discoveryCommand(mux) else { return nil }
-        guard let output = try? await connection.runCommand(command) else { return nil }
-        return firstTarget(fromOutput: output)
+        do {
+            return firstTarget(fromOutput: try await connection.runCommand(command))
+        } catch {
+            // A thrown error (transport drop, channel failure) is distinct from
+            // "no session" — log it so a broken reattach can be diagnosed rather
+            // than silently degrading to a fresh shell.
+            log.debug("currentTarget discovery failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     /// PATH-augmented, stderr-suppressed `listSessionsCommand`. nil if the
@@ -53,7 +63,13 @@ enum MultiplexerController {
     /// reconnect UI can offer a picker when more than one session exists.
     static func availableSessions(_ mux: MultiplexerProfile, on connection: SSHConnection) async -> [String] {
         guard let command = listCommand(mux), mux.attachTemplate != nil else { return [] }
-        guard let output = try? await connection.runCommand(command) else { return [] }
+        let output: String
+        do {
+            output = try await connection.runCommand(command)
+        } catch {
+            log.debug("availableSessions discovery failed: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
         return output.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

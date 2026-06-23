@@ -10,7 +10,8 @@ struct SettingsScreen: View {
     @Environment(ProfileStore.self) private var profiles
 
     private let supportURL = URL(string: "https://github.com/AaronCx/a-plus-terminal/issues")!
-    private let privacyPolicyURL = URL(string: "https://aaroncx.github.io/a-plus-terminal/privacy")!
+    // Trailing slash matches the GitHub Pages canonical URL (and SupportView).
+    private let privacyPolicyURL = URL(string: "https://aaroncx.github.io/a-plus-terminal/privacy/")!
 
     var body: some View {
         @Bindable var theme = theme

@@ -98,7 +98,9 @@ enum OpenSSHKey {
             throw ParseError.malformed
         }
         guard cipher == "none", kdf == "none" else { throw ParseError.encryptedKeyUnsupported }
-        guard keyCount == 1, reader.readString() != nil else { throw ParseError.malformed }  // public key blob
+        // Outer public-key blob: validate its framing (ssh-ed25519 + 32 bytes).
+        guard keyCount == 1, let publicBlob = reader.readString() else { throw ParseError.malformed }
+        let outerPublicKey = ed25519Key(fromPublicBlob: publicBlob)
 
         guard let privateBlock = reader.readString() else { throw ParseError.malformed }
         var priv = SSHBinaryReader(privateBlock)
@@ -109,12 +111,37 @@ enum OpenSSHKey {
             throw ParseError.malformed
         }
         guard keyType == "ssh-ed25519" else { throw ParseError.unsupportedKeyType(keyType) }
-        guard priv.readString()?.count == 32,                // public key
+        guard let innerPublicKey = priv.readString(), innerPublicKey.count == 32,
               let privateKeyData = priv.readString(), privateKeyData.count == 64 else {
             throw ParseError.malformed
         }
         // OpenSSH stores seed (32) + public (32); CryptoKit wants the seed.
-        return try Curve25519.Signing.PrivateKey(rawRepresentation: privateKeyData.prefix(32))
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKeyData.prefix(32))
+
+        // Integrity: the public key derived from the seed must match the public
+        // field, the trailing 32 bytes of the private field, and the outer blob.
+        // A mismatch means a corrupt/tampered key, not a usable one.
+        let derived = Data(key.publicKey.rawRepresentation)
+        guard derived == Data(innerPublicKey),
+              derived == Data(privateKeyData.suffix(32)) else {
+            throw ParseError.malformed
+        }
+        if let outerPublicKey, derived != Data(outerPublicKey) {
+            throw ParseError.malformed
+        }
+        return key
+    }
+
+    /// Extracts the 32-byte ed25519 key from an SSH public-key blob
+    /// (`ssh-ed25519` string + 32-byte key); nil if it isn't that shape.
+    private static func ed25519Key(fromPublicBlob blob: Data) -> Data? {
+        var reader = SSHBinaryReader(blob)
+        guard let type = reader.readString().flatMap({ String(data: $0, encoding: .utf8) }),
+              type == "ssh-ed25519",
+              let key = reader.readString(), key.count == 32 else {
+            return nil
+        }
+        return key
     }
 }
 

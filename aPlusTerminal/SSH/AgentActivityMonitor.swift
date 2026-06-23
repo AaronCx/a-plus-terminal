@@ -30,7 +30,7 @@ final class AgentActivityMonitor {
     /// Fired on every status transition (main actor).
     var onChange: (() -> Void)?
 
-    private static let tailWindow = 64
+    private static let tailWindowBytes = 128
 
     private let candidates: [AgentProfile]
     /// Candidates that carry markers — scanned to upgrade `detected`.
@@ -53,8 +53,9 @@ final class AgentActivityMonitor {
     private var agentSeen: Bool
     private var burstBytes = 0
     private var quietTask: Task<Void, Never>?
-    /// Tail of the previous chunk so markers split across reads still match.
-    private var carry = ""
+    /// Raw byte tail of the previous chunk so a marker — or a multibyte UTF-8
+    /// sequence — split across reads is reassembled before decoding.
+    private var carryBytes: [UInt8] = []
 
     init(candidates: [AgentProfile], quietInterval: TimeInterval = 2, burstThreshold: Int = 200) {
         self.candidates = candidates
@@ -95,23 +96,33 @@ final class AgentActivityMonitor {
         agentSeen = alwaysActive
         detected = explicitAgent
         burstBytes = 0
-        carry = ""
+        carryBytes = []
         if status != .none {
             transition(to: .none)
         }
     }
 
     private func scanForMarker(_ bytes: [UInt8]) {
-        let text = carry + String(decoding: bytes, as: UTF8.self).lowercased()
+        let text = String(decoding: carryBytes + bytes, as: UTF8.self).lowercased()
+        // Prefer the most specific (longest) matching marker. When one chunk
+        // carries markers for two agents, this names the one whose marker
+        // matched most specifically rather than whichever profile happens to
+        // be first in file order.
+        var best: (candidate: AgentProfile, length: Int)?
         for candidate in markerCandidates {
-            if candidate.detectionMarkers.contains(where: { text.contains($0) }) {
-                detected = candidate
-                agentSeen = true
-                carry = ""
-                return
+            for marker in candidate.detectionMarkers where text.contains(marker) {
+                if best == nil || marker.count > best!.length {
+                    best = (candidate, marker.count)
+                }
             }
         }
-        carry = String(text.suffix(Self.tailWindow))
+        if let best {
+            detected = best.candidate
+            agentSeen = true
+            carryBytes = []
+            return
+        }
+        carryBytes = Array((carryBytes + bytes).suffix(Self.tailWindowBytes))
     }
 
     private func scheduleQuiet() {

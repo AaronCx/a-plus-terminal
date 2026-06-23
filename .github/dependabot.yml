@@ -1,4 +1,11 @@
 version: 2
+# Note on Swift packages (Citadel, SwiftTerm): they're declared and pinned in
+# project.yml, and the resolved lockfile is committed
+# (aPlusTerminal.xcodeproj/.../swiftpm/Package.resolved) so GitHub's dependency
+# graph raises *security alerts* on them and the whole transitive tree.
+# Dependabot version-update PRs for the "swift" ecosystem require a top-level
+# Package.swift, which this XcodeGen-driven project intentionally doesn't have —
+# version bumps are made in project.yml instead.
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"

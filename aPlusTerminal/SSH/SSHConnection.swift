@@ -35,7 +35,9 @@ enum HostKeyFingerprint {
 
 /// Trust-on-first-use host key validation. With no pinned key it accepts and
 /// records whatever the server presents; with a pinned key it hard-fails on
-/// any mismatch.
+/// any mismatch. First-connect acceptance is silent by deliberate design (the
+/// common mobile-SSH TOFU model) — the protection is against a key *changing*
+/// under you, which is hard-failed. See SECURITY.md ("Host-key verification").
 final class TOFUHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
     private let pinnedKey: String?
     private let lock = NSLock()
@@ -110,7 +112,15 @@ actor SSHConnection {
     private var ptyTask: Task<Void, Never>?
 
     init() {
-        (output, outputContinuation) = AsyncStream.makeStream(of: Data.self)
+        // Bounded so a runaway/hostile remote (`yes`, `cat /dev/urandom`) can't
+        // grow this buffer without limit and OOM the app if the main-actor
+        // consumer briefly stalls. The cap is deep enough that normal heavy
+        // output (build logs, a big `cat`) never drops; only a sustained
+        // firehose hits it, and the dropped bytes are the oldest backlog —
+        // already scrolled off the screen the user sees.
+        (output, outputContinuation) = AsyncStream.makeStream(
+            of: Data.self, bufferingPolicy: .bufferingNewest(512)
+        )
     }
 
     func connect(_ config: Configuration) async throws {
@@ -177,30 +187,37 @@ actor SSHConnection {
     func uploadToInbox(_ data: Data, filename: String) async throws -> String {
         guard let client else { throw SSHConnectionError.notConnected }
         let sftp = try await client.openSFTP()
-        defer { Task { try? await sftp.close() } }
-
-        let dir = ".aplusterminal-inbox"
-        var dirAttrs = SFTPFileAttributes()
-        dirAttrs.permissions = 0o700
-        // Best-effort: already-exists is fine; a real failure surfaces on open.
-        try? await sftp.createDirectory(atPath: dir, attributes: dirAttrs)
-
-        let path = "\(dir)/\(filename)"
-        var fileAttrs = SFTPFileAttributes()
-        fileAttrs.permissions = 0o600
-        let file = try await sftp.openFile(
-            filePath: path,
-            flags: [.create, .write, .truncate],
-            attributes: fileAttrs
-        )
         do {
-            try await file.write(ByteBuffer(bytes: data))
-            try await file.close()
+            let dir = ".aplusterminal-inbox"
+            var dirAttrs = SFTPFileAttributes()
+            dirAttrs.permissions = 0o700
+            // Best-effort: already-exists is fine; a real failure surfaces on open.
+            try? await sftp.createDirectory(atPath: dir, attributes: dirAttrs)
+
+            let path = "\(dir)/\(filename)"
+            var fileAttrs = SFTPFileAttributes()
+            fileAttrs.permissions = 0o600
+            let file = try await sftp.openFile(
+                filePath: path,
+                flags: [.create, .write, .truncate],
+                attributes: fileAttrs
+            )
+            do {
+                try await file.write(ByteBuffer(bytes: data))
+                try await file.close()
+            } catch {
+                try? await file.close()
+                throw error
+            }
+            let resolved = (try? await sftp.getRealPath(atPath: path)) ?? path
+            // Close the channel here (awaited) rather than in a detached defer
+            // Task whose error is swallowed and which could outlive disconnect().
+            try? await sftp.close()
+            return resolved
         } catch {
-            try? await file.close()
+            try? await sftp.close()
             throw error
         }
-        return (try? await sftp.getRealPath(atPath: path)) ?? path
     }
 
     func resize(cols: Int, rows: Int) async throws {

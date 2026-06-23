@@ -32,6 +32,7 @@ final class TipStore {
     var lastTipThanked = false
 
     @ObservationIgnored nonisolated(unsafe) private var updatesTask: Task<Void, Never>?
+    @ObservationIgnored private var thankResetTask: Task<Void, Never>?
 
     init() {
         updatesTask = Task { [weak self] in
@@ -88,8 +89,20 @@ final class TipStore {
     private func process(_ verification: VerificationResult<Transaction>) async {
         guard case .verified(let transaction) = verification else { return }
         if StoreProducts.tips.contains(transaction.productID) {
-            lastTipThanked = true
+            showThankYouBriefly()
         }
         await transaction.finish()
+    }
+
+    /// Surface the thank-you, then clear it — the flag is a transient "moment",
+    /// not a permanent state, so it must not latch the label on forever.
+    private func showThankYouBriefly() {
+        lastTipThanked = true
+        thankResetTask?.cancel()
+        thankResetTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.lastTipThanked = false
+        }
     }
 }

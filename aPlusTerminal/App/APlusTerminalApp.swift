@@ -90,7 +90,8 @@ final class DeepLinkRouter {
     var targetSessionID: UUID?
 
     func handle(_ url: URL) {
-        guard url.scheme == "aplusterminal", url.host == "session",
+        // iOS lowercases the scheme but not the host, so compare case-insensitively.
+        guard url.scheme == "aplusterminal", url.host?.lowercased() == "session",
               let id = UUID(uuidString: url.lastPathComponent) else {
             deepLinkLog.debug("router: rejected \(url.absoluteString, privacy: .public)")
             return

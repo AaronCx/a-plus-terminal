@@ -5,6 +5,7 @@ import SwiftUI
 struct TerminalTabView: View {
     @Environment(ServerStore.self) private var serverStore
     @Environment(SessionManager.self) private var sessionManager
+    @Environment(PasswordStore.self) private var passwords
     @Environment(DeepLinkRouter.self) private var router
 
     @State private var editingServer: Server?
@@ -13,6 +14,7 @@ struct TerminalTabView: View {
     @State private var discoveredServer: Server?
     @State private var reachability = ReachabilityStore()
     @State private var wakeSentFor: String?
+    @State private var wakeError: String?
     /// Path-based navigation: replacing the path swaps the visible session
     /// atomically — `navigationDestination(item:)` ignores item changes while
     /// a screen is already pushed (Island switching between sessions).
@@ -67,6 +69,12 @@ struct TerminalTabView: View {
                                             }
                                         }
                                         Button(role: .destructive) {
+                                            // Drop the server's saved password
+                                            // from the Keychain too — otherwise
+                                            // it lingers with no UI to reach it.
+                                            if let ref = server.passwordRef {
+                                                passwords.removePassword(for: ref)
+                                            }
                                             serverStore.remove(id: server.id)
                                         } label: {
                                             Label("Delete", systemImage: "trash")
@@ -150,14 +158,29 @@ struct TerminalTabView: View {
             } message: {
                 Text("Sent a Wake-on-LAN magic packet to \(wakeSentFor ?? ""). The machine may take a few seconds to wake.")
             }
+            .alert(
+                "Couldn't send wake packet",
+                isPresented: Binding(get: { wakeError != nil }, set: { if !$0 { wakeError = nil } })
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(wakeError ?? "")
+            }
         }
     }
 
     private func wake(_ server: Server) {
         guard let mac = server.macAddress else { return }
         Task {
-            try? await WakeOnLAN.wake(macAddress: mac, host: server.host)
-            wakeSentFor = server.name
+            do {
+                // Only claim success once a packet actually went out — a
+                // swallowed error (bad MAC, send failure) must not show the
+                // "Wake packet sent" confirmation.
+                try await WakeOnLAN.wake(macAddress: mac, host: server.host)
+                wakeSentFor = server.name
+            } catch {
+                wakeError = error.localizedDescription
+            }
         }
     }
 

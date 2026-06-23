@@ -28,14 +28,22 @@ enum TestSeed {
             print("TESTSEED: already seeded")
             return
         }
-        do {
-            let key = try keys.importKey(named: "uitest", openSSHPrivateKey: pem)
-            servers.add(Server(name: seed.name, host: seed.host, port: seed.port, username: seed.username, keyID: key.id))
-            print("TESTSEED: seeded ok")
-            return
-        } catch {
-            print("TESTSEED: import failed \(error)")
+        // Reuse an existing seeded key rather than importing a duplicate: the
+        // server could have been deleted while the "uitest" key persisted, and
+        // re-importing every launch would accumulate orphaned keys.
+        let keyID: UUID
+        if let existing = keys.keys.first(where: { $0.name == "uitest" }) {
+            keyID = existing.id
+        } else {
+            do {
+                keyID = try keys.importKey(named: "uitest", openSSHPrivateKey: pem).id
+            } catch {
+                print("TESTSEED: import failed \(error)")
+                return
+            }
         }
+        servers.add(Server(name: seed.name, host: seed.host, port: seed.port, username: seed.username, keyID: keyID))
+        print("TESTSEED: seeded ok")
     }
 }
 #endif

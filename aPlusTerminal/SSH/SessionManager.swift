@@ -77,11 +77,6 @@ final class TerminalSession: Identifiable, Hashable {
     /// window AND `lastMultiplexerTarget` is recorded early — a drop within the
     /// first minute must still reattach to the live session.
     static let defaultFirstKeepaliveDelay: TimeInterval = 10
-    /// Refresh the reattach target on every keepalive tick (~25s). It must be
-    /// captured *while the user is attached*; refreshing too rarely means a
-    /// session entered and dropped between ticks records no target, so the
-    /// reconnect can't offer a reattach. The exec is cheap.
-    static let multiplexerRefreshEveryTicks = 1
     /// Overridable in tests for fast, deterministic keepalive assertions.
     var keepaliveInterval = TerminalSession.defaultKeepaliveInterval
     var firstKeepaliveDelay = TerminalSession.defaultFirstKeepaliveDelay
@@ -297,12 +292,17 @@ final class TerminalSession: Identifiable, Hashable {
     /// reattach feature (auto on connect/drop AND the paused-card picker).
     var reattachEnabled: Bool { settings.autoReattachMultiplexer }
 
+    /// Count of reconnect runs actually started — a deterministic test seam so
+    /// "must not auto-reconnect" assertions don't depend on a fixed sleep.
+    private(set) var reconnectAttempts = 0
+
     private func reconnect(intent: ReattachIntent, maxAttempts: Int) async {
         guard state == .suspended || state == .reconnecting else { return }
         if let reconnectLoop {
             await reconnectLoop.value
             return
         }
+        reconnectAttempts += 1
         state = .reconnecting
         let loop = Task { await attemptLoop(maxAttempts: maxAttempts, intent: intent) }
         reconnectLoop = loop
@@ -352,7 +352,24 @@ final class TerminalSession: Identifiable, Hashable {
     /// Record the multiplexer session this PTY is attached to (best-guess
     /// auto-reattach target) plus the full session list for the picker. No-op
     /// for the `none` profile.
+    private var recordTask: Task<Void, Never>?
+
     func recordMultiplexerTarget() async {
+        // Single-flight (like reconnect): the keepalive tick and the
+        // background-grace task can both call this, and each has `await`
+        // suspension points where their read-modify-write of `server` would
+        // otherwise interleave. Coalesce concurrent callers onto one run.
+        if let recordTask {
+            await recordTask.value
+            return
+        }
+        let task = Task { await self.performRecordMultiplexerTarget() }
+        recordTask = task
+        await task.value
+        recordTask = nil
+    }
+
+    private func performRecordMultiplexerTarget() async {
         guard state == .connected else { return }
         availableSessions = await MultiplexerController.availableSessions(resolvedMultiplexer, on: connection)
         guard let target = await MultiplexerController.currentTarget(resolvedMultiplexer, on: connection) else { return }
@@ -373,7 +390,6 @@ final class TerminalSession: Identifiable, Hashable {
         let firstDelay = firstKeepaliveDelay
         keepaliveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(firstDelay))
-            var tick = 0
             while !Task.isCancelled {
                 guard let self, self.state == .connected else { return }
                 // Liveness ping on the already-open PTY channel: a no-op
@@ -382,12 +398,12 @@ final class TerminalSession: Identifiable, Hashable {
                 // a new channel or injecting visible input. A same-size
                 // window-change is a no-op to tmux/readline, so nothing redraws.
                 self.sendKeepalivePing()
-                // Less often, refresh the multiplexer reattach target over a
-                // side channel so a later reconnect lands back in the live session.
-                if tick % Self.multiplexerRefreshEveryTicks == 0 {
-                    await self.recordMultiplexerTarget()
-                }
-                tick &+= 1
+                // Refresh the multiplexer reattach target each tick over a side
+                // channel so a later reconnect lands back in the live session.
+                // It must be captured *while the user is attached* — a session
+                // entered and dropped between ticks would otherwise record no
+                // target — and the exec is cheap.
+                await self.recordMultiplexerTarget()
                 try? await Task.sleep(for: .seconds(interval))
             }
         }
@@ -476,8 +492,15 @@ final class TerminalSession: Identifiable, Hashable {
 
     private func establish() async throws {
         let auth: SSHConnection.AuthMethod
-        if let keyID = server.keyID, let privateKey = try? keyStore.privateKey(for: keyID) {
-            auth = .privateKey(privateKey)
+        if let keyID = server.keyID {
+            do {
+                auth = .privateKey(try keyStore.privateKey(for: keyID))
+            } catch {
+                // A configured key that won't load (deleted, Keychain failure,
+                // decode error) must be reported — not silently downgraded to a
+                // password attempt that masks why the key failed.
+                throw SessionError.keyUnavailable(error.localizedDescription)
+            }
         } else if let ref = server.passwordRef, let password = passwords.password(for: ref) {
             auth = .password(password)
         } else {
@@ -572,6 +595,9 @@ final class TerminalSession: Identifiable, Hashable {
             if case .disconnected(let error) = await endedConnection.state {
                 transportError = error
             }
+            // The user may have closed or suspended this session during the
+            // await above; never resurrect a connection they tore down.
+            guard state == .connected else { return }
             // A non-zero shell exit surfaces as CommandFailed — still `exit`.
             if let transportError, !(transportError is SSHClient.CommandFailed) {
                 state = .reconnecting
@@ -585,9 +611,15 @@ final class TerminalSession: Identifiable, Hashable {
 
     enum SessionError: LocalizedError {
         case noCredentials
+        case keyUnavailable(String)
 
         var errorDescription: String? {
-            "No credentials are set for this server. Edit the server and pick a key or set a password."
+            switch self {
+            case .noCredentials:
+                return "No credentials are set for this server. Edit the server and pick a key or set a password."
+            case .keyUnavailable(let detail):
+                return "Couldn't load the configured SSH key (\(detail)). Re-import it in Settings → Manage Keys."
+            }
         }
     }
 }
@@ -676,6 +708,12 @@ final class SessionManager {
             guard let self, let session else { return }
             self.sessions.removeAll { $0.id == session.id }
             self.refreshActivity()
+            // Tear the session down like the X button does. Dropping it from
+            // the list alone leaks the SSH connection (its socket is never
+            // disconnected) and the outbox Task — which holds the session
+            // strongly for the life of its never-finished stream — so every
+            // natural `exit` would accumulate a leaked session + live socket.
+            Task { await session.close() }
         }
         sessions.append(session)
         Task { await session.connect() }
@@ -721,7 +759,6 @@ final class SessionManager {
                 return SessionActivityAttributes.SessionSummary(
                     id: session.id,
                     name: session.server.name,
-                    host: session.server.host,
                     state: stateString,
                     startedAt: session.startedAt,
                     // Never surface a stale agent label on a session that
@@ -770,7 +807,11 @@ final class SessionManager {
         endBackgroundTask()
         // Push the Activity's stale horizon out — content only goes stale
         // when the process is killed or frozen long enough to stop updating.
+        // refreshActivity() coalesces when the session list is unchanged (the
+        // common case after a background freeze), so also force a stale-date
+        // bump that bypasses that coalescing.
         refreshActivity()
+        activityController.refreshStaleHorizon()
         // Do NOT auto-reconnect: a session that was suspended in the background
         // shows a paused card so the user picks reattach-tmux vs. fresh shell.
     }

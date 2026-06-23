@@ -21,6 +21,17 @@ Include steps to reproduce and the affected version/build where possible. You
 can expect an initial response within a few days. Confirmed issues are fixed in
 the next release and credited unless you prefer to remain anonymous.
 
+## Host-key verification (trust-on-first-use)
+
+a+Terminal pins a server's host key on the first connection and **hard-fails**
+on any later mismatch (no "accept anyway" path), surfacing the expected vs.
+presented fingerprints. The first connection itself is trusted silently — the
+common trust-on-first-use model for mobile SSH clients — so the protection is
+against a key *changing* under you, not against a MITM on the very first
+connect. If a server is legitimately reinstalled, remove and re-add it to
+re-pin. (A future enhancement could prompt to confirm the fingerprint on first
+connect; the mismatch protection is the property that matters most today.)
+
 ## Scope
 
 In scope: the app's handling of SSH credentials/keys, host-key verification

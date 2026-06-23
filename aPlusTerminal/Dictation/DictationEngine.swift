@@ -16,16 +16,30 @@ final class DictationEngine {
 
     private(set) var state: State = .idle
     private(set) var transcript = ""
+    /// True once the recognizer delivers a final (non-partial) result.
+    private(set) var isFinal = false
+
+    // The input level is written from the real-time audio tap (a non-main
+    // thread) and read by the waveform ~30×/s. A lock keeps it ordered and
+    // cheap; the previous `Task { @MainActor … }` per buffer could deliver
+    // levels out of order and piled up unbounded tasks during teardown.
+    private let levelLock = NSLock()
+    nonisolated(unsafe) private var _audioLevel: Float = 0
     /// 0…1 input level for the waveform display.
-    private(set) var audioLevel: Float = 0
+    nonisolated var audioLevel: Float { levelLock.withLock { _audioLevel } }
 
     private let audioEngine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
+    /// Set when we deliberately end audio / stop, so the recognizer's expected
+    /// post-stop cancellation error isn't surfaced as a failure.
+    private var intentionallyStopped = false
 
     func start() async {
         guard state != .listening else { return }
         transcript = ""
+        isFinal = false
+        intentionallyStopped = false
 
         let speechAuth = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
@@ -50,9 +64,7 @@ final class DictationEngine {
             return
         }
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.requiresOnDeviceRecognition = true
-        request.shouldReportPartialResults = true
+        let request = Self.makeRecognitionRequest()
         self.request = request
 
         do {
@@ -64,10 +76,7 @@ final class DictationEngine {
             let format = inputNode.outputFormat(forBus: 0)
             inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
                 request.append(buffer)
-                let level = Self.level(of: buffer)
-                Task { @MainActor [weak self] in
-                    self?.audioLevel = level
-                }
+                self?.storeLevel(Self.level(of: buffer))
             }
             audioEngine.prepare()
             try audioEngine.start()
@@ -83,9 +92,11 @@ final class DictationEngine {
                 guard let self else { return }
                 if let result {
                     self.transcript = result.bestTranscription.formattedString
+                    if result.isFinal { self.isFinal = true }
                 }
-                if let error, self.state == .listening {
-                    // Cancellation after stop() is expected; surface real errors.
+                if let error, !self.intentionallyStopped {
+                    // A genuine recognition error mid-listening. The expected
+                    // cancellation after a deliberate stop is gated out above.
                     self.state = .failed(error.localizedDescription)
                     self.stopAudio()
                 }
@@ -93,7 +104,29 @@ final class DictationEngine {
         }
     }
 
+    /// Builds the recognition request with the zero-data flags locked on.
+    /// Factored out so a unit test can assert the on-device requirement holds.
+    nonisolated static func makeRecognitionRequest() -> SFSpeechAudioBufferRecognitionRequest {
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.requiresOnDeviceRecognition = true
+        request.shouldReportPartialResults = true
+        return request
+    }
+
+    /// For auto-send: stop feeding audio so the recognizer emits a *final*
+    /// result, wait briefly for it, then return that — falling back to the
+    /// latest partial. Avoids transmitting a partial the recognizer revises.
+    func finishForAutoSend() async -> String {
+        guard state == .listening else { return transcript }
+        endAudioInput()
+        for _ in 0..<15 where !isFinal {   // up to ~1.5s
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return transcript
+    }
+
     func stop() {
+        intentionallyStopped = true
         stopAudio()
         task?.cancel()
         task = nil
@@ -103,14 +136,31 @@ final class DictationEngine {
         }
     }
 
+    /// Stop capturing/feeding audio so the recognizer can finalize, *without*
+    /// cancelling the recognition task or deactivating the session (the final
+    /// result still needs to arrive).
+    private func endAudioInput() {
+        intentionallyStopped = true
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        audioEngine.inputNode.removeTap(onBus: 0)
+        request?.endAudio()
+        levelLock.withLock { _audioLevel = 0 }
+    }
+
     private func stopAudio() {
         if audioEngine.isRunning {
             audioEngine.stop()
         }
         audioEngine.inputNode.removeTap(onBus: 0)
         request?.endAudio()
-        audioLevel = 0
+        levelLock.withLock { _audioLevel = 0 }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    nonisolated private func storeLevel(_ value: Float) {
+        levelLock.withLock { _audioLevel = value }
     }
 
     private nonisolated static func level(of buffer: AVAudioPCMBuffer) -> Float {

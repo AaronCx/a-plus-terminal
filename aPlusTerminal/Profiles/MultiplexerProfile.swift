@@ -21,9 +21,17 @@ struct MultiplexerProfile: Codable, Identifiable, Hashable {
     var builtIn: Bool = true
 
     /// Renders `attachTemplate` for a concrete target; nil if unsupported.
+    /// The target is shell-quoted because it comes from the multiplexer's own
+    /// `list-sessions` output and is typed into an interactive shell — a name
+    /// with spaces or metacharacters must stay one literal argument.
     func attachCommand(target: String) -> String? {
         guard let attachTemplate else { return nil }
-        return attachTemplate.replacingOccurrences(of: "{target}", with: target)
+        return attachTemplate.replacingOccurrences(of: "{target}", with: Self.shellQuote(target))
+    }
+
+    /// POSIX single-quoting: wrap in single quotes, escaping any embedded ones.
+    static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 

@@ -43,6 +43,19 @@ final class TerminalLiveQAUITests: XCTestCase {
         return "LiveQA"
     }
 
+    /// The server row's subtitle ("username@host"), derived from the seed so the
+    /// test carries no hardcoded personal username.
+    private var seededServerSubtitle: String {
+        let env = ProcessInfo.processInfo.environment["APLUSTERMINAL_TEST_SERVER"] ?? ""
+        if let data = env.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let user = obj["username"] as? String,
+           let host = obj["host"] as? String {
+            return "\(user)@\(host)"
+        }
+        return "user@127.0.0.1"
+    }
+
     private func openSession() {
         let row = app.staticTexts[seededServerName]
         XCTAssertTrue(row.waitForExistence(timeout: 10), "seeded server row \(seededServerName) missing")
@@ -203,7 +216,7 @@ final class TerminalLiveQAUITests: XCTestCase {
 
         // Session B — tap the server row specifically (its subtitle is
         // unambiguous; the session row is also labeled "LiveQA").
-        app.staticTexts["acx@127.0.0.1"].tap()
+        app.staticTexts[seededServerSubtitle].tap()
         sleep(4)
         type("clear; echo SCREEN-OF-SESSION-B\n")
         app.navigationBars.buttons.firstMatch.tap()
@@ -247,7 +260,9 @@ final class TerminalLiveQAUITests: XCTestCase {
         // Hero: a real tmux session with a generic, colorful dev command —
         // brand-neutral (no third-party CLI), shows tmux + SSH on a phone.
         type("tmux kill-session -t shots 2>/dev/null; tmux new -s shots\n", settle: 4)
-        type("clear; git -C ~/Developer/github/a-plus-terminal log --graph --oneline -16 --color=always 2>/dev/null || ls -la\n", settle: 4)
+        // Repo dir is overridable so no personal path is baked into the repo;
+        // falls back to the remote cwd (then `ls -la`) when unset.
+        type("clear; git -C \"${APLUSTERMINAL_SHOT_REPO:-.}\" log --graph --oneline -16 --color=always 2>/dev/null || ls -la\n", settle: 4)
         shot("shot-01-hero")
 
         // Scrollable output

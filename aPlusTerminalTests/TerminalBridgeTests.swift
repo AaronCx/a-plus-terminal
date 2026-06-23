@@ -86,4 +86,23 @@ final class TerminalBridgeTests: XCTestCase {
         XCTAssertEqual(TerminalKey.up.bytes(applicationCursor: false), [0x1B, 0x5B, 0x41])  // ESC [ A
         XCTAssertEqual(TerminalKey.up.bytes(applicationCursor: true), [0x1B, 0x4F, 0x41])   // ESC O A
     }
+
+    func testHomeEndHonorApplicationCursorMode() {
+        XCTAssertEqual(TerminalKey.home.bytes(applicationCursor: false), [0x1B, 0x5B, 0x48])  // ESC [ H
+        XCTAssertEqual(TerminalKey.home.bytes(applicationCursor: true), [0x1B, 0x4F, 0x48])   // ESC O H
+        XCTAssertEqual(TerminalKey.end.bytes(applicationCursor: false), [0x1B, 0x5B, 0x46])   // ESC [ F
+        XCTAssertEqual(TerminalKey.end.bytes(applicationCursor: true), [0x1B, 0x4F, 0x46])    // ESC O F
+    }
+
+    func testStickyCtrlIsConsumedByAccessoryKeyAndDoesNotLeak() {
+        let (bridge, sent) = makeBridge()
+        bridge.ctrlActive = true
+        bridge.sendKey(.tab)  // no Ctrl-Tab chord exists — sends plain Tab
+        XCTAssertEqual(sent(), [Data([0x09])], "accessory key is sent normally")
+        XCTAssertFalse(bridge.ctrlActive, "sticky Ctrl must disarm, never leak onto the next key")
+
+        // The next typed character must therefore be unaffected.
+        XCTAssertFalse(bridge.handleInsert("c"), "Ctrl already disarmed — plain c, no 0x03")
+        XCTAssertEqual(sent().count, 1, "no stray control byte was emitted")
+    }
 }

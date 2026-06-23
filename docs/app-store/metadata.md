@@ -40,8 +40,8 @@ SSH connection.
 **Free forever.** Every feature is free. If a+Terminal saves you time, there's a
 tip jar. Nothing is paywalled, ever.
 
-- ed25519 keys generated on-device, stored in the Keychain (never exportable,
-  never in backups)
+- ed25519 keys generated on-device, stored in the Keychain (this device only,
+  never in backups; exportable only by your explicit action in Manage Keys)
 - Trust-on-first-use host key pinning with hard mismatch failures
 - Sticky Ctrl key, Esc/Tab/arrows accessory bar
 - Attach an image or file from your phone over the existing SSH connection
