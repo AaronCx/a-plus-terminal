@@ -77,7 +77,7 @@ final class ServerModelTests: XCTestCase {
     func testLegacyServerJSONDecodesWithoutMACAddress() throws {
         let legacy = """
         [{"id":"00000000-0000-0000-0000-000000000001","name":"mini",
-          "host":"10.0.0.2","port":22,"username":"acx"}]
+          "host":"10.0.0.2","port":22,"username":"user"}]
         """
         let servers = try JSONDecoder().decode([Server].self, from: Data(legacy.utf8))
         XCTAssertEqual(servers.count, 1)
@@ -86,7 +86,7 @@ final class ServerModelTests: XCTestCase {
     }
 
     func testMACAddressRoundTripsThroughJSON() throws {
-        var server = Server(name: "mini", host: "10.0.0.2", username: "acx")
+        var server = Server(name: "mini", host: "10.0.0.2", username: "user")
         server.macAddress = "aa:bb:cc:dd:ee:ff"
         let data = try JSONEncoder().encode([server])
         let decoded = try JSONDecoder().decode([Server].self, from: data)
