@@ -31,7 +31,7 @@
     {
       "id": "gemini-cli",
       "displayName": "Gemini CLI",
-      "detectionMarkers": ["gemini"],
+      "detectionMarkers": ["gemini cli"],
       "attachTemplate": "{path} ",
       "builtIn": true
     },
