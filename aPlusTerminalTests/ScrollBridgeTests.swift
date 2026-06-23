@@ -28,6 +28,20 @@ final class ScrollBridgeCoreTests: XCTestCase {
         XCTAssertEqual(core.ticks(forDeltaY: -36), -2)
     }
 
+    func testNegativeResidualAccumulatesAndTruncatesTowardZero() {
+        // Mirror of the positive residual matrix: truncation toward zero means a
+        // sub-tick negative delta yields 0, and residual carries to the next.
+        var core = ScrollBridgeCore()
+        XCTAssertEqual(core.ticks(forDeltaY: -10), 0, "below one tick of travel")
+        XCTAssertEqual(core.ticks(forDeltaY: -10), -1, "accumulated -20pt → one tick down")
+        XCTAssertEqual(core.ticks(forDeltaY: -16), -1, "-2pt residual + -16pt → one tick down")
+
+        // Mixed sign: a positive delta nets the negative residual back toward zero.
+        var mixed = ScrollBridgeCore()
+        XCTAssertEqual(mixed.ticks(forDeltaY: -10), 0)
+        XCTAssertEqual(mixed.ticks(forDeltaY: 28), 1, "−10 + 28 = 18pt → one tick up")
+    }
+
     func testResetClearsResidual() {
         var core = ScrollBridgeCore()
         _ = core.ticks(forDeltaY: 17)

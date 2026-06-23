@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import UIKit
 import UniformTypeIdentifiers
 
@@ -26,6 +27,14 @@ enum ImageNormalizer {
         // Fast path: a format agents already read, already under the cap.
         if passthroughExtensions.contains(ext), data.count <= maxBytes {
             return (data, ext == "jpeg" ? "jpg" : ext)
+        }
+
+        // An animated GIF over the cap can't be losslessly downscaled with
+        // UIKit; re-encoding flattens it to a single still frame. Pass the
+        // original bytes through instead (the agent enforces its own size cap)
+        // rather than silently dropping the animation.
+        if ext == "gif", Self.isAnimated(data) {
+            return (data, "gif")
         }
 
         guard let image = UIImage(data: data) else {
@@ -79,6 +88,12 @@ enum ImageNormalizer {
         let longest = max(image.size.width, image.size.height)
         guard longest > maxDimension else { return image }
         return resize(image, scale: maxDimension / longest)
+    }
+
+    /// True when `data` decodes to more than one frame (animated GIF).
+    private static func isAnimated(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return false }
+        return CGImageSourceGetCount(source) > 1
     }
 
     private static func resize(_ image: UIImage, scale: CGFloat) -> UIImage {

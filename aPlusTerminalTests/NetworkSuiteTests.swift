@@ -55,19 +55,11 @@ final class ReachabilityTests: XCTestCase {
     }
 
     func testClosedPortIsUnreachable() async {
-        // Reserve a port by binding a listener, then close it — nothing is
-        // listening there for the duration of the probe.
-        let listener = try? NWListener(using: .tcp, on: .any)
-        listener?.start(queue: .global())
-        var port: UInt16 = 1
-        for _ in 0..<50 where (listener?.port?.rawValue ?? 0) == 0 {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        port = listener?.port?.rawValue ?? 1
-        listener?.cancel()
-        try? await Task.sleep(nanoseconds: 300_000_000)
-
-        let up = await ServerReachability.isReachable(host: "127.0.0.1", port: Int(port), timeout: 2)
+        // Probe TEST-NET-1 (192.0.2.0/24, RFC 5737) — reserved for documentation
+        // and guaranteed non-routable, so the connection can't succeed. This
+        // avoids the flaky ephemeral-port-reuse race of binding-then-closing a
+        // real port (the OS can hand that port to another process mid-test).
+        let up = await ServerReachability.isReachable(host: "192.0.2.1", port: 22, timeout: 2)
         XCTAssertFalse(up)
     }
 }

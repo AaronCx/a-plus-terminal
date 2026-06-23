@@ -28,13 +28,17 @@ final class BonjourBrowser {
             using: NWParameters()
         )
         browser.browseResultsChangedHandler = { [weak self] results, _ in
+            var seen = Set<String>()
             let found = results.compactMap { result -> DiscoveredService? in
                 guard case .service(let name, _, _, _) = result.endpoint else { return nil }
+                // One service advertised on several interfaces appears multiple
+                // times — keep the first occurrence per name.
+                guard seen.insert(name).inserted else { return nil }
                 return DiscoveredService(name: name, endpoint: result.endpoint)
-            }
-            Task { @MainActor [weak self] in
-                self?.services = found.sorted { $0.name < $1.name }
-            }
+            }.sorted { $0.name < $1.name }
+            // Already on the main queue (browser.start(queue: .main)), so assign
+            // directly — an extra Task hop only adds latency and a reorder window.
+            MainActor.assumeIsolated { self?.services = found }
         }
         browser.start(queue: .main)
         self.browser = browser

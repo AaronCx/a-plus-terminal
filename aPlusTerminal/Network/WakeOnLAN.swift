@@ -41,6 +41,11 @@ enum WakeOnLAN {
     /// iOS gates broadcast behind the multicast entitlement — the broadcast
     /// attempt failing is expected and harmless; unicast still wakes hosts
     /// whose ARP entry is alive on the router.
+    ///
+    /// Best-effort by nature: unicast needs a live L2 path (a host asleep long
+    /// enough for its ARP entry to expire can't be reached this way), and the
+    /// limited-broadcast copy carries the target MAC to the whole local subnet.
+    /// All traffic stays on the LAN — nothing leaves the network.
     static func wake(macAddress: String, host: String, port: UInt16 = 9) async throws {
         let packet = magicPacket(mac: try parseMAC(macAddress))
         await send(packet, to: host, port: port)
