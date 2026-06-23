@@ -58,7 +58,19 @@ final class TerminalBridge {
 
     func sendKey(_ key: TerminalKey) {
         let applicationCursor = terminalView?.getTerminal().applicationCursor ?? false
-        send(consumePrefixBytes() + key.bytes(applicationCursor: applicationCursor))
+        let keyBytes = key.bytes(applicationCursor: applicationCursor)
+        let prefix = consumePrefixBytes()
+        // Sticky Ctrl arms the *next* key. Apply it to a single-byte accessory
+        // key the same way the typed path does, and always disarm it so it
+        // can't silently leak onto a later typed character.
+        if ctrlActive {
+            ctrlActive = false
+            if keyBytes.count == 1, let control = Self.controlByte(forByte: keyBytes[0]) {
+                send(prefix + [control])
+                return
+            }
+        }
+        send(prefix + keyBytes)
     }
 
     private func consumePrefixBytes() -> [UInt8] {
@@ -125,13 +137,20 @@ final class TerminalBridge {
 
     private static func controlByte(for text: String) -> UInt8? {
         guard text.count == 1,
-              let scalar = text.uppercased().unicodeScalars.first,
+              let scalar = text.unicodeScalars.first,
               scalar.isASCII else {
             return nil
         }
-        switch UInt8(scalar.value) {
-        case let byte where (0x40...0x5F).contains(byte):
-            return byte & 0x1F
+        return controlByte(forByte: UInt8(scalar.value))
+    }
+
+    /// The control byte for a single ASCII byte (e.g. `c`/`C` → 0x03), or nil
+    /// if it has no control mapping. Letters are normalized to uppercase.
+    private static func controlByte(forByte byte: UInt8) -> UInt8? {
+        let upper = (0x61...0x7A).contains(byte) ? byte - 0x20 : byte
+        switch upper {
+        case 0x40...0x5F:
+            return upper & 0x1F
         case 0x20:
             return 0x00
         case 0x3F:

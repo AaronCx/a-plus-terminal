@@ -5,7 +5,8 @@ enum TerminalKey {
     case esc, tab, up, down, left, right, pipe, tilde, dash
     case slash, ctrlC, ctrlD, home, end, pageUp, pageDown
 
-    /// Wire bytes; arrows honor DECCKM application cursor mode.
+    /// Wire bytes; cursor keys (arrows + Home/End) honor DECCKM application
+    /// cursor mode, matching what full-screen apps and multiplexers expect.
     func bytes(applicationCursor: Bool) -> [UInt8] {
         let esc: UInt8 = 0x1B
         switch self {
@@ -21,8 +22,8 @@ enum TerminalKey {
         case .slash: return [0x2F]
         case .ctrlC: return [0x03]
         case .ctrlD: return [0x04]
-        case .home: return [esc, 0x5B, 0x48]            // ESC[H
-        case .end: return [esc, 0x5B, 0x46]             // ESC[F
+        case .home: return [esc, applicationCursor ? 0x4F : 0x5B, 0x48]  // ESC O H / ESC[H
+        case .end: return [esc, applicationCursor ? 0x4F : 0x5B, 0x46]   // ESC O F / ESC[F
         case .pageUp: return [esc, 0x5B, 0x35, 0x7E]    // ESC[5~
         case .pageDown: return [esc, 0x5B, 0x36, 0x7E]  // ESC[6~
         }
