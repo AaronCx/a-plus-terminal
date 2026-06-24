@@ -15,10 +15,8 @@
 
 a+Terminal is a privacy-first SSH terminal for working on your own machines
 from your iPhone — built around tmux and CLI AI coding agents. It's
-**agent-agnostic**: run Claude Code, Codex, aider, Gemini CLI, Hermes, or any
-other CLI agent, with plug-and-play profiles you can extend yourself.
-(Not affiliated with Anthropic, OpenAI, Google, or Nous Research; product
-names are trademarks of their respective owners.)
+**agent-agnostic**: run any CLI coding agent, with plug-and-play profiles you
+can extend yourself.
 
 **Scrolling that actually works.** Swipes become real mouse-wheel events, so
 tmux and your agent's output scroll natively, with momentum — no more
@@ -45,9 +43,8 @@ tip jar. Nothing is paywalled, ever.
 - Trust-on-first-use host key pinning with hard mismatch failures
 - Sticky Ctrl key, Esc/Tab/arrows accessory bar
 - Attach an image or file from your phone over the existing SSH connection
-- Plug-and-play agent & multiplexer profiles — Claude Code, Codex, aider,
-  Gemini CLI, Hermes, tmux, zellij, screen — or define your own, no update
-  required
+- Plug-and-play agent & multiplexer profiles — any CLI agent, tmux, zellij,
+  screen — or define your own, no update required
 - Multiple simultaneous sessions
 - Light, dark, and follow-system themes
 
