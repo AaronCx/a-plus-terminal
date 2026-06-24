@@ -17,7 +17,7 @@
     {
       "id": "codex",
       "displayName": "Codex",
-      "detectionMarkers": ["openai codex"],
+      "detectionMarkers": ["codex"],
       "attachTemplate": "{path} ",
       "builtIn": true
     },
