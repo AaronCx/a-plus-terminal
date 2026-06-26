@@ -6,9 +6,9 @@ import StoreKit
 /// is no subscription, and nothing in the app is ever paywalled.
 /// Must match App Store Connect and aPlusTerminal.storekit.
 enum StoreProducts {
-    static let tipSmall = "com.aaroncx.aplusterminal.tips.small"
-    static let tipMedium = "com.aaroncx.aplusterminal.tips.medium"
-    static let tipLarge = "com.aaroncx.aplusterminal.tips.large"
+    static let tipSmall = "com.aaroncx.aplusterminal.tipjar.small"
+    static let tipMedium = "com.aaroncx.aplusterminal.tipjar.medium"
+    static let tipLarge = "com.aaroncx.aplusterminal.tipjar.large"
 
     static let tips = [tipSmall, tipMedium, tipLarge]
     static let all = tips
