@@ -15,7 +15,7 @@
           "locale" : "en_US"
         }
       ],
-      "productID" : "com.aaroncx.aplusterminal.tips.small",
+      "productID" : "com.aaroncx.aplusterminal.tipjar.small",
       "referenceName" : "Small Tip",
       "type" : "Consumable"
     },
@@ -30,7 +30,7 @@
           "locale" : "en_US"
         }
       ],
-      "productID" : "com.aaroncx.aplusterminal.tips.medium",
+      "productID" : "com.aaroncx.aplusterminal.tipjar.medium",
       "referenceName" : "Medium Tip",
       "type" : "Consumable"
     },
@@ -45,7 +45,7 @@
           "locale" : "en_US"
         }
       ],
-      "productID" : "com.aaroncx.aplusterminal.tips.large",
+      "productID" : "com.aaroncx.aplusterminal.tipjar.large",
       "referenceName" : "Large Tip",
       "type" : "Consumable"
     }

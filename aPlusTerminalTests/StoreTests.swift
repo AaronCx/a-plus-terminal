@@ -6,9 +6,9 @@ import XCTest
 final class StoreProductsTests: XCTestCase {
     func testProductIdentifiersAreStable() {
         XCTAssertEqual(StoreProducts.tips, [
-            "com.aaroncx.aplusterminal.tips.small",
-            "com.aaroncx.aplusterminal.tips.medium",
-            "com.aaroncx.aplusterminal.tips.large",
+            "com.aaroncx.aplusterminal.tipjar.small",
+            "com.aaroncx.aplusterminal.tipjar.medium",
+            "com.aaroncx.aplusterminal.tipjar.large",
         ])
         XCTAssertEqual(StoreProducts.all.count, 3, "tips only — no subscription")
     }

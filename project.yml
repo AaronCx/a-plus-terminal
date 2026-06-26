@@ -11,7 +11,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # One source of truth for both targets — the app and widget MUST ship with
     # identical versions or App Store Connect rejects the upload.
-    CURRENT_PROJECT_VERSION: "17"
+    CURRENT_PROJECT_VERSION: "18"
     MARKETING_VERSION: "1.0"
 packages:
   # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
