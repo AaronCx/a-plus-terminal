@@ -67,7 +67,9 @@ struct WakeableServerOptionsProvider: DynamicOptionsProvider {
 struct WakeServerIntent: AppIntent {
     static let title: LocalizedStringResource = "Wake Server"
     static let description = IntentDescription(
-        "Sends a Wake-on-LAN magic packet to a saved server with a MAC address.")
+        // ITMS-90626: intent metadata may not contain the word "mac" (Apple
+        // platform term) — say "hardware address", never "MAC address".
+        "Sends a Wake-on-LAN magic packet to a saved server with a stored hardware address.")
     // The app process holds the local-network permission — run in-app.
     static let openAppWhenRun = true
 
@@ -81,7 +83,7 @@ struct WakeServerIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         // Same send path as the server row's "Wake Server" button.
         guard let saved = servers.server(for: server.id), let mac = saved.macAddress else {
-            return .result(dialog: "\(server.name) has no saved MAC address.")
+            return .result(dialog: "\(server.name) has no saved hardware address.")
         }
         try await WakeOnLAN.wake(macAddress: mac, host: saved.host)
         return .result(dialog: "Magic packet sent to \(server.name).")
