@@ -36,6 +36,50 @@ enum ServerReachability {
     }
 }
 
+/// Async gate on network availability: the reconnect loop pauses while the
+/// radio is down and fires the moment the path returns.
+enum NetworkPathWaiter {
+    enum Result: Equatable {
+        /// The path was satisfied when asked — no waiting happened.
+        case alreadySatisfied
+        /// The path was down and became satisfied within the timeout.
+        case restored
+        /// The path stayed unsatisfied for the whole timeout.
+        case timedOut
+    }
+
+    static func awaitPath(timeout: TimeInterval) async -> Result {
+        let monitor = NWPathMonitor()
+        defer { monitor.cancel() }
+        return await withCheckedContinuation { continuation in
+            let resumed = ResumeGuard()
+            let sawUnsatisfied = LockedFlag()
+            monitor.pathUpdateHandler = { path in
+                if path.status == .satisfied {
+                    let waited = sawUnsatisfied.isSet
+                    resumed.resumeOnce {
+                        continuation.resume(returning: waited ? .restored : .alreadySatisfied)
+                    }
+                } else {
+                    sawUnsatisfied.set()
+                }
+            }
+            monitor.start(queue: .global(qos: .utility))
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                resumed.resumeOnce { continuation.resume(returning: .timedOut) }
+            }
+        }
+    }
+}
+
+/// Lock-protected boolean for cross-queue signaling.
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
+}
+
 /// Single-resume gate for continuation safety across racing callbacks.
 private final class ResumeGuard: @unchecked Sendable {
     private let lock = NSLock()

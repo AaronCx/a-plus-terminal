@@ -23,6 +23,12 @@ struct TerminalTabView: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
+                if let persistError = serverStore.lastPersistError {
+                    Section {
+                        PersistenceWarningRow(message: persistError)
+                    }
+                }
+
                 if !sessionManager.sessions.isEmpty {
                     Section("Sessions") {
                         ForEach(sessionManager.sessions) { session in
@@ -245,6 +251,24 @@ struct SessionRow: View {
         case .suspended: return .orange
         case .closed: return .gray
         }
+    }
+}
+
+/// Warning row shown when a store's last save failed — a full disk or
+/// container failure would otherwise be silent data loss on next launch.
+/// A plain list row (not an alert) on purpose: it must survive being ignored.
+struct PersistenceWarningRow: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(.yellow)
+            Text("Couldn't save changes: \(message). Changes may be lost when the app closes.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

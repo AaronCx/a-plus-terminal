@@ -91,6 +91,20 @@ final class ServerStoreTests: XCTestCase {
         XCTAssertNil(store.servers[0].passwordRef)
     }
 
+    func testPersistFailureIsSurfaced() {
+        // A path that can't be written (nonexistent root-level directory)
+        // must set lastPersistError instead of silently losing the change.
+        let store = ServerStore(fileURL: URL(fileURLWithPath: "/nonexistent-root/servers.json"))
+        store.add(Server(name: "a", host: "h", username: "u"))
+        XCTAssertNotNil(store.lastPersistError)
+    }
+
+    func testSuccessfulPersistClearsError() {
+        let store = ServerStore(fileURL: fileURL)
+        store.add(Server(name: "a", host: "h", username: "u"))
+        XCTAssertNil(store.lastPersistError)
+    }
+
     func testStoredJSONContainsNoPrivateKeyMaterial() throws {
         let store = ServerStore(fileURL: fileURL)
         store.add(Server(name: "Mac mini", host: "mini.local", username: "user", keyID: UUID()))

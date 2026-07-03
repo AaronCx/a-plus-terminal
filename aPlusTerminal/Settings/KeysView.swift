@@ -16,6 +16,11 @@ struct KeysView: View {
 
     var body: some View {
         List {
+            if let persistError = keyStore.lastPersistError {
+                Section {
+                    PersistenceWarningRow(message: persistError)
+                }
+            }
             if keyStore.keys.isEmpty {
                 ContentUnavailableView(
                     "No Keys",

@@ -129,6 +129,23 @@ final class KeyStoreTests: XCTestCase {
         XCTAssertEqual(try store.privateKey(for: key.id).rawRepresentation, original.rawRepresentation)
     }
 
+    func testPersistFailureIsSurfaced() throws {
+        // Mirrors ServerStoreTests: an unwritable metadata path must surface
+        // via lastPersistError rather than silently dropping key metadata.
+        let store = KeyStore(
+            secrets: secrets,
+            metadataURL: URL(fileURLWithPath: "/nonexistent-root/keys.json")
+        )
+        try store.generateKey(named: "doomed-save")
+        XCTAssertNotNil(store.lastPersistError)
+    }
+
+    func testSuccessfulPersistClearsError() throws {
+        let store = makeStore()
+        try store.generateKey(named: "saved")
+        XCTAssertNil(store.lastPersistError)
+    }
+
     func testDeleteRemovesSecretAndMetadata() throws {
         let store = makeStore()
         let key = try store.generateKey(named: "doomed")

@@ -64,6 +64,15 @@ final class ReachabilityTests: XCTestCase {
     }
 }
 
+final class NetworkPathWaiterTests: XCTestCase {
+    /// CI simulators have a live network: the waiter must return immediately
+    /// with .alreadySatisfied rather than blocking.
+    func testReturnsAlreadySatisfiedOnLiveNetwork() async {
+        let result = await NetworkPathWaiter.awaitPath(timeout: 5)
+        XCTAssertEqual(result, .alreadySatisfied)
+    }
+}
+
 final class ServerModelTests: XCTestCase {
     /// Server lists saved by builds that predate macAddress must keep decoding.
     func testLegacyServerJSONDecodesWithoutMACAddress() throws {
