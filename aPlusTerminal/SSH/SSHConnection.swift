@@ -7,13 +7,16 @@ import NIOSSH
 enum SSHConnectionError: LocalizedError {
     /// The server presented a host key that doesn't match the pinned one.
     /// There is deliberately no "accept anyway" path (§4.1 — MITM protection).
-    case hostKeyMismatch(expectedFingerprint: String, presentedFingerprint: String)
+    /// `presentedKey` is the full OpenSSH line the server presented (public
+    /// information) — carried so an explicit, reviewed re-pin can store the
+    /// exact key the user saw, never a re-fetched one.
+    case hostKeyMismatch(expectedFingerprint: String, presentedFingerprint: String, presentedKey: String)
     case notConnected
 
     var errorDescription: String? {
         switch self {
-        case .hostKeyMismatch(let expected, let presented):
-            return "Host key mismatch — possible man-in-the-middle attack. Expected \(expected) but the server presented \(presented). If the server was legitimately reinstalled, remove it in a+Terminal and add it again."
+        case .hostKeyMismatch(let expected, let presented, _):
+            return "Host key mismatch — possible man-in-the-middle attack. Expected \(expected) but the server presented \(presented). If the server was legitimately reinstalled, review the change before trusting the new key."
         case .notConnected:
             return "Not connected."
         }
@@ -66,7 +69,8 @@ final class TOFUHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unc
         } else {
             validationCompletePromise.fail(SSHConnectionError.hostKeyMismatch(
                 expectedFingerprint: HostKeyFingerprint.fingerprint(ofOpenSSHKey: pinnedKey),
-                presentedFingerprint: HostKeyFingerprint.fingerprint(ofOpenSSHKey: presented)
+                presentedFingerprint: HostKeyFingerprint.fingerprint(ofOpenSSHKey: presented),
+                presentedKey: presented
             ))
         }
     }
@@ -245,7 +249,8 @@ actor SSHConnection {
         }
         return .hostKeyMismatch(
             expectedFingerprint: HostKeyFingerprint.fingerprint(ofOpenSSHKey: pinned),
-            presentedFingerprint: HostKeyFingerprint.fingerprint(ofOpenSSHKey: presented)
+            presentedFingerprint: HostKeyFingerprint.fingerprint(ofOpenSSHKey: presented),
+            presentedKey: presented
         )
     }
 

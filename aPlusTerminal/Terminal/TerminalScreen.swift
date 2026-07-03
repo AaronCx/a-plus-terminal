@@ -39,8 +39,20 @@ struct TerminalScreen: View {
                     ProgressView("Reconnecting…")
                 }
             case .suspended:
-                if let error = session.lastError {
-                    // An actual connection failure (host-key mismatch, auth, …).
+                if let conflict = session.hostKeyConflict {
+                    // Host-key mismatch: hard-failed already (no silent
+                    // accept); offer the review-then-re-pin flow.
+                    HostKeyConflictView(
+                        serverName: session.server.name,
+                        conflict: conflict,
+                        onAccept: { await session.acceptRotatedHostKey() },
+                        onClose: {
+                            sessionManager.close(session)
+                            dismiss()
+                        }
+                    )
+                } else if let error = session.lastError {
+                    // An actual connection failure (auth, unreachable, …).
                     ConnectionFailureView(message: error) {
                         Task { await session.reconnect(maxAttempts: 1) }
                     } onClose: {
@@ -282,8 +294,9 @@ struct ReattachPickerView: View {
     }
 }
 
-/// Hard-fail sheet; host key mismatches arrive here with the fingerprint diff
-/// in the message. Deliberately no "trust anyway" button (§4.1).
+/// Hard-fail card for generic connection failures (auth, unreachable, …).
+/// Host-key mismatches route to `HostKeyConflictView` instead; there is
+/// deliberately no "trust anyway" button here (§4.1).
 struct ConnectionFailureView: View {
     let message: String
     var onRetry: () -> Void

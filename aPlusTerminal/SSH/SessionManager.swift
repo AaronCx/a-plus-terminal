@@ -39,6 +39,11 @@ final class TerminalSession: Identifiable, Hashable {
         }
     }
     private(set) var lastError: String?
+    /// Set when a (re)connect failed on a host-key mismatch: both
+    /// fingerprints plus the full presented key line, so the user can review
+    /// and *explicitly* re-pin after a legitimate server reinstall. There is
+    /// still no silent-accept path (§4.1); this is review-then-decide only.
+    private(set) var hostKeyConflict: (expectedFingerprint: String, presentedFingerprint: String, presentedKey: String)?
     /// SessionManager hook for Live Activity updates (§4.5).
     @ObservationIgnored var onStateChange: (() -> Void)?
     /// Fired when the remote shell ends on its own (the user typed `exit`).
@@ -334,6 +339,26 @@ final class TerminalSession: Identifiable, Hashable {
     /// Dismiss the picker and stay in the plain shell.
     func dismissReattachChoice() { reattachChoicePending = false }
 
+    /// Explicit user decision after reviewing a host-key change on the
+    /// conflict sheet: re-pin the exact presented key that was reviewed,
+    /// persist it, and reconnect. NEVER called automatically — the only call
+    /// site is the destructive confirm button.
+    func acceptRotatedHostKey() async {
+        guard let conflict = hostKeyConflict else { return }
+        server.knownHostKey = conflict.presentedKey
+        serverStore.update(server)
+        hostKeyConflict = nil
+        await reconnectChoosingSession()
+    }
+
+    #if DEBUG
+    /// Test-only: inject a conflict so accept-path assertions don't need a
+    /// live mismatching server.
+    func _setHostKeyConflictForTesting(expected: String, presented: String, presentedKey: String) {
+        hostKeyConflict = (expected, presented, presentedKey)
+    }
+    #endif
+
     /// Cleanly close the socket while backgrounded; tmux survives.
     func suspend() async {
         guard state == .connected else { return }
@@ -440,6 +465,7 @@ final class TerminalSession: Identifiable, Hashable {
                 try await establish()
                 state = .connected
                 lastError = nil
+                hostKeyConflict = nil
                 // Make the PTY match the on-screen size before anything
                 // (especially a multiplexer attach) draws into it.
                 await syncWindowSize()
@@ -447,7 +473,8 @@ final class TerminalSession: Identifiable, Hashable {
                 return
             } catch {
                 lastError = error.localizedDescription
-                if case SSHConnectionError.hostKeyMismatch = error {
+                if case SSHConnectionError.hostKeyMismatch(let expected, let presented, let presentedKey) = error {
+                    hostKeyConflict = (expected, presented, presentedKey)
                     break  // MITM warning — never retry past it silently
                 }
                 if attempt < maxAttempts {
