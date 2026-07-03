@@ -85,6 +85,12 @@ final class SessionActivityControllerTests: XCTestCase {
         controller.update(with: [summary(), summary()])
         XCTAssertEqual(controller.lastPushedState?.activeCount, 2, "new sessions must produce live content after a zero state")
     }
+
+    func testWindDownForBackgroundReturnsWithEmptyQueue() async {
+        let controller = SessionActivityController()
+        await controller.windDownForBackground() // must not hang
+        XCTAssertEqual(controller.pushCount, 0)
+    }
 }
 
 /// Regression coverage for the agent label leaking onto a session that is no
@@ -296,5 +302,15 @@ final class SessionActivityRuntimeTests: XCTestCase {
         try await Task.sleep(nanoseconds: 500_000_000)
         XCTAssertEqual(controller.pushCount, pushesAfterEnd,
                        "heartbeat must stop after the Activity ends")
+    }
+}
+
+final class SessionStateActivityTests: XCTestCase {
+    func testOnlyLiveStatesCountTowardActivity() {
+        XCTAssertTrue(SessionState.connecting.isLiveForActivity)
+        XCTAssertTrue(SessionState.connected.isLiveForActivity)
+        XCTAssertTrue(SessionState.reconnecting.isLiveForActivity)
+        XCTAssertFalse(SessionState.suspended.isLiveForActivity)
+        XCTAssertFalse(SessionState.closed.isLiveForActivity)
     }
 }

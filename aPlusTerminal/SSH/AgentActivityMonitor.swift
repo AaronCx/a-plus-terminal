@@ -31,6 +31,14 @@ final class AgentActivityMonitor {
     var onChange: (() -> Void)?
 
     private static let tailWindowBytes = 128
+    /// Raw tail of recent output kept for idle-prompt detection — wider than
+    /// the marker window because a prompt trails escape-heavy redraws.
+    private static let promptTailBytes = 256
+    /// Characters that, as the last non-whitespace of the ANSI-stripped tail,
+    /// read as a bare shell prompt. Deliberately conservative — agent TUIs
+    /// never end an idle frame with a bare POSIX terminator. Extend here for
+    /// fancy prompts (e.g. "❯") if a real one proves safe.
+    static let promptTerminators: Set<Character> = ["%", "$", "#"]
 
     private let candidates: [AgentProfile]
     /// Candidates that carry markers — scanned to upgrade `detected`.
@@ -56,6 +64,9 @@ final class AgentActivityMonitor {
     /// Raw byte tail of the previous chunk so a marker — or a multibyte UTF-8
     /// sequence — split across reads is reassembled before decoding.
     private var carryBytes: [UInt8] = []
+    /// Raw tail of recent output, checked for an idle shell prompt when the
+    /// quiet timer fires.
+    private var promptTail: [UInt8] = []
 
     init(candidates: [AgentProfile], quietInterval: TimeInterval = 2, burstThreshold: Int = 200) {
         self.candidates = candidates
@@ -76,6 +87,7 @@ final class AgentActivityMonitor {
     private var activeBurst: Int { detected?.burstThreshold ?? defaultBurst }
 
     func observe(_ bytes: [UInt8]) {
+        promptTail = Array((promptTail + bytes).suffix(Self.promptTailBytes))
         // Keep scanning until a named profile latches, even after the generic
         // heuristic has gone active — so "Agent" upgrades to the real name.
         if detected == nil, !markerCandidates.isEmpty {
@@ -97,6 +109,7 @@ final class AgentActivityMonitor {
         detected = explicitAgent
         burstBytes = 0
         carryBytes = []
+        promptTail = []
         if status != .none {
             transition(to: .none)
         }
@@ -132,10 +145,71 @@ final class AgentActivityMonitor {
             try? await Task.sleep(nanoseconds: UInt64(quiet * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
             self.burstBytes = 0
-            if self.status == .working {
+            guard self.status != .none else { return }
+            if self.tailShowsIdleShellPrompt() {
+                // The "burst" was a login banner / MOTD / multiplexer redraw,
+                // or the agent has exited: the session sits at a bare shell
+                // prompt, so nothing is waiting for input. Clear status and
+                // un-latch a name the marker scan may have picked up from
+                // banner text (an explicit user pick keeps its name).
+                self.detected = self.explicitAgent
+                self.transition(to: .none)
+            } else if self.status == .working {
                 self.transition(to: .waiting)
             }
         }
+    }
+
+    private func tailShowsIdleShellPrompt() -> Bool {
+        Self.endsAtShellPrompt(String(decoding: promptTail, as: UTF8.self))
+    }
+
+    /// True when the ANSI-stripped tail ends at a bare shell prompt (`%`,
+    /// `$`, `#`, optionally trailed by whitespace or cursor noise). Agent
+    /// TUIs end idle frames with box borders or hint text, never a bare
+    /// POSIX prompt terminator.
+    static func endsAtShellPrompt(_ tail: String) -> Bool {
+        let stripped = stripANSI(tail)
+        guard let last = stripped.reversed().first(where: { !$0.isWhitespace }) else {
+            return false
+        }
+        return promptTerminators.contains(last)
+    }
+
+    /// Removes CSI (`ESC [ … final`), OSC (`ESC ] … BEL` / `ESC \`) and
+    /// two-character escapes so prompt detection sees what the user sees.
+    static func stripANSI(_ text: String) -> String {
+        var result = String.UnicodeScalarView()
+        var scalars = text.unicodeScalars[...]
+        while let scalar = scalars.first {
+            scalars = scalars.dropFirst()
+            guard scalar.value == 0x1B else {
+                result.append(scalar)
+                continue
+            }
+            guard let introducer = scalars.first else { break }
+            scalars = scalars.dropFirst()
+            switch introducer {
+            case "[":
+                // CSI: skip parameter/intermediate bytes up to a final byte.
+                while let byte = scalars.first {
+                    scalars = scalars.dropFirst()
+                    if (0x40...0x7E).contains(byte.value) { break }
+                }
+            case "]":
+                // OSC: terminated by BEL or ESC-backslash (ST).
+                var previous: UnicodeScalar?
+                while let byte = scalars.first {
+                    scalars = scalars.dropFirst()
+                    if byte.value == 0x07 { break }
+                    if previous?.value == 0x1B, byte == "\\" { break }
+                    previous = byte
+                }
+            default:
+                break // two-character escape: introducer already consumed
+            }
+        }
+        return String(result)
     }
 
     private func transition(to newStatus: Status) {

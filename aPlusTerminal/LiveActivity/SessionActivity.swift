@@ -198,6 +198,15 @@ final class SessionActivityController {
         enqueue { await activity.update(content) }
     }
 
+    /// Awaits every queued ActivityKit mutation. Called at the tail of the
+    /// background grace window, after sessions are suspended: the zero-state
+    /// `end(..., dismissalPolicy: .after(...))` enqueued by that suspend must
+    /// be submitted while the process still has background time. Safe to call
+    /// with an empty queue.
+    func windDownForBackground() async {
+        await applyTask?.value
+    }
+
     /// Test-only: immediate teardown for deterministic assertions. Runtime
     /// teardown goes through `update(with:)`'s graceful zero-state + system
     /// dismissal instead, so this is intentionally not wired to `closeAll()`.
