@@ -12,17 +12,16 @@ enum SessionState: Equatable {
     case reconnecting
     case closed
 
-    /// Whether this state counts toward the Live Activity's live-session
-    /// total (§4.5). A suspended session has no socket and no agent stream —
-    /// when only suspended sessions remain, the Activity must take the
-    /// zero-state wind-down path, or backgrounding leaves it on screen
-    /// forever with no process alive to update or end it.
-    var isLiveForActivity: Bool {
-        switch self {
-        case .connecting, .connected, .reconnecting: return true
-        case .suspended, .closed: return false
-        }
-    }
+    /// Whether this state counts toward the Live Activity (§4.5). Every
+    /// *open* session counts — including `.suspended`, whose socket is gone
+    /// but whose app session is still open and reattachable (it renders as
+    /// "Paused"). PR #76 excluded `.suspended`, which wound the Activity down
+    /// ~60s after backgrounding even though the in-app session persisted as a
+    /// reattachable paused card; the Activity must instead end only when the
+    /// last session actually closes. Orphan cleanup for a process that dies
+    /// while suspended is handled by the staleDate + launch-time reconcile in
+    /// `SessionActivityController`, not by dropping paused sessions here.
+    var representsOpenSession: Bool { self != .closed }
 }
 
 /// One terminal session: owns the SSH connection, the persistent SwiftTerm
@@ -763,6 +762,9 @@ final class SessionManager {
         self.profiles = profiles
         // A surviving Live Activity from a previous launch must reflect this
         // process's truth (no sessions yet) instead of stale ones (§4.5).
+        // The controller adopts one survivor in its init; this zero push then
+        // takes the end path on it — the cleanup for an Activity orphaned by
+        // a force-quit while suspended, whose sessions no longer exist.
         refreshActivity()
     }
 
@@ -817,12 +819,11 @@ final class SessionManager {
     /// Live Activity mirror of the session list (§4.5).
     private func refreshActivity() {
         let summaries = sessions
-            // Only live states count (§4.5). A `.closed` session is on its way
-            // out of `sessions` this same tick; a `.suspended` one has no
-            // socket — counting it kept activeCount > 0 after the background
-            // grace suspend, so the Activity never wound down and lingered
-            // after the app was gone.
-            .filter { $0.state.isLiveForActivity }
+            // Every open session counts (§4.5), paused ones included — the
+            // Activity mirrors open app sessions, not live sockets. A
+            // `.closed` session is on its way out of `sessions` this same
+            // tick and is the only state that leaves the summary.
+            .filter { $0.state.representsOpenSession }
             .map { session -> SessionActivityAttributes.SessionSummary in
                 let stateString: String = {
                     switch session.state {
@@ -904,12 +905,15 @@ final class SessionManager {
             for session in self.sessions where session.state == .connected {
                 await session.suspend()
             }
-            // Each suspend() fires onStateChange → refreshActivity(), which
-            // (with no live sessions left) enqueues the zero-state
-            // end(.after(grace)). That mutation must reach ActivityKit before
-            // iOS suspends the process, or the dismissal is never registered
-            // and the Activity is orphaned — the original bug.
-            await self.activityController.windDownForBackground()
+            // Each suspend() fires onStateChange → refreshActivity(), whose
+            // final push carries the sessions as *paused* (they still count —
+            // the app session is open and reattachable) with the hours-long
+            // pausedStaleWindow horizon, since nothing runs after iOS
+            // suspends us. That mutation must reach ActivityKit before the
+            // suspension, or the lock screen keeps claiming connected
+            // sessions whose sockets are gone — same flush criticality as
+            // PR #76's zero-state wind-down, different final content.
+            await self.activityController.flushActivityUpdates()
             self.endBackgroundTask()
         }
     }
