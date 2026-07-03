@@ -100,4 +100,12 @@ final class ServerStoreTests: XCTestCase {
         XCTAssertFalse(json.contains("PRIVATE KEY"))
         XCTAssertFalse(json.contains("ssh-ed25519"))
     }
+
+    func testServerEntityMapping() {
+        let server = Server(name: "Mini", host: "mac-mini.local", username: "aaron", macAddress: "aa:bb:cc:dd:ee:ff")
+        let entity = ServerEntity(server)
+        XCTAssertEqual(entity.id, server.id)
+        XCTAssertEqual(entity.name, "Mini")
+        XCTAssertTrue(entity.hasMAC)
+    }
 }

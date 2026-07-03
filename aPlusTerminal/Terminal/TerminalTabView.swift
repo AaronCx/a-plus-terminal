@@ -99,10 +99,14 @@ struct TerminalTabView: View {
             .onChange(of: router.targetSessionID) { _, _ in
                 consumeDeepLink()
             }
+            .onChange(of: router.connectServerID) { _, _ in
+                consumeConnectRequest()
+            }
             .onAppear {
-                // A cold-launch deep link can land before this view observes
-                // changes — consume whatever is already pending.
+                // A cold-launch deep link (or App Intent) can land before this
+                // view observes changes — consume whatever is already pending.
                 consumeDeepLink()
+                consumeConnectRequest()
             }
             .task {
                 await reachability.refresh(serverStore.servers)
@@ -209,6 +213,26 @@ struct TerminalTabView: View {
         }
         deepLinkLog.debug("consume: switching path to \(session.id.uuidString, privacy: .public)")
         path = [session]
+    }
+
+    /// App Intent / aplusterminal://connect/<uuid> → open a session to the
+    /// saved server. If a session to that server is already open, focus it
+    /// instead of stacking a duplicate. A stale or unknown server ID is
+    /// cleared and ignored — the user just lands in the app.
+    private func consumeConnectRequest() {
+        guard let target = router.connectServerID else { return }
+        router.connectServerID = nil
+        guard let server = serverStore.server(for: target) else {
+            deepLinkLog.debug("connect: no server for \(target.uuidString, privacy: .public)")
+            return
+        }
+        if let existing = sessionManager.sessions.first(where: { $0.server.id == server.id }) {
+            deepLinkLog.debug("connect: focusing existing session \(existing.id.uuidString, privacy: .public)")
+            path = [existing]
+            return
+        }
+        deepLinkLog.debug("connect: opening session to \(server.name, privacy: .public)")
+        path = [sessionManager.open(server: server)]
     }
 }
 
