@@ -160,13 +160,35 @@ final class SSHConnectionTests: XCTestCase {
             try await connection.connect(makeConfig(knownHostKey: impostorKey))
             XCTFail("connect should have failed on host key mismatch")
         } catch let error as SSHConnectionError {
-            guard case .hostKeyMismatch(let expected, let presented) = error else {
+            guard case .hostKeyMismatch(let expected, let presented, _) = error else {
                 return XCTFail("expected hostKeyMismatch, got \(error)")
             }
             XCTAssertTrue(expected.hasPrefix("SHA256:"))
             XCTAssertTrue(presented.hasPrefix("SHA256:"))
             XCTAssertNotEqual(expected, presented, "fingerprint diff must show both keys")
             XCTAssertEqual(presented, HostKeyFingerprint.fingerprint(ofOpenSSHKey: hostKeyLine))
+        }
+    }
+
+    func testMismatchErrorCarriesPresentedKeyLine() async throws {
+        // Pin a key that is NOT the server's: the mismatch error must carry
+        // the exact OpenSSH line the server presented, so an explicit,
+        // reviewed re-pin stores precisely what the user saw — never a
+        // re-fetched key.
+        let pinnedLine = String(
+            openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        )
+
+        let connection = SSHConnection()
+        do {
+            try await connection.connect(makeConfig(knownHostKey: pinnedLine))
+            XCTFail("connect should have failed on host key mismatch")
+        } catch let error as SSHConnectionError {
+            guard case .hostKeyMismatch(_, _, let presentedKey) = error else {
+                return XCTFail("expected hostKeyMismatch, got \(error)")
+            }
+            XCTAssertEqual(presentedKey, hostKeyLine,
+                           "the error must carry the exact presented key line, verbatim")
         }
     }
 

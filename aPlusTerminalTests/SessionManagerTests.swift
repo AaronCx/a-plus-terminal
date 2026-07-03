@@ -400,6 +400,74 @@ final class SessionManagerTests: XCTestCase {
                        "must attach to the picked session, not the best-guess")
     }
 
+    // MARK: - Host-key rotation review (explicit re-pin)
+
+    /// Credential-less server with a pinned key: the auto-connect fails fast
+    /// on `noCredentials` and lands `.suspended`, giving a session on which
+    /// the accept path can be exercised without a live mismatching server.
+    private func makeCredentiallessServer(knownHostKey: String) -> Server {
+        let entry = Server(name: "pinned", host: "127.0.0.1", port: port,
+                           username: "aplusterminal-test", knownHostKey: knownHostKey)
+        serverStore.add(entry)
+        return entry
+    }
+
+    func testHostKeyMismatchRecordsConflictOnSession() async throws {
+        // Pin an impostor key so the real test server mismatches: the session
+        // must record the conflict — both fingerprints plus the exact
+        // presented key line — and stop retrying.
+        let impostorLine = String(
+            openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        )
+        let entry = Server(name: "test", host: "127.0.0.1", port: port,
+                           username: "aplusterminal-test", keyID: storedKey.id,
+                           knownHostKey: impostorLine)
+        serverStore.add(entry)
+        let session = manager.open(server: entry)
+        try await waitFor("mismatch to suspend the session") { session.state == .suspended }
+
+        let conflict = try XCTUnwrap(session.hostKeyConflict, "mismatch must record the conflict for review")
+        XCTAssertEqual(conflict.presentedKey,
+                       String(openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: hostKey).publicKey),
+                       "the recorded presented key must be the server's exact line")
+        XCTAssertNotEqual(conflict.expectedFingerprint, conflict.presentedFingerprint)
+        XCTAssertEqual(serverStore.server(for: entry.id)?.knownHostKey, impostorLine,
+                       "a mismatch alone must never touch the pinned key")
+    }
+
+    func testAcceptRotatedHostKeyRePinsExactlyTheReviewedKey() async throws {
+        let entry = makeCredentiallessServer(knownHostKey: "ssh-ed25519 OLD")
+        let session = manager.open(server: entry)
+        try await waitFor("credential-less connect to fail fast") { session.state == .suspended }
+
+        session._setHostKeyConflictForTesting(
+            expected: "SHA256:old", presented: "SHA256:new",
+            presentedKey: "ssh-ed25519 NEWKEYLINE")
+        await session.acceptRotatedHostKey()
+
+        XCTAssertNil(session.hostKeyConflict, "accept must clear the conflict")
+        XCTAssertEqual(serverStore.server(for: entry.id)?.knownHostKey, "ssh-ed25519 NEWKEYLINE",
+                       "accept must pin exactly the reviewed presented key — nothing re-fetched")
+        // The reconnect kicked off by accept fails fast on the credential-less
+        // fixture and settles back to suspended.
+        XCTAssertEqual(session.state, .suspended)
+    }
+
+    func testAcceptWithoutConflictIsANoOp() async throws {
+        let originalPinnedLine = "ssh-ed25519 ORIGINALPIN"
+        let entry = makeCredentiallessServer(knownHostKey: originalPinnedLine)
+        let session = manager.open(server: entry)
+        try await waitFor("credential-less connect to fail fast") { session.state == .suspended }
+
+        let attemptsBefore = session.reconnectAttempts
+        await session.acceptRotatedHostKey()
+
+        XCTAssertEqual(serverStore.server(for: entry.id)?.knownHostKey, originalPinnedLine,
+                       "no conflict → the pinned key must be untouched")
+        XCTAssertEqual(session.reconnectAttempts, attemptsBefore,
+                       "no conflict → accept must not trigger a reconnect")
+    }
+
     func testKeepaliveEmitsPeriodicWindowChangesWhileIdle() async throws {
         // The drop-at-~3min regression: with no typing, the keepalive must keep
         // putting real packets on the *live PTY channel* (a no-op window-change)
