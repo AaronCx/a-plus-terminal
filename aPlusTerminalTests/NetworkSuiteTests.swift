@@ -85,3 +85,27 @@ final class ServerModelTests: XCTestCase {
         XCTAssertEqual(decoded[0].macAddress, "aa:bb:cc:dd:ee:ff")
     }
 }
+
+final class BonjourResolveHelpersTests: XCTestCase {
+    func testSanitizedHostPreservesIPv6Zone() {
+        XCTAssertEqual(
+            BonjourBrowser.sanitizedHost("fe80::1c2a:9fff:fe4b:1%en0"),
+            "fe80::1c2a:9fff:fe4b:1%en0",
+            "link-local IPv6 is unroutable without its zone")
+    }
+
+    func testSanitizedHostStripsSpuriousIPv4Suffix() {
+        XCTAssertEqual(BonjourBrowser.sanitizedHost("192.168.1.20%en0"), "192.168.1.20")
+    }
+
+    func testSanitizedHostPassesThroughPlainHosts() {
+        XCTAssertEqual(BonjourBrowser.sanitizedHost("192.168.1.20"), "192.168.1.20")
+        XCTAssertEqual(BonjourBrowser.sanitizedHost("fe80::1"), "fe80::1")
+        XCTAssertEqual(BonjourBrowser.sanitizedHost("mac-mini.local"), "mac-mini.local")
+    }
+
+    func testNormalizedHostnameTrimsRootDot() {
+        XCTAssertEqual(BonjourBrowser.normalizedHostname("mac-mini.local."), "mac-mini.local")
+        XCTAssertEqual(BonjourBrowser.normalizedHostname("mac-mini.local"), "mac-mini.local")
+    }
+}
