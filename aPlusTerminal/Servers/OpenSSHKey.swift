@@ -141,7 +141,7 @@ enum OpenSSHKey {
             case .encryptedKeyUnsupported:
                 return "Passphrase-protected keys aren't supported. Import an unencrypted key."
             case .unsupportedKeyType(let type):
-                return "Unsupported key type \(type). a+Terminal supports Ed25519 and ECDSA (P-256/P-384/P-521) keys. RSA and FIDO security-key types aren't supported — generate an Ed25519 key instead."
+                return "Unsupported key type \(type). a+Terminal supports Ed25519 and ECDSA (P-256/P-384/P-521) keys. RSA and FIDO security-key types aren't supported — generate an Ed25519 key instead." // lastgate-ignore (user-facing error copy, not a credential)
             case .malformed:
                 return "The key data is malformed."
             }

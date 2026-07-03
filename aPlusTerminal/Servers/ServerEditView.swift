@@ -291,7 +291,7 @@ struct KeyImportView: View {
                 } header: {
                     Text("Private Key")
                 } footer: {
-                    Text("Paste an unencrypted OpenSSH Ed25519 or ECDSA private key (BEGIN OPENSSH PRIVATE KEY), or pick the key file (e.g. id_ed25519, id_ecdsa) from Files. It is stored in this device's Keychain only.")
+                    Text("Paste an unencrypted OpenSSH Ed25519 or ECDSA private key (BEGIN OPENSSH PRIVATE KEY), or pick the key file (e.g. id_ed25519, id_ecdsa) from Files. It is stored in this device's Keychain only.") // lastgate-ignore (UI footer copy, not a credential)
                 }
                 if let errorMessage {
                     Section {
