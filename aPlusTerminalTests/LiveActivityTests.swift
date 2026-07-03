@@ -54,6 +54,29 @@ final class DeepLinkRouterTests: XCTestCase {
         router.handle(URL(string: "aplusterminal://session/not-a-uuid")!)
         XCTAssertNil(router.targetSessionID)
     }
+
+    func testConnectLinkRoutes() {
+        let router = DeepLinkRouter()
+        let id = UUID()
+        router.handle(URL(string: "aplusterminal://connect/\(id.uuidString)")!)
+        XCTAssertEqual(router.connectServerID, id)
+        XCTAssertNil(router.targetSessionID, "connect must not masquerade as a session link")
+    }
+
+    func testConnectLinkRejectsGarbage() {
+        let router = DeepLinkRouter()
+        router.handle(URL(string: "aplusterminal://connect/not-a-uuid")!)
+        XCTAssertNil(router.connectServerID)
+        router.handle(URL(string: "https://connect/\(UUID().uuidString)")!)
+        XCTAssertNil(router.connectServerID)
+    }
+
+    func testRequestConnectSetsTarget() {
+        let router = DeepLinkRouter()
+        let id = UUID()
+        router.requestConnect(toServer: id)
+        XCTAssertEqual(router.connectServerID, id)
+    }
 }
 
 @MainActor

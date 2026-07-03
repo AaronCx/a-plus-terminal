@@ -7,7 +7,9 @@ import os
 /// status widget can read it; falls back to Application Support when the
 /// group container is unavailable (tests, simulators without entitlements).
 @Observable
-final class ServerStore {
+final class ServerStore: @unchecked Sendable {
+    // @unchecked Sendable: required by AppDependencyManager/@Dependency (App
+    // Intents). All mutation happens on the main thread via SwiftUI.
     static let appGroupID = "group.com.aaroncx.aplusterminal"
 
     private(set) var servers: [Server] = []

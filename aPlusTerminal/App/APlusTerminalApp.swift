@@ -1,3 +1,4 @@
+import AppIntents
 import SwiftUI
 import os
 
@@ -14,7 +15,7 @@ struct APlusTerminalApp: App {
     @State private var settings: AppSettings
     @State private var profiles: ProfileStore
     @State private var sessions: SessionManager
-    @State private var router = DeepLinkRouter()
+    @State private var router: DeepLinkRouter
     @State private var tipStore = TipStore()
 
     init() {
@@ -31,6 +32,12 @@ struct APlusTerminalApp: App {
         let passwords = PasswordStore()
         _passwords = State(initialValue: passwords)
         _sessions = State(initialValue: SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles))
+        let router = DeepLinkRouter()
+        _router = State(initialValue: router)
+        // App Intents resolve these via @Dependency; the intents run in this
+        // process (openAppWhenRun), so they share the live instances.
+        AppDependencyManager.shared.add(dependency: router)
+        AppDependencyManager.shared.add(dependency: servers)
         #if DEBUG
         TestSeed.applyIfRequested(servers: servers, keys: keys)
         #endif
@@ -85,18 +92,37 @@ struct RootTabView: View {
 /// Routes aplusterminal://session/<uuid> deep links from the Live Activity /
 /// Dynamic Island into the matching session (§4.5).
 @Observable
-final class DeepLinkRouter {
+final class DeepLinkRouter: @unchecked Sendable {
     /// Set when a deep link arrives; TerminalTabView consumes it.
     var targetSessionID: UUID?
+    /// Set when an App Intent (or aplusterminal://connect/<uuid>) asks to
+    /// open a session to a saved server; TerminalTabView consumes it.
+    var connectServerID: UUID?
+
+    func requestConnect(toServer id: UUID) {
+        deepLinkLog.debug("router: connect request \(id.uuidString, privacy: .public)")
+        connectServerID = id
+    }
 
     func handle(_ url: URL) {
         // iOS lowercases the scheme but not the host, so compare case-insensitively.
-        guard url.scheme == "aplusterminal", url.host?.lowercased() == "session",
-              let id = UUID(uuidString: url.lastPathComponent) else {
+        guard url.scheme == "aplusterminal" else {
             deepLinkLog.debug("router: rejected \(url.absoluteString, privacy: .public)")
             return
         }
-        deepLinkLog.debug("router: target=\(id.uuidString, privacy: .public)")
-        targetSessionID = id
+        switch url.host?.lowercased() {
+        case "session":
+            guard let id = UUID(uuidString: url.lastPathComponent) else { break }
+            deepLinkLog.debug("router: target=\(id.uuidString, privacy: .public)")
+            targetSessionID = id
+            return
+        case "connect":
+            guard let id = UUID(uuidString: url.lastPathComponent) else { break }
+            requestConnect(toServer: id)
+            return
+        default:
+            break
+        }
+        deepLinkLog.debug("router: rejected \(url.absoluteString, privacy: .public)")
     }
 }
