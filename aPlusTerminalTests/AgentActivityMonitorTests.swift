@@ -109,4 +109,74 @@ final class AgentActivityMonitorTests: XCTestCase {
         monitor.observe(bytes(String(repeating: "a", count: 5000)))
         XCTAssertEqual(monitor.status, .none, "no candidates → detection disabled")
     }
+
+    // MARK: - Idle-prompt detection (connect-banner false positive fix)
+
+    func testConnectBannerEndingAtPromptClearsStatus() async {
+        let monitor = autoMonitor(quietInterval: 0.1)
+        let banner = "Last login: Tue Jul  1 on ttys001\r\n"
+            + String(repeating: "Welcome to the mini. ", count: 20)
+            + "\u{1B}[1;32maaron@mac-mini\u{1B}[0m ~ % "
+        monitor.observe(bytes(banner))
+        XCTAssertEqual(monitor.status, .working, "banner burst trips the threshold first")
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.status, .none, "an idle shell prompt is not an agent waiting for input")
+    }
+
+    func testBannerLatchedNameRevertsInAutoMode() async {
+        let monitor = autoMonitor(quietInterval: 0.1)
+        let banner = String(repeating: "x", count: 300)
+            + " claude code was here \r\naaron@mac-mini ~ $ "
+        monitor.observe(bytes(banner))
+        XCTAssertEqual(monitor.detected?.id, "claude-code", "marker inside banner text latches")
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.status, .none)
+        XCTAssertNil(monitor.detected, "auto-latched name must un-latch at an idle prompt")
+    }
+
+    func testExplicitAgentKeepsNameButClearsStatusAtPrompt() async {
+        let monitor = explicitMonitor(quietInterval: 0.1)
+        monitor.observe(bytes(String(repeating: "x", count: 300) + "\r\nmini# "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.status, .none)
+        XCTAssertEqual(monitor.detected?.id, "claude-code", "explicit pick keeps its name")
+    }
+
+    func testWaitingClearsWhenAgentExitsToPrompt() async {
+        let monitor = explicitMonitor(quietInterval: 0.1)
+        monitor.observe(bytes(String(repeating: "agent output ", count: 50)))
+        XCTAssertEqual(monitor.status, .working)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.status, .waiting)
+
+        // Agent exits; shell paints its prompt (small output, no new burst).
+        monitor.observe(bytes("\r\naaron@mac-mini ~ % "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.status, .none, "a bare prompt after waiting clears the label")
+    }
+
+    func testAgentIdleFrameWithoutPromptStaysWaiting() async {
+        let monitor = explicitMonitor(quietInterval: 0.1)
+        monitor.observe(bytes(String(repeating: "tokens ", count: 50)
+            + "\r\n│ ❯ type a message │\r\n╰────╯ esc to interrupt"))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.status, .waiting, "an agent input box is not a shell prompt")
+    }
+
+    func testStripANSIRemovesCSIAndOSC() {
+        XCTAssertEqual(
+            AgentActivityMonitor.stripANSI("\u{1B}]0;title\u{07}hi \u{1B}[1;32mthere\u{1B}[0m"),
+            "hi there")
+    }
+
+    func testEndsAtShellPromptTerminators() {
+        XCTAssertTrue(AgentActivityMonitor.endsAtShellPrompt("aaron@mini ~ % "))
+        XCTAssertTrue(AgentActivityMonitor.endsAtShellPrompt("mini:~ aaron$"))
+        XCTAssertTrue(AgentActivityMonitor.endsAtShellPrompt("root@mini:/# \u{1B}[?2004h"))
+        XCTAssertFalse(AgentActivityMonitor.endsAtShellPrompt("❯ "))
+        XCTAssertFalse(AgentActivityMonitor.endsAtShellPrompt(""))
+        XCTAssertFalse(AgentActivityMonitor.endsAtShellPrompt("done."))
+    }
 }

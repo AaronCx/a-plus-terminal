@@ -11,6 +11,18 @@ enum SessionState: Equatable {
     case suspended
     case reconnecting
     case closed
+
+    /// Whether this state counts toward the Live Activity's live-session
+    /// total (§4.5). A suspended session has no socket and no agent stream —
+    /// when only suspended sessions remain, the Activity must take the
+    /// zero-state wind-down path, or backgrounding leaves it on screen
+    /// forever with no process alive to update or end it.
+    var isLiveForActivity: Bool {
+        switch self {
+        case .connecting, .connected, .reconnecting: return true
+        case .suspended, .closed: return false
+        }
+    }
 }
 
 /// One terminal session: owns the SSH connection, the persistent SwiftTerm
@@ -739,10 +751,12 @@ final class SessionManager {
     /// Live Activity mirror of the session list (§4.5).
     private func refreshActivity() {
         let summaries = sessions
-            // A `.closed` session is on its way out of `sessions` this same
-            // tick (onShellExit / close remove it); don't let it flicker into
-            // the count.
-            .filter { $0.state != .closed }
+            // Only live states count (§4.5). A `.closed` session is on its way
+            // out of `sessions` this same tick; a `.suspended` one has no
+            // socket — counting it kept activeCount > 0 after the background
+            // grace suspend, so the Activity never wound down and lingered
+            // after the app was gone.
+            .filter { $0.state.isLiveForActivity }
             .map { session -> SessionActivityAttributes.SessionSummary in
                 let stateString: String = {
                     switch session.state {
@@ -824,6 +838,12 @@ final class SessionManager {
             for session in self.sessions where session.state == .connected {
                 await session.suspend()
             }
+            // Each suspend() fires onStateChange → refreshActivity(), which
+            // (with no live sessions left) enqueues the zero-state
+            // end(.after(grace)). That mutation must reach ActivityKit before
+            // iOS suspends the process, or the dismissal is never registered
+            // and the Activity is orphaned — the original bug.
+            await self.activityController.windDownForBackground()
             self.endBackgroundTask()
         }
     }
