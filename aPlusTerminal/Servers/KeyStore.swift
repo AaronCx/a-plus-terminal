@@ -132,6 +132,10 @@ final class PasswordStore {
 @Observable
 final class KeyStore {
     private(set) var keys: [SSHKey] = []
+    /// Set when the last save failed (nil after a successful save). Surfaced
+    /// in Manage Keys so a full disk / container failure isn't silent data
+    /// loss on next launch.
+    private(set) var lastPersistError: String?
 
     private let secrets: SecretStore
     private let metadataURL: URL
@@ -207,6 +211,13 @@ final class KeyStore {
     private func persist() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? (try? encoder.encode(keys))?.write(to: metadataURL, options: .atomic)
+        do {
+            try encoder.encode(keys).write(to: metadataURL, options: .atomic)
+            lastPersistError = nil
+        } catch {
+            lastPersistError = error.localizedDescription
+            Logger(subsystem: "com.aaroncx.aplusterminal", category: "persistence")
+                .error("key metadata save failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

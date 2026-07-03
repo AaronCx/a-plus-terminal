@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 /// JSON-backed host list. Contains no secrets — private keys stay in the
 /// Keychain, referenced by `keyID`. Lives in the App Group container so the
@@ -10,6 +11,10 @@ final class ServerStore {
     static let appGroupID = "group.com.aaroncx.aplusterminal"
 
     private(set) var servers: [Server] = []
+    /// Set when the last save failed (nil after a successful save). Surfaced
+    /// in the servers list so a full disk / container failure isn't silent
+    /// data loss on next launch.
+    private(set) var lastPersistError: String?
 
     private let fileURL: URL
 
@@ -69,6 +74,13 @@ final class ServerStore {
     private func persist() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? (try? encoder.encode(servers))?.write(to: fileURL, options: .atomic)
+        do {
+            try encoder.encode(servers).write(to: fileURL, options: .atomic)
+            lastPersistError = nil
+        } catch {
+            lastPersistError = error.localizedDescription
+            Logger(subsystem: "com.aaroncx.aplusterminal", category: "persistence")
+                .error("server list save failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

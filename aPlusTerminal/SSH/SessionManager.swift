@@ -77,9 +77,23 @@ final class TerminalSession: Identifiable, Hashable {
     /// window AND `lastMultiplexerTarget` is recorded early — a drop within the
     /// first minute must still reattach to the live session.
     static let defaultFirstKeepaliveDelay: TimeInterval = 10
+    /// Multiplexer-target refresh cadence: the first keepalive tick, then
+    /// every Nth. The liveness ping is free (it rides the PTY); the target
+    /// refresh opens an exec channel, so it runs far less often.
+    static let recordEveryNthTick = 4
     /// Overridable in tests for fast, deterministic keepalive assertions.
     var keepaliveInterval = TerminalSession.defaultKeepaliveInterval
     var firstKeepaliveDelay = TerminalSession.defaultFirstKeepaliveDelay
+    /// How long a failed reconnect attempt waits for the network path to
+    /// return before falling back to plain backoff — long enough to ride out
+    /// an elevator or a walk between access points.
+    static let defaultPathWaitBudget: TimeInterval = 60
+    var pathWaitBudget = TerminalSession.defaultPathWaitBudget
+    /// Test seam: replaced in unit tests to simulate path loss/restoration
+    /// without a live NWPathMonitor.
+    var awaitNetworkPath: (TimeInterval) async -> NetworkPathWaiter.Result = {
+        await NetworkPathWaiter.awaitPath(timeout: $0)
+    }
     private(set) var lastRequestedSize: (cols: Int, rows: Int)?
 
     /// Outbound writes (keystrokes, resizes) flow through one FIFO stream
@@ -390,20 +404,24 @@ final class TerminalSession: Identifiable, Hashable {
         let firstDelay = firstKeepaliveDelay
         keepaliveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(firstDelay))
+            var tick = 0
             while !Task.isCancelled {
                 guard let self, self.state == .connected else { return }
+                tick += 1
                 // Liveness ping on the already-open PTY channel: a no-op
                 // window-change emits a real SSH packet that resets NAT idle
                 // timers and the server's ClientAlive counter, without opening
                 // a new channel or injecting visible input. A same-size
                 // window-change is a no-op to tmux/readline, so nothing redraws.
                 self.sendKeepalivePing()
-                // Refresh the multiplexer reattach target each tick over a side
-                // channel so a later reconnect lands back in the live session.
-                // It must be captured *while the user is attached* — a session
-                // entered and dropped between ticks would otherwise record no
-                // target — and the exec is cheap.
-                await self.recordMultiplexerTarget()
+                // Refresh the multiplexer reattach target on the first tick
+                // (a drop within the first minute must still reattach) and
+                // every Nth thereafter (~100s at the default cadence). This
+                // opens an exec channel — the code previously ran it every
+                // 25s while the doc claimed "every Nth tick"; the doc wins.
+                if tick == 1 || tick % Self.recordEveryNthTick == 0 {
+                    await self.recordMultiplexerTarget()
+                }
                 try? await Task.sleep(for: .seconds(interval))
             }
         }
@@ -451,8 +469,18 @@ final class TerminalSession: Identifiable, Hashable {
                     break  // MITM warning — never retry past it silently
                 }
                 if attempt < maxAttempts {
-                    try? await Task.sleep(for: .seconds(delay))
-                    delay = min(delay * 2, 2.0)
+                    // Don't burn retries against a dead radio (§4.1): when
+                    // the path is down, wait — bounded — for it to come back
+                    // and retry immediately with backoff reset. When the path
+                    // is already up (a server-side failure), plain backoff
+                    // applies exactly as before.
+                    switch await awaitNetworkPath(pathWaitBudget) {
+                    case .restored:
+                        delay = 0.5
+                    case .alreadySatisfied, .timedOut:
+                        try? await Task.sleep(for: .seconds(delay))
+                        delay = min(delay * 2, 2.0)
+                    }
                 }
             }
         }

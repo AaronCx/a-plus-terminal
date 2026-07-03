@@ -433,3 +433,70 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(shell.windowSizes.count, afterSuspend, "keepalive must stop once suspended")
     }
 }
+
+@MainActor
+final class ReconnectPathAwarenessTests: XCTestCase {
+    final class Counter { var value = 0 }
+
+    /// A session whose server deliberately has NO credentials: every connect
+    /// attempt fails instantly with SessionError.noCredentials — no sockets,
+    /// no live SSH server needed. Hermetic in-memory stores throughout.
+    private func makeSession() -> TerminalSession {
+        let suffix = UUID().uuidString
+        let keyStore = KeyStore(
+            secrets: InMemorySecretStore(),
+            metadataURL: FileManager.default.temporaryDirectory.appendingPathComponent("keys-\(suffix).json")
+        )
+        let serverStore = ServerStore(
+            fileURL: FileManager.default.temporaryDirectory.appendingPathComponent("servers-\(suffix).json")
+        )
+        let settings = AppSettings(defaults: UserDefaults(suiteName: "ReconnectPathAwarenessTests-\(suffix)")!)
+        let profiles = ProfileStore(
+            agents: [],
+            multiplexers: [MultiplexerProfile(id: "none", displayName: "None (raw shell)")]
+        )
+        let entry = Server(name: "test", host: "127.0.0.1", username: "u")  // no keyID, no passwordRef
+        serverStore.add(entry)
+        return TerminalSession(
+            server: entry,
+            keyStore: keyStore,
+            serverStore: serverStore,
+            passwords: PasswordStore(secrets: InMemorySecretStore()),
+            settings: settings,
+            profiles: profiles
+        )
+    }
+
+    func testRetryGapsConsultThePathSeam() async {
+        let session = makeSession()
+        let consulted = Counter()
+        session.awaitNetworkPath = { _ in consulted.value += 1; return .restored }
+
+        await session.connect()               // maxAttempts 1 → no gap, no consult
+        XCTAssertEqual(consulted.value, 0)
+
+        await session.reconnect(maxAttempts: 3)
+        XCTAssertEqual(consulted.value, 2, "one consult per inter-attempt gap")
+        XCTAssertEqual(session.state, .suspended)
+
+        await session.close()
+    }
+
+    func testTimedOutPathStillRunsPlainBackoff() async {
+        let session = makeSession()
+        session.pathWaitBudget = 0            // tiny budget: gap resolves instantly
+        let consulted = Counter()
+        session.awaitNetworkPath = { budget in
+            consulted.value += 1
+            XCTAssertEqual(budget, 0, "the seam must receive the session's budget")
+            return .timedOut
+        }
+
+        await session.connect()
+        await session.reconnect(maxAttempts: 2)
+        XCTAssertEqual(consulted.value, 1, "the single inter-attempt gap consulted the seam")
+        XCTAssertEqual(session.state, .suspended, "timed-out path falls back to backoff and exhausts attempts")
+
+        await session.close()
+    }
+}
