@@ -50,10 +50,57 @@ final class BonjourBrowser {
         isBrowsing = false
     }
 
-    /// Resolves a Bonjour endpoint to a concrete host + port by opening a
-    /// short-lived TCP connection and reading the remote endpoint it landed
-    /// on. Cancelled immediately — no SSH handshake happens.
+    /// Resolves a Bonjour endpoint to a connectable host + port.
+    ///
+    /// **Primary path:** resolve the service's advertised mDNS hostname
+    /// ("mac-mini.local") via NetService and return that. A hostname is
+    /// stable across relaunches and network changes, and getaddrinfo
+    /// re-resolves it to a correctly-scoped address on every connect —
+    /// link-local IPv6 included.
+    /// **Fallback:** the short-lived-TCP trick below, now preserving the
+    /// IPv6 interface zone.
     nonisolated static func resolve(_ endpoint: NWEndpoint, timeout: TimeInterval = 5) async -> (host: String, port: Int)? {
+        if case .service(let name, let type, let domain, _) = endpoint,
+           let byHostname = await resolveHostname(name: name, type: type, domain: domain, timeout: timeout) {
+            return byHostname
+        }
+        return await resolveConcreteAddress(endpoint, timeout: timeout)
+    }
+
+    /// Resolves the advertised mDNS hostname for a discovered service.
+    /// NetService needs a live run loop: scheduled on `.main`, callbacks fire
+    /// there, and the continuation resumes exactly once from that context.
+    @MainActor
+    private static func resolveHostname(name: String, type: String, domain: String, timeout: TimeInterval) async -> (host: String, port: Int)? {
+        await withCheckedContinuation { continuation in
+            let service = NetService(domain: domain.isEmpty ? "local." : domain, type: type, name: name)
+            let delegate = HostnameResolveDelegate(service: service) { result in
+                continuation.resume(returning: result)
+            }
+            delegate.start(timeout: timeout)
+        }
+    }
+
+    /// mDNS hostnames arrive fully qualified ("mac-mini.local.") — trim the
+    /// trailing root dot before storing or displaying.
+    nonisolated static func normalizedHostname(_ raw: String) -> String {
+        raw.hasSuffix(".") ? String(raw.dropLast()) : raw
+    }
+
+    /// IPv4 addresses can carry a spurious "%interface" suffix that is not
+    /// part of the address — strip it. IPv6 **keeps** its zone: a link-local
+    /// (fe80::…) address is unroutable without "%en0", and stripping it is
+    /// exactly what broke discovered-server connections.
+    nonisolated static func sanitizedHost(_ raw: String) -> String {
+        guard let percent = raw.firstIndex(of: "%") else { return raw }
+        if raw.contains(":") { return raw }  // ":" ⇒ IPv6 ⇒ zone is meaningful
+        return String(raw[..<percent])
+    }
+
+    /// Fallback: resolve to a concrete host + port by opening a short-lived
+    /// TCP connection and reading the remote endpoint it landed on. Cancelled
+    /// immediately — no SSH handshake happens.
+    nonisolated static func resolveConcreteAddress(_ endpoint: NWEndpoint, timeout: TimeInterval = 5) async -> (host: String, port: Int)? {
         let connection = NWConnection(to: endpoint, using: .tcp)
         defer { connection.cancel() }
         return await withCheckedContinuation { continuation in
@@ -63,11 +110,8 @@ final class BonjourBrowser {
                 case .ready:
                     var resolved: (String, Int)?
                     if case .hostPort(let host, let port)? = connection.currentPath?.remoteEndpoint {
-                        // Host renders like "192.168.1.20%en0" on some paths —
-                        // the interface suffix isn't part of the address.
                         let raw = "\(host)"
-                        let cleaned = raw.split(separator: "%").first.map(String.init) ?? raw
-                        resolved = (cleaned, Int(port.rawValue))
+                        resolved = (sanitizedHost(raw), Int(port.rawValue))
                     }
                     resumed.resumeOnce { continuation.resume(returning: resolved) }
                 case .failed, .cancelled:
@@ -81,6 +125,52 @@ final class BonjourBrowser {
                 resumed.resumeOnce { continuation.resume(returning: nil) }
             }
         }
+    }
+}
+
+/// Resolves one NetService to its advertised hostname, exactly once.
+/// Main-run-loop-confined by construction; retains itself (and the service)
+/// until resolution finishes, since NetService holds its delegate weakly.
+private final class HostnameResolveDelegate: NSObject, NetServiceDelegate {
+    private var service: NetService?
+    private var completion: (((host: String, port: Int)?) -> Void)?
+    private var selfRetain: HostnameResolveDelegate?
+
+    init(service: NetService, completion: @escaping (((host: String, port: Int)?) -> Void)) {
+        self.service = service
+        self.completion = completion
+        super.init()
+        self.selfRetain = self
+        service.delegate = self
+    }
+
+    func start(timeout: TimeInterval) {
+        service?.schedule(in: .main, forMode: .common)
+        service?.resolve(withTimeout: timeout)
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard let hostName = sender.hostName, sender.port > 0 else { return finish(nil) }
+        finish((BonjourBrowser.normalizedHostname(hostName), sender.port))
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        finish(nil)
+    }
+
+    func netServiceDidStop(_ sender: NetService) {
+        finish(nil)  // covers timeout paths that stop without an error dict
+    }
+
+    private func finish(_ result: (host: String, port: Int)?) {
+        guard let completion else { return }
+        self.completion = nil
+        service?.delegate = nil
+        service?.stop()
+        service?.remove(from: .main, forMode: .common)
+        service = nil
+        completion(result)
+        selfRetain = nil
     }
 }
 
