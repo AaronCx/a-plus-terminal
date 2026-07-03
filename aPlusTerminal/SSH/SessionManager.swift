@@ -572,7 +572,7 @@ final class TerminalSession: Identifiable, Hashable {
         let auth: SSHConnection.AuthMethod
         if let keyID = server.keyID {
             do {
-                auth = .privateKey(try keyStore.privateKey(for: keyID))
+                auth = .key(try keyStore.storedPrivateKey(for: keyID))
             } catch {
                 // A configured key that won't load (deleted, Keychain failure,
                 // decode error) must be reported — not silently downgraded to a

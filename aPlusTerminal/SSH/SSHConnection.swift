@@ -81,7 +81,7 @@ final class TOFUHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unc
 /// `output`; input goes through `send`.
 actor SSHConnection {
     enum AuthMethod {
-        case privateKey(Curve25519.Signing.PrivateKey)
+        case key(StoredPrivateKey)
         case password(String)
     }
 
@@ -135,8 +135,14 @@ actor SSHConnection {
             port: config.port,
             authenticationMethod: { [auth = config.auth, username = config.username] in
                 switch auth {
-                case .privateKey(let key):
+                case .key(.ed25519(let key)):
                     return .ed25519(username: username, privateKey: key)
+                case .key(.p256(let key)):
+                    return .p256(username: username, privateKey: key)
+                case .key(.p384(let key)):
+                    return .p384(username: username, privateKey: key)
+                case .key(.p521(let key)):
+                    return .p521(username: username, privateKey: key)
                 case .password(let password):
                     return .passwordBased(username: username, password: password)
                 }

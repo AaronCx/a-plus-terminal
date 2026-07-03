@@ -36,6 +36,12 @@ struct KeysView: View {
                         HStack {
                             Text(key.name)
                                 .font(.body.weight(.medium))
+                            Text(key.algorithm.displayName)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.quaternary, in: Capsule())
                             Spacer()
                             if !servers(using: key).isEmpty {
                                 Text(servers(using: key).map(\.name).joined(separator: ", "))
@@ -101,7 +107,7 @@ struct KeysView: View {
             Button("Generate") { generate() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Creates a new ed25519 key pair on this device.")
+            Text("Creates a new key pair on this device. New keys are Ed25519. Importing supports Ed25519 and ECDSA.")
         }
         .sheet(isPresented: $showImport) {
             // The imported key id is intentionally unused here: the keys list
@@ -254,12 +260,18 @@ struct KeyDetailView: View {
             isPresented: $showExporter,
             document: KeyFileDocument(text: revealedPEM ?? ""),
             contentType: .plainText,
-            defaultFilename: "id_ed25519-\(key?.name ?? "key")"
+            defaultFilename: exportFilename
         ) { result in
             if case .failure(let error) = result {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// ssh-keygen-style filename for the exported private key.
+    private var exportFilename: String {
+        let prefix = key?.algorithm == .ed25519 || key == nil ? "id_ed25519" : "id_ecdsa"
+        return "\(prefix)-\(key?.name ?? "key")"
     }
 
     private func servers(using key: SSHKey) -> [Server] {

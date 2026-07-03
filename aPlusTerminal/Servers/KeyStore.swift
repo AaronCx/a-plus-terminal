@@ -10,6 +10,30 @@ struct SSHKey: Codable, Identifiable, Equatable {
     let createdAt: Date
     /// `authorized_keys`-format public key line. Safe to display and export.
     let publicKeyLine: String
+    /// Selects the Keychain decode path. Metadata written before ECDSA
+    /// support has no `algorithm` field; those keys are ed25519 by
+    /// construction, so decoding defaults the field (see `init(from:)`) and
+    /// existing `keys.json` files load unchanged.
+    let algorithm: SSHKeyAlgorithm
+
+    init(id: UUID, name: String, createdAt: Date, publicKeyLine: String, algorithm: SSHKeyAlgorithm) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.publicKeyLine = publicKeyLine
+        self.algorithm = algorithm
+    }
+
+    // Custom decode only for the `algorithm` migration default; `encode`
+    // stays synthesized.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        publicKeyLine = try container.decode(String.self, forKey: .publicKeyLine)
+        algorithm = try container.decodeIfPresent(SSHKeyAlgorithm.self, forKey: .algorithm) ?? .ed25519
+    }
 }
 
 enum KeyStoreError: LocalizedError {
@@ -126,9 +150,10 @@ final class PasswordStore {
     }
 }
 
-/// ed25519 key management: in-app generation, OpenSSH import, public-key export.
-/// Metadata (names, public keys) lives in a JSON file; private key bytes live
-/// only in the Keychain.
+/// SSH key management: in-app generation (ed25519 only), OpenSSH import
+/// (ed25519 + ECDSA), public-key export. Metadata (names, public keys,
+/// algorithm) lives in a JSON file; private key bytes live only in the
+/// Keychain.
 @Observable
 final class KeyStore {
     private(set) var keys: [SSHKey] = []
@@ -152,21 +177,24 @@ final class KeyStore {
         return dir.appendingPathComponent("keys.json")
     }
 
+    /// New keys are always Ed25519 — deliberate; ECDSA is import-only.
     @discardableResult
     func generateKey(named name: String) throws -> SSHKey {
-        let privateKey = Curve25519.Signing.PrivateKey()
-        return try addKey(privateKey, named: name)
+        try addKey(.ed25519(Curve25519.Signing.PrivateKey()), named: name)
     }
 
     @discardableResult
     func importKey(named name: String, openSSHPrivateKey pem: String) throws -> SSHKey {
-        let privateKey = try OpenSSHKey.parsePrivateKey(pem)
-        return try addKey(privateKey, named: name)
+        try addKey(try OpenSSHKey.parsePrivateKey(pem), named: name)
     }
 
-    func privateKey(for id: UUID) throws -> Curve25519.Signing.PrivateKey {
+    /// Loads and decodes the private key. The algorithm comes from the key's
+    /// metadata; a Keychain blob whose metadata is missing decodes as
+    /// ed25519 (the only algorithm older builds could have stored).
+    func storedPrivateKey(for id: UUID) throws -> StoredPrivateKey {
         guard let data = try secrets.secret(for: id.uuidString) else { throw KeyStoreError.keyNotFound }
-        return try Curve25519.Signing.PrivateKey(rawRepresentation: data)
+        let algorithm = key(for: id)?.algorithm ?? .ed25519
+        return try StoredPrivateKey.decode(algorithm: algorithm, rawRepresentation: data)
     }
 
     func key(for id: UUID) -> SSHKey? {
@@ -177,7 +205,7 @@ final class KeyStore {
     /// action — this is the single path by which key material leaves the
     /// Keychain.
     func privateKeyPEM(for id: UUID) throws -> String {
-        let privateKey = try privateKey(for: id)
+        let privateKey = try storedPrivateKey(for: id)
         let name = key(for: id)?.name ?? "key"
         return OpenSSHKey.privateKeyPEM(privateKey, comment: "aplusterminal-\(name)")
     }
@@ -194,14 +222,17 @@ final class KeyStore {
         persist()
     }
 
-    private func addKey(_ privateKey: Curve25519.Signing.PrivateKey, named name: String) throws -> SSHKey {
+    private func addKey(_ privateKey: StoredPrivateKey, named name: String) throws -> SSHKey {
         let id = UUID()
+        // For ed25519 this stores the same raw seed bytes as every earlier
+        // build — the Keychain payload format is unchanged, so no migration.
         try secrets.setSecret(privateKey.rawRepresentation, for: id.uuidString)
         let key = SSHKey(
             id: id,
             name: name,
             createdAt: Date(),
-            publicKeyLine: OpenSSHKey.publicKeyLine(privateKey.publicKey, comment: "aplusterminal-\(name)")
+            publicKeyLine: privateKey.publicKeyLine(comment: "aplusterminal-\(name)"),
+            algorithm: privateKey.algorithm
         )
         keys.append(key)
         persist()
