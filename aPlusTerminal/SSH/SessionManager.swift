@@ -481,10 +481,21 @@ final class TerminalSession: Identifiable, Hashable {
                         try? await Task.sleep(for: .seconds(delay))
                         delay = min(delay * 2, 2.0)
                     }
+                    // The user may have closed the session while this loop was
+                    // suspended in the gap above — close() does not cancel it,
+                    // and the path wait holds a gap open for up to 60s (≈10
+                    // minutes across a full run). Bail instead of letting the
+                    // next establish() resurrect a torn-down session. `.closed`
+                    // is the only bail state: the gap otherwise runs under
+                    // .reconnecting (reconnect flow) or .connecting (initial
+                    // connect), both of which must keep retrying.
+                    if state == .closed { return }
                 }
             }
         }
-        state = .suspended
+        // A close() that landed mid-loop must win — stomping .closed with
+        // .suspended would revive a session the manager already discarded.
+        if state != .closed { state = .suspended }
     }
 
     /// Resume the multiplexer after a (re)connect per `intent`. `.choose` (and a

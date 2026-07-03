@@ -499,4 +499,29 @@ final class ReconnectPathAwarenessTests: XCTestCase {
 
         await session.close()
     }
+
+    /// close() does not cancel the reconnect loop, and the path wait can park
+    /// a gap for up to 60s — a user close landing in that window must end the
+    /// session for good. Before the fix, the loop ran further establish()
+    /// attempts after the gap (resurrection to .connected on success) and its
+    /// exit line stomped .closed with .suspended.
+    func testCloseDuringPathWaitIsNotResurrected() async {
+        let session = makeSession()
+        let consulted = Counter()
+        session.awaitNetworkPath = { [weak session] _ in
+            // Simulate the user closing the session while the reconnect loop
+            // is suspended in the inter-attempt path wait.
+            consulted.value += 1
+            await session?.close()
+            return .restored
+        }
+
+        await session.connect()
+        await session.reconnect(maxAttempts: 3)
+
+        XCTAssertEqual(session.state, .closed,
+                       "a session closed mid-gap must stay closed — never revived to .suspended or .connected")
+        XCTAssertEqual(consulted.value, 1,
+                       "the loop must bail at the first post-gap check instead of running further attempts")
+    }
 }
