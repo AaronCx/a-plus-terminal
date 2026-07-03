@@ -97,7 +97,7 @@ final class SSHConnectionTests: XCTestCase {
             host: "127.0.0.1",
             port: port,
             username: "aplusterminal-test",
-            auth: .privateKey(clientKey),
+            auth: .key(.ed25519(clientKey)),
             knownHostKey: knownHostKey
         )
     }
@@ -225,7 +225,7 @@ final class SSHConnectionTests: XCTestCase {
 private extension SSHConnection.Configuration {
     func with(privateKey: Curve25519.Signing.PrivateKey) -> Self {
         var copy = self
-        copy.auth = .privateKey(privateKey)
+        copy.auth = .key(.ed25519(privateKey))
         return copy
     }
 
