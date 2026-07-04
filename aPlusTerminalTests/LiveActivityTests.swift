@@ -35,6 +35,46 @@ final class SessionActivityContentStateTests: XCTestCase {
         XCTAssertTrue(summary(name: "a", startedAt: .now, state: "connected").isConnected)
         XCTAssertFalse(summary(name: "a", startedAt: .now, state: "suspended").isConnected)
     }
+
+    func testPausedFlag() {
+        XCTAssertTrue(summary(name: "a", startedAt: .now, state: "suspended").isPaused)
+        for state in ["connected", "connecting", "reconnecting", "closed"] {
+            XCTAssertFalse(summary(name: "a", startedAt: .now, state: state).isPaused)
+        }
+    }
+
+    func testAllPausedTruthTable() {
+        let paused = { self.summary(name: "p", startedAt: .now, state: "suspended") }
+        let live = summary(name: "l", startedAt: .now, state: "connected")
+
+        let allPaused = SessionActivityAttributes.ContentState.make(from: [paused(), paused()])
+        XCTAssertEqual(allPaused.pausedCount, 2)
+        XCTAssertTrue(allPaused.allPaused)
+
+        let mixed = SessionActivityAttributes.ContentState.make(from: [paused(), live])
+        XCTAssertEqual(mixed.pausedCount, 1)
+        XCTAssertFalse(mixed.allPaused, "one live session keeps the content on the live stale horizon")
+
+        let empty = SessionActivityAttributes.ContentState.make(from: [])
+        XCTAssertFalse(empty.allPaused, "zero sessions is the end path, not the paused path")
+    }
+
+    func testPausedCountCoversAllSessionsNotJustTheCappedThree() {
+        // The display list is capped at 3, but allPaused drives the stale
+        // horizon and must reflect EVERY open session: an older-but-live
+        // session outside the top 3 means the content is not all-paused.
+        let now = Date()
+        let oldestLive = summary(name: "live", startedAt: now.addingTimeInterval(-100), state: "connected")
+        let newerPaused = (0..<3).map { offset in
+            summary(name: "p\(offset)", startedAt: now.addingTimeInterval(Double(offset)), state: "suspended")
+        }
+        let state = SessionActivityAttributes.ContentState.make(from: newerPaused + [oldestLive])
+        XCTAssertEqual(state.activeCount, 4)
+        XCTAssertEqual(state.sessions.count, 3)
+        XCTAssertTrue(state.sessions.allSatisfy(\.isPaused), "the 3 newest are the paused ones")
+        XCTAssertEqual(state.pausedCount, 3)
+        XCTAssertFalse(state.allPaused, "the live session outside the cap must still count")
+    }
 }
 
 final class DeepLinkRouterTests: XCTestCase {
@@ -81,15 +121,18 @@ final class DeepLinkRouterTests: XCTestCase {
 
 @MainActor
 final class SessionActivityControllerTests: XCTestCase {
-    private func summary() -> SessionActivityAttributes.SessionSummary {
+    private func summary(id: UUID = UUID(), state: String = "connected") -> SessionActivityAttributes.SessionSummary {
         SessionActivityAttributes.SessionSummary(
-            id: UUID(), name: "mini", state: "connected", startedAt: .now
+            id: id, name: "mini", state: state, startedAt: .now
         )
     }
 
     func testZeroSessionsPushesEmptyContent() {
         // Regression: closing the last session left the Island showing the
         // stale "1 session" state for the whole 5-minute grace window.
+        // Under the paused-sessions semantics this zero-state path is still
+        // the one taken when the user closes the last session — only closed
+        // sessions leave the summary.
         let controller = SessionActivityController()
         controller.update(with: [summary()])
         XCTAssertEqual(controller.lastPushedState?.activeCount, 1)
@@ -97,6 +140,53 @@ final class SessionActivityControllerTests: XCTestCase {
         controller.update(with: [])
         XCTAssertEqual(controller.lastPushedState?.activeCount, 0, "grace window must show zero sessions")
         XCTAssertEqual(controller.lastPushedState?.sessions.isEmpty, true)
+    }
+
+    /// Deliberate behavior change from PR #76: backgrounding past the iOS
+    /// allowance suspends every socket, but the app sessions stay open and
+    /// reattachable — the resulting push must carry them as *paused*, never
+    /// the empty zero state that used to end the Activity ~60s in.
+    func testSuspendingAllSessionsPushesPausedContentNotZeroState() {
+        let controller = SessionActivityController()
+        let id = UUID()
+        controller.update(with: [summary(id: id, state: "connected")])
+        XCTAssertEqual(controller.lastPushedState?.activeCount, 1)
+
+        // What finishGrace()'s refreshActivity produces after suspend().
+        controller.update(with: [summary(id: id, state: "suspended")])
+        XCTAssertEqual(controller.lastPushedState?.activeCount, 1,
+                       "a paused session still counts toward the Activity")
+        XCTAssertEqual(controller.lastPushedState?.sessions.first?.isPaused, true)
+        XCTAssertEqual(controller.lastPushedState?.allPaused, true)
+        XCTAssertEqual(controller.lastPushedState?.sessions.isEmpty, false,
+                       "the summary must never be empty while sessions are merely paused")
+    }
+
+    /// The final paused push happens right before iOS suspends the process —
+    /// nothing runs afterwards to refresh the staleDate, so it must carry the
+    /// hours-long `pausedStaleWindow` instead of the heartbeat-scale
+    /// `staleWindow` used while anything is live.
+    func testPausedPushCarriesLongStaleDateLivePushShort() {
+        let controller = SessionActivityController()
+        let id = UUID()
+
+        controller.update(with: [summary(id: id, state: "connected")])
+        guard let liveStale = controller.lastPushedStaleDate else {
+            return XCTFail("live push must record a staleDate")
+        }
+        XCTAssertEqual(liveStale.timeIntervalSinceNow,
+                       SessionActivityController.staleWindow, accuracy: 30,
+                       "live content keeps the short heartbeat-backed horizon")
+
+        controller.update(with: [summary(id: id, state: "suspended")])
+        guard let pausedStale = controller.lastPushedStaleDate else {
+            return XCTFail("paused push must record a staleDate")
+        }
+        XCTAssertEqual(pausedStale.timeIntervalSinceNow,
+                       SessionActivityController.pausedStaleWindow, accuracy: 30,
+                       "the pre-suspension paused push must carry the long horizon")
+        XCTAssertGreaterThan(SessionActivityController.pausedStaleWindow,
+                             SessionActivityController.staleWindow)
     }
 
     func testReviveAfterZeroPushesLiveContent() {
@@ -109,9 +199,9 @@ final class SessionActivityControllerTests: XCTestCase {
         XCTAssertEqual(controller.lastPushedState?.activeCount, 2, "new sessions must produce live content after a zero state")
     }
 
-    func testWindDownForBackgroundReturnsWithEmptyQueue() async {
+    func testFlushActivityUpdatesReturnsWithEmptyQueue() async {
         let controller = SessionActivityController()
-        await controller.windDownForBackground() // must not hang
+        await controller.flushActivityUpdates() // must not hang
         XCTAssertEqual(controller.pushCount, 0)
     }
 }
@@ -326,14 +416,129 @@ final class SessionActivityRuntimeTests: XCTestCase {
         XCTAssertEqual(controller.pushCount, pushesAfterEnd,
                        "heartbeat must stop after the Activity ends")
     }
+
+    /// True once the (sole) Activity has been ended — either it left
+    /// `Activity.activities` (dismissed) or its state moved past `.active`.
+    /// An `end(..., dismissalPolicy: .after(grace))` keeps it on screen for
+    /// the grace window, so "ended but still listed" must count.
+    private func waitUntilEndedOrGone(timeout: TimeInterval = 5) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            guard let first = Activity<SessionActivityAttributes>.activities.first else { return true }
+            if first.activityState != .active { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        } while Date() < deadline
+        return false
+    }
+
+    /// Deliberate behavior change from PR #76: the background grace suspend
+    /// used to empty the summary and take the end() path, killing the
+    /// Activity ~60s after backgrounding while the in-app session lived on as
+    /// a reattachable paused card. Suspending must now keep the real Activity
+    /// alive, flagged paused, with the hours-long stale horizon — this is the
+    /// exact push finishGrace() flushes before the process is suspended.
+    func testSuspendKeepsRealActivityAlivePausedWithLongStaleDate() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+
+        let sid = UUID()
+        controller.update(with: [summary(id: sid, state: "connected", monitor: nil)])
+        _ = await waitForLiveState { $0.sessions.first?.state == "connected" }
+        XCTAssertEqual(Activity<SessionActivityAttributes>.activities.count, 1)
+
+        // finishGrace(): suspend → refreshActivity → flush before suspension.
+        controller.update(with: [summary(id: sid, state: "suspended", monitor: nil)])
+        await controller.flushActivityUpdates()
+
+        let paused = await waitForLiveState { $0.sessions.first?.state == "suspended" }
+        XCTAssertEqual(paused?.activeCount, 1, "the paused session still counts")
+        XCTAssertEqual(paused?.sessions.first?.isPaused, true)
+        XCTAssertEqual(paused?.allPaused, true)
+        XCTAssertEqual(
+            Activity<SessionActivityAttributes>.activities.first?.activityState, .active,
+            "suspending must NOT take the end() path — the app session is still open"
+        )
+        if let stale = Activity<SessionActivityAttributes>.activities.first?.content.staleDate {
+            XCTAssertGreaterThan(
+                stale.timeIntervalSinceNow, 3600,
+                "the final pre-suspension push must carry an hours-long staleDate — nothing runs afterwards to refresh it"
+            )
+        } else {
+            XCTFail("paused content must carry a staleDate")
+        }
+
+        await controller.endNow()
+    }
+
+    /// Closing the last session (the summary genuinely empties) must still
+    /// take the zero-state end path with the system-grace dismissal.
+    func testClosingLastSessionStillEndsActivity() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+
+        controller.update(with: [summary(id: UUID(), state: "connected", monitor: nil)])
+        _ = await waitForLiveState { $0.sessions.first?.state == "connected" }
+
+        controller.update(with: [])  // user closed the last session
+        await controller.flushActivityUpdates()
+        XCTAssertEqual(controller.lastPushedState?.activeCount, 0)
+        let ended = await waitUntilEndedOrGone()
+        XCTAssertTrue(ended, "closing the last session must end the Activity (grace wind-down)")
+
+        await controller.endNow()
+    }
+
+    /// Force-quit while suspended delivers no willTerminate, so the paused
+    /// Activity outlives the process. The next launch must reconcile it: the
+    /// fresh controller adopts the orphan, and the manager's launch-time zero
+    /// push (no sessions exist yet in a new process) ends it.
+    func testLaunchReconcileEndsAdoptedOrphanWithNoMatchingSessions() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        // "Previous process": leaves a paused-content Activity behind.
+        let previous = SessionActivityController()
+        await previous.endNow()
+        previous.update(with: [summary(id: UUID(), state: "suspended", monitor: nil)])
+        await previous.flushActivityUpdates()
+        _ = await waitForLiveState { $0.sessions.first?.state == "suspended" }
+        XCTAssertEqual(Activity<SessionActivityAttributes>.activities.count, 1)
+
+        // "Fresh launch": SessionActivityController.init adopts the survivor;
+        // SessionManager.init then pushes the empty session list.
+        let relaunched = SessionActivityController()
+        relaunched.update(with: [])
+        await relaunched.flushActivityUpdates()
+        XCTAssertEqual(relaunched.lastPushedState?.activeCount, 0)
+        let ended = await waitUntilEndedOrGone()
+        XCTAssertTrue(ended, "an adopted orphan with no matching sessions must be ended at launch")
+
+        await relaunched.endNow()
+    }
 }
 
 final class SessionStateActivityTests: XCTestCase {
-    func testOnlyLiveStatesCountTowardActivity() {
-        XCTAssertTrue(SessionState.connecting.isLiveForActivity)
-        XCTAssertTrue(SessionState.connected.isLiveForActivity)
-        XCTAssertTrue(SessionState.reconnecting.isLiveForActivity)
-        XCTAssertFalse(SessionState.suspended.isLiveForActivity)
-        XCTAssertFalse(SessionState.closed.isLiveForActivity)
+    /// Deliberate behavior change from PR #76 (product decision): the old
+    /// semantics dropped `.suspended` from the Activity, so it wound down
+    /// ~60s after backgrounding even though the in-app session was still open
+    /// as a reattachable paused card. The Activity mirrors open app sessions,
+    /// not live sockets — every state except `.closed` counts.
+    func testEveryOpenStateCountsTowardActivity() {
+        XCTAssertTrue(SessionState.connecting.representsOpenSession)
+        XCTAssertTrue(SessionState.connected.representsOpenSession)
+        XCTAssertTrue(SessionState.reconnecting.representsOpenSession)
+        XCTAssertTrue(SessionState.suspended.representsOpenSession,
+                      "a paused session is still open — it must keep the Activity alive")
+        XCTAssertFalse(SessionState.closed.representsOpenSession,
+                       "only closing a session removes it from the Activity")
     }
 }
