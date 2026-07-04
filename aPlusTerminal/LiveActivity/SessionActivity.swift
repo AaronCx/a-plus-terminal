@@ -3,12 +3,18 @@ import Foundation
 import UIKit
 
 /// Live Activity lifecycle (§4.5): starts when the first session connects,
-/// updates on add/remove/state change, shows a zero state when the last
-/// session closes, and lets the **system** dismiss it after the grace window.
+/// updates on add/remove/state change, and represents **open app sessions**,
+/// not live sockets — a suspended session renders as "Paused" and keeps the
+/// Activity alive. It ends only when the last session is *closed* (zero-state
+/// grace wind-down), on foreground termination (willTerminate), or when a
+/// fresh launch adopts an orphan whose sessions no longer exist (the
+/// force-quit-while-suspended cleanup, via the launch-time zero push).
 ///
 /// Two lifecycle traps this must survive:
 /// - The app gets suspended: an in-process grace timer never fires, so
-///   dismissal is delegated to ActivityKit via `dismissalPolicy: .after`.
+///   dismissal is delegated to ActivityKit via `dismissalPolicy: .after`,
+///   and the final paused push must carry an hours-long staleDate — no
+///   process is left alive to refresh it.
 /// - The app relaunches (update, crash): the previous process's Activity
 ///   outlives it — adopt one survivor and end any extras, or the on-screen
 ///   Activity is an orphan nobody updates.
@@ -18,11 +24,26 @@ final class SessionActivityController {
     /// Force-killing the app leaves the Activity orphaned with no way to end
     /// it (iOS gives no on-kill hook). Content older than this renders as
     /// stale in the widget instead of pretending sessions are still live.
+    /// Applies while at least one session is live — the heartbeat below keeps
+    /// bumping the horizon for as long as the process runs.
     static let staleWindow: TimeInterval = 600
+    /// Stale horizon for content whose open sessions are ALL paused. The
+    /// final push before iOS suspends the process carries this: nothing runs
+    /// afterwards to heartbeat the Activity, yet the paused sessions are
+    /// genuinely open and reattachable for as long as the suspended app stays
+    /// alive — a minutes-scale horizon would falsely mark them stale. Four
+    /// hours balances that against the one case nothing can catch in the
+    /// moment: a force-quit while suspended (iOS delivers no willTerminate to
+    /// a suspended app), whose orphan renders stale after this window and is
+    /// ended for real by the next launch's reconcile.
+    static let pausedStaleWindow: TimeInterval = 4 * 60 * 60
 
     private var activity: Activity<SessionActivityAttributes>?
     /// Last content pushed to ActivityKit — also the regression-test seam.
     private(set) var lastPushedState: SessionActivityAttributes.ContentState?
+    /// staleDate of the last content built for ActivityKit — test seam for
+    /// the live-vs-paused stale-horizon choice (mirrors `lastPushedState`).
+    private(set) var lastPushedStaleDate: Date?
     /// Count of mutations actually dispatched to ActivityKit. Test seam for the
     /// de-duplication below — identical content must not burn the update budget.
     private(set) var pushCount = 0
@@ -105,10 +126,7 @@ final class SessionActivityController {
         if state == lastPushedState && !needsStart { return }
         lastPushedState = state
 
-        let content = ActivityContent(
-            state: state,
-            staleDate: Date(timeIntervalSinceNow: Self.staleWindow)
-        )
+        let content = makeContent(for: state)
 
         if state.activeCount > 0 {
             if let activity {
@@ -135,8 +153,11 @@ final class SessionActivityController {
                 if activity != nil { pushCount += 1 }
             }
         } else if let activity {
-            // Show the truthful zero state during the grace window, then let
-            // the system dismiss it — works even while the app is suspended.
+            // Zero open sessions: only the user closing the last session (or
+            // the launch-time reconcile of an adopted orphan whose sessions
+            // no longer exist) reaches here — suspended sessions still count
+            // above. Show the truthful zero state during the grace window,
+            // then let the system dismiss it — works even while suspended.
             self.activity = nil
             pushCount += 1
             enqueue {
@@ -155,6 +176,20 @@ final class SessionActivityController {
         }
     }
 
+    /// Builds the content to push: live content gets the short `staleWindow`
+    /// (the heartbeat keeps bumping it), all-paused content gets
+    /// `pausedStaleWindow` — the process is about to be suspended and this
+    /// push is the last one until foreground, so a short horizon would mark a
+    /// genuinely open, reattachable session as stale within minutes.
+    private func makeContent(
+        for state: SessionActivityAttributes.ContentState
+    ) -> ActivityContent<SessionActivityAttributes.ContentState> {
+        let window = state.allPaused ? Self.pausedStaleWindow : Self.staleWindow
+        let staleDate = Date(timeIntervalSinceNow: window)
+        lastPushedStaleDate = staleDate
+        return ActivityContent(state: state, staleDate: staleDate)
+    }
+
     /// Re-push the current content on a cadence so a connected-but-idle session
     /// (no state/agent events) doesn't slide past `staleWindow` and render as
     /// stale. Bypasses the `update(with:)` coalescing on purpose — the intent is
@@ -169,10 +204,7 @@ final class SessionActivityController {
                       let activity = self.activity,
                       let state = self.lastPushedState, state.activeCount > 0
                 else { return }
-                let content = ActivityContent(
-                    state: state,
-                    staleDate: Date(timeIntervalSinceNow: Self.staleWindow)
-                )
+                let content = self.makeContent(for: state)
                 self.pushCount += 1
                 self.enqueue { await activity.update(content) }
             }
@@ -190,20 +222,19 @@ final class SessionActivityController {
     /// unchanged session list and leave the stale horizon where it was.
     func refreshStaleHorizon() {
         guard let activity, let state = lastPushedState, state.activeCount > 0 else { return }
-        let content = ActivityContent(
-            state: state,
-            staleDate: Date(timeIntervalSinceNow: Self.staleWindow)
-        )
+        let content = makeContent(for: state)
         pushCount += 1
         enqueue { await activity.update(content) }
     }
 
     /// Awaits every queued ActivityKit mutation. Called at the tail of the
-    /// background grace window, after sessions are suspended: the zero-state
-    /// `end(..., dismissalPolicy: .after(...))` enqueued by that suspend must
-    /// be submitted while the process still has background time. Safe to call
-    /// with an empty queue.
-    func windDownForBackground() async {
+    /// background grace window, after sessions are suspended: the final
+    /// *paused* update enqueued by that suspend (paused summaries + the long
+    /// `pausedStaleWindow` horizon) must be submitted while the process still
+    /// has background time — once iOS suspends us nothing runs until
+    /// foreground, and the Activity would keep claiming connected sessions
+    /// whose sockets are gone. Safe to call with an empty queue.
+    func flushActivityUpdates() async {
         await applyTask?.value
     }
 

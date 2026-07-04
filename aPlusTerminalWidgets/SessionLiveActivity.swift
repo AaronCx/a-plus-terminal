@@ -85,12 +85,27 @@ struct SessionActivityRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(session.isConnected ? Color.green : Color.orange)
-                    .frame(width: 8, height: 8)
+                if session.isPaused {
+                    // Paused-but-open: socket suspended in the background,
+                    // session still reattachable. Same pause iconography as
+                    // the in-app paused card (pause.circle.fill).
+                    Image(systemName: "pause.circle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .frame(width: 11, height: 11)
+                } else {
+                    Circle()
+                        .fill(session.isConnected ? Color.green : Color.orange)
+                        .frame(width: 8, height: 8)
+                }
                 Text(session.name)
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
+                if session.isPaused {
+                    Text("Paused")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
                 Spacer()
                 Text(session.startedAt, style: .timer)
                     .font(.caption.monospacedDigit())
@@ -111,13 +126,25 @@ struct LockScreenSessionsView: View {
     let state: SessionActivityAttributes.ContentState
     var isStale = false
 
+    /// "Active" while anything is live; "paused" once every open session was
+    /// suspended in the background (sessions still open and reattachable).
+    private var title: String {
+        if isStale { return "Sessions ended" }
+        if state.allPaused {
+            return state.activeCount == 1
+                ? "1 session paused"
+                : "\(state.activeCount) sessions paused"
+        }
+        return state.activeCount == 1
+            ? "1 active session"
+            : "\(state.activeCount) active sessions"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: "terminal.fill")
-                Text(isStale
-                    ? "Sessions ended"
-                    : state.activeCount == 1 ? "1 active session" : "\(state.activeCount) active sessions")
+                Text(title)
                     .font(.headline)
                 Spacer()
             }

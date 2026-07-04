@@ -18,6 +18,10 @@ struct SessionActivityAttributes: ActivityAttributes {
         var agentName: String? = nil
 
         var isConnected: Bool { state == "connected" }
+        /// Paused-but-open: the socket was suspended (backgrounded past the
+        /// iOS allowance, or a failed connect), but the app session is still
+        /// open and reattachable — it renders as "Paused", never disappears.
+        var isPaused: Bool { state == "suspended" }
         var agentLabel: String? {
             guard let agentStatus else { return nil }
             let who = agentName ?? "Agent"
@@ -33,12 +37,33 @@ struct SessionActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
         /// Most recent first, capped at 3 for the expanded Island view.
         var sessions: [SessionSummary]
+        /// Count of *open* sessions (connected, connecting, reconnecting, or
+        /// paused) — everything except closed. Named "active" for payload
+        /// compatibility with older builds.
         var activeCount: Int
+        /// How many of the `activeCount` open sessions are paused, counted
+        /// over ALL of them (not just the capped top 3). Optional so payloads
+        /// from older builds decode.
+        var pausedCount: Int? = nil
 
-        /// Newest-first, top 3, with the total preserved in `activeCount`.
+        /// Newest-first, top 3, with the totals preserved in `activeCount`
+        /// and `pausedCount`.
         static func make(from summaries: [SessionSummary]) -> ContentState {
             let sorted = summaries.sorted { $0.startedAt > $1.startedAt }
-            return ContentState(sessions: Array(sorted.prefix(3)), activeCount: summaries.count)
+            return ContentState(
+                sessions: Array(sorted.prefix(3)),
+                activeCount: summaries.count,
+                pausedCount: summaries.filter(\.isPaused).count
+            )
+        }
+
+        /// Every open session is paused — the shape the background suspend
+        /// leaves behind. Drives the hours-long stale horizon on the final
+        /// pre-suspension push (no process is left alive to refresh it) and
+        /// the "paused" phrasing in the lock-screen header. False at zero
+        /// sessions: that is the end path, not the paused path.
+        var allPaused: Bool {
+            activeCount > 0 && (pausedCount ?? 0) == activeCount
         }
 
         var mostRecentSessionID: UUID? {
