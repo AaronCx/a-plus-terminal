@@ -8,7 +8,13 @@ Free, tip-supported. No features are paywalled, ever.
 
 > Not affiliated with Anthropic, OpenAI, Google, or Nous Research; product names are trademarks of their respective owners.
 
-<!-- screenshots land here (docs/screenshots branch): ## Screenshots + images in .github/assets/ -->
+## Screenshots
+
+<p align="center">
+  <img src=".github/assets/screenshot-tmux-agents.png" width="30%" alt="tmux session with a CLI AI agent's git log, key bar and keyboard visible" />
+  <img src=".github/assets/screenshot-servers.png" width="30%" alt="Terminal tab listing live sessions and saved servers" />
+  <img src=".github/assets/screenshot-reconnect.png" width="30%" alt="Settings for scroll-as-mouse-wheel, auto-reattach multiplexer and dictation" />
+</p>
 
 ## Features
 
