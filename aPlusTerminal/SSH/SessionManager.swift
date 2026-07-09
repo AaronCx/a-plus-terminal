@@ -886,6 +886,10 @@ final class SessionManager {
         graceTask?.cancel()
         graceTask = nil
         endBackgroundTask()
+        // Lift the suspension latch first: if the grace window elapsed and
+        // the Activity was deadline-ended, the refresh below must be allowed
+        // to sweep the frozen card and request a fresh (paused) Activity.
+        activityController.resumeAfterForeground()
         // Push the Activity's stale horizon out — content only goes stale
         // when the process is killed or frozen long enough to stop updating.
         // refreshActivity() coalesces when the session list is unchanged (the
@@ -905,14 +909,16 @@ final class SessionManager {
             for session in self.sessions where session.state == .connected {
                 await session.suspend()
             }
-            // Each suspend() fires onStateChange → refreshActivity(), whose
-            // final push carries the sessions as *paused* (they still count —
-            // the app session is open and reattachable) with the hours-long
-            // pausedStaleWindow horizon, since nothing runs after iOS
-            // suspends us. That mutation must reach ActivityKit before the
-            // suspension, or the lock screen keeps claiming connected
-            // sessions whose sockets are gone — same flush criticality as
-            // PR #76's zero-state wind-down, different final content.
+            // Each suspend() fires onStateChange → refreshActivity(), which
+            // records the paused summaries. Deadline-end the Activity with
+            // that final paused content (end + dismissalPolicy .after): the
+            // SYSTEM then removes the card at the paused horizon even if the
+            // app is force-quit while suspended. An update alone carries no
+            // dismissal instruction — which is why the card previously
+            // lingered until iOS's half-day reaping. Both mutations must
+            // reach ActivityKit before iOS suspends us; same flush
+            // criticality as before, stronger final mutation.
+            self.activityController.finalizeForSuspension()
             await self.activityController.flushActivityUpdates()
             self.endBackgroundTask()
         }

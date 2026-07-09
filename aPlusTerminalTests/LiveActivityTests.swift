@@ -204,6 +204,31 @@ final class SessionActivityControllerTests: XCTestCase {
         await controller.flushActivityUpdates() // must not hang
         XCTAssertEqual(controller.pushCount, 0)
     }
+
+    func testFinalizeLatchBlocksRequestsUntilResume() {
+        let controller = SessionActivityController()
+        controller.finalizeForSuspension()
+        XCTAssertTrue(controller.finalizedForSuspension)
+
+        controller.update(with: [summary()])
+        XCTAssertEqual(controller.pushCount, 0, "no request attempt while finalized")
+
+        controller.resumeAfterForeground()
+        XCTAssertFalse(controller.finalizedForSuspension)
+    }
+
+    func testFinalizeWithoutActivityRegistersNoEnd() {
+        let controller = SessionActivityController()
+        controller.finalizeForSuspension()
+        XCTAssertNil(controller.lastEndDismissalDate, "nothing on screen, nothing to deadline-end")
+        XCTAssertTrue(controller.finalizedForSuspension, "latch still set — blocks doomed late requests")
+    }
+
+    func testResumeIsIdempotent() {
+        let controller = SessionActivityController()
+        controller.resumeAfterForeground()
+        XCTAssertFalse(controller.finalizedForSuspension)
+    }
 }
 
 /// Regression coverage for the agent label leaking onto a session that is no

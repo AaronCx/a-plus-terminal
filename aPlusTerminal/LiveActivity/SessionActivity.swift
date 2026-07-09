@@ -32,10 +32,11 @@ final class SessionActivityController {
     /// afterwards to heartbeat the Activity, yet the paused sessions are
     /// genuinely open and reattachable for as long as the suspended app stays
     /// alive — a minutes-scale horizon would falsely mark them stale. Four
-    /// hours balances that against the one case nothing can catch in the
-    /// moment: a force-quit while suspended (iOS delivers no willTerminate to
-    /// a suspended app), whose orphan renders stale after this window and is
-    /// ended for real by the next launch's reconcile.
+    /// hours of reattach affordance; past it the card's information is dead
+    /// weight. Doubles as the **dismissal deadline** registered by
+    /// `finalizeForSuspension()` — the system removes the card at this
+    /// horizon even if the process was force-quit while suspended, the one
+    /// case no in-process hook can catch.
     static let pausedStaleWindow: TimeInterval = 4 * 60 * 60
 
     private var activity: Activity<SessionActivityAttributes>?
@@ -44,6 +45,16 @@ final class SessionActivityController {
     /// staleDate of the last content built for ActivityKit — test seam for
     /// the live-vs-paused stale-horizon choice (mirrors `lastPushedState`).
     private(set) var lastPushedStaleDate: Date?
+    /// Dismissal deadline registered with the most recent `end(...)` — test
+    /// seam for the deadline-end paths (suspension finalize + zero state).
+    private(set) var lastEndDismissalDate: Date?
+    /// Set between `finalizeForSuspension()` and `resumeAfterForeground()`:
+    /// the on-screen Activity has been *ended* with a deferred dismissal and
+    /// the process is about to be suspended. While set, `update(with:)` must
+    /// not request a replacement — a straggler refresh in the last
+    /// milliseconds of background runtime would create a brand-new Activity
+    /// that nothing ever ends, reintroducing the force-quit orphan.
+    private(set) var finalizedForSuspension = false
     /// Count of mutations actually dispatched to ActivityKit. Test seam for the
     /// de-duplication below — identical content must not burn the update budget.
     private(set) var pushCount = 0
@@ -132,7 +143,7 @@ final class SessionActivityController {
             if let activity {
                 pushCount += 1
                 enqueue { await activity.update(content) }
-            } else if ActivityAuthorizationInfo().areActivitiesEnabled {
+            } else if ActivityAuthorizationInfo().areActivitiesEnabled, !finalizedForSuspension {
                 // Sweep anything still on screen (an ended-but-undismissed
                 // zero state, an orphan from a previous launch) so exactly one
                 // Activity exists. The sweep enumerates only the *pre-existing*
@@ -160,11 +171,10 @@ final class SessionActivityController {
             // then let the system dismiss it — works even while suspended.
             self.activity = nil
             pushCount += 1
+            let dismissal = Date(timeIntervalSinceNow: Self.graceWindow)
+            lastEndDismissalDate = dismissal
             enqueue {
-                await activity.end(
-                    content,
-                    dismissalPolicy: .after(Date(timeIntervalSinceNow: Self.graceWindow))
-                )
+                await activity.end(content, dismissalPolicy: .after(dismissal))
             }
         }
 
@@ -227,13 +237,43 @@ final class SessionActivityController {
         enqueue { await activity.update(content) }
     }
 
+    /// Deadline end (§4.5): converts the on-screen Activity into its final
+    /// paused card by **ending** it with `dismissalPolicy: .after(now +
+    /// pausedStaleWindow)`. An `update` carries no dismissal instruction, so
+    /// a force-quit while suspended left the card on screen until iOS's own
+    /// half-day reaping — once the process is gone, only a pre-registered
+    /// deferred end (this) or a remote push can remove a Live Activity, and
+    /// this app is deliberately pushType-free. The frozen card is
+    /// pixel-identical to the paused update it replaces (nothing could have
+    /// updated it while suspended anyway); the delta is that the **system**
+    /// removes it at the deadline — suspended, force-quit, or long dead
+    /// alike. Latches `finalizedForSuspension` unconditionally so a straggler
+    /// refresh can't request a doomed replacement.
+    func finalizeForSuspension() {
+        finalizedForSuspension = true
+        stopHeartbeat()
+        guard let activity, let state = lastPushedState, state.activeCount > 0 else { return }
+        self.activity = nil
+        let content = makeContent(for: state)
+        let dismissal = Date(timeIntervalSinceNow: Self.pausedStaleWindow)
+        lastEndDismissalDate = dismissal
+        pushCount += 1
+        enqueue { await activity.end(content, dismissalPolicy: .after(dismissal)) }
+    }
+
+    /// Lifts the suspension latch on foreground. If the deadline-ended card
+    /// is still visible, the next `update(with:)` takes the needsStart path —
+    /// sweeping pre-existing activities `.immediate` and requesting a fresh
+    /// one — restoring the exactly-one-Activity invariant.
+    func resumeAfterForeground() {
+        finalizedForSuspension = false
+    }
+
     /// Awaits every queued ActivityKit mutation. Called at the tail of the
-    /// background grace window, after sessions are suspended: the final
-    /// *paused* update enqueued by that suspend (paused summaries + the long
-    /// `pausedStaleWindow` horizon) must be submitted while the process still
-    /// has background time — once iOS suspends us nothing runs until
-    /// foreground, and the Activity would keep claiming connected sessions
-    /// whose sockets are gone. Safe to call with an empty queue.
+    /// background grace window, after `finalizeForSuspension()`: the deadline
+    /// end must be submitted while the process still has background time —
+    /// once iOS suspends us nothing runs until foreground. Safe to call with
+    /// an empty queue.
     func flushActivityUpdates() async {
         await applyTask?.value
     }
