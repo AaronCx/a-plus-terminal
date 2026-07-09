@@ -204,6 +204,138 @@ final class SessionActivityControllerTests: XCTestCase {
         await controller.flushActivityUpdates() // must not hang
         XCTAssertEqual(controller.pushCount, 0)
     }
+
+    // MARK: - Abandoned-session janitor (the BGAppRefresh handler's core)
+
+    func testAbandonWindowIsTwoHoursAndShorterThanPausedStaleHorizon() {
+        XCTAssertEqual(SessionActivityController.activityAbandonWindow, 2 * 60 * 60)
+        XCTAssertLessThan(SessionActivityController.activityAbandonWindow,
+                          SessionActivityController.pausedStaleWindow,
+                          "the janitor removes the card before it would ever render stale")
+    }
+
+    func testBackgroundingRecordsTheSweepReferenceTimestamp() {
+        let controller = SessionActivityController()
+        XCTAssertNil(controller.lastBackgroundedAt)
+        // Without a recorded background entry, the sweep can never fire —
+        // not even in the far future.
+        XCTAssertFalse(controller.performJanitorSweep(now: .distantFuture))
+        XCTAssertFalse(controller.endedForAbandonment)
+
+        let backgrounded = Date(timeIntervalSince1970: 1_000_000)
+        controller.noteDidEnterBackground(now: backgrounded)
+        XCTAssertEqual(controller.lastBackgroundedAt, backgrounded,
+                       "backgrounding records the timestamp the sweep compares against")
+
+        controller.noteWillEnterForeground()
+        XCTAssertNil(controller.lastBackgroundedAt,
+                     "foreground return stops the abandonment clock")
+    }
+
+    func testJanitorSweepBeforeWindowLeavesActivityUntouched() async {
+        let controller = SessionActivityController()
+        let id = UUID()
+        controller.update(with: [summary(id: id, state: "suspended")])
+        let stateBefore = controller.lastPushedState
+        let pushesBefore = controller.pushCount
+
+        let backgrounded = Date()
+        controller.noteDidEnterBackground(now: backgrounded)
+        let earlyWake = backgrounded.addingTimeInterval(
+            SessionActivityController.activityAbandonWindow - 60
+        )
+        XCTAssertFalse(controller.performJanitorSweep(now: earlyWake),
+                       "before the window elapses the user may still return — never end early")
+        XCTAssertFalse(controller.endedForAbandonment)
+        XCTAssertEqual(controller.pushCount, pushesBefore, "no mutation may be dispatched")
+        XCTAssertEqual(controller.lastPushedState, stateBefore)
+        await controller.endNow()
+    }
+
+    func testJanitorSweepAfterWindowWithAllPausedEndsAndLatches() async {
+        let controller = SessionActivityController()
+        let id = UUID()
+        controller.update(with: [summary(id: id, state: "connected")])
+        // What finishGrace() leaves behind before the process is suspended.
+        controller.update(with: [summary(id: id, state: "suspended")])
+        let pushesBefore = controller.pushCount
+
+        let backgrounded = Date(timeIntervalSince1970: 2_000_000)
+        controller.noteDidEnterBackground(now: backgrounded)
+        let wake = backgrounded.addingTimeInterval(SessionActivityController.activityAbandonWindow)
+        XCTAssertTrue(controller.performJanitorSweep(now: wake),
+                      "past the window with everything paused, the janitor must take the end path")
+        XCTAssertTrue(controller.endedForAbandonment, "the latch blocks straggler re-requests")
+        XCTAssertEqual(controller.lastPushedState?.allPaused, true,
+                       "the end carries the final paused content")
+        if pushesBefore > 0 {
+            // A real Activity started in this environment (ActivityKit live in
+            // the simulator) — the janitor's end must have been dispatched.
+            XCTAssertEqual(controller.pushCount, pushesBefore + 1)
+        }
+
+        // A straggler wake must not double-end.
+        XCTAssertFalse(controller.performJanitorSweep(now: wake.addingTimeInterval(60)))
+
+        await controller.flushActivityUpdates()
+        await controller.endNow()
+    }
+
+    func testJanitorSweepWithLiveSessionIsANoOp() async {
+        // Cannot happen post-grace (every open session is suspended by then),
+        // but the guard must hold anyway: persistence while anything is live
+        // always wins (#83).
+        for liveState in ["connected", "connecting", "reconnecting"] {
+            let controller = SessionActivityController()
+            controller.update(with: [summary(state: "suspended"), summary(state: liveState)])
+            let pushesBefore = controller.pushCount
+
+            let backgrounded = Date(timeIntervalSince1970: 3_000_000)
+            controller.noteDidEnterBackground(now: backgrounded)
+            let lateWake = backgrounded.addingTimeInterval(
+                SessionActivityController.activityAbandonWindow * 2
+            )
+            XCTAssertFalse(controller.performJanitorSweep(now: lateWake),
+                           "a \(liveState) session must never lose its Activity to the janitor")
+            XCTAssertFalse(controller.endedForAbandonment)
+            XCTAssertEqual(controller.pushCount, pushesBefore)
+            await controller.endNow()
+        }
+    }
+
+    func testForegroundClearsLatchAndAllowsAFreshStart() async {
+        let controller = SessionActivityController()
+        let id = UUID()
+        controller.update(with: [summary(id: id, state: "suspended")])
+        let backgrounded = Date(timeIntervalSince1970: 4_000_000)
+        controller.noteDidEnterBackground(now: backgrounded)
+        XCTAssertTrue(controller.performJanitorSweep(
+            now: backgrounded.addingTimeInterval(SessionActivityController.activityAbandonWindow)
+        ))
+
+        // Straggler refresh while latched: must not request a replacement.
+        // Deterministic in every environment — the latch gates the request
+        // attempt itself, so pushCount cannot move.
+        let pushesLatched = controller.pushCount
+        controller.update(with: [summary(id: id, state: "suspended"), summary(state: "suspended")])
+        XCTAssertEqual(controller.pushCount, pushesLatched,
+                       "latched: a straggler refresh must not build a doomed replacement")
+
+        // Foreground return lifts the latch; the next update takes the
+        // (existing) needsStart path and may rebuild a fresh Activity.
+        controller.noteWillEnterForeground()
+        XCTAssertFalse(controller.endedForAbandonment)
+        controller.update(with: [summary(id: id, state: "connected")])
+        XCTAssertEqual(controller.lastPushedState?.activeCount, 1)
+        XCTAssertEqual(controller.lastPushedState?.allPaused, false,
+                       "the returning user's live content flows again")
+        if pushesLatched > 0 {
+            XCTAssertEqual(controller.pushCount, pushesLatched + 1,
+                           "with ActivityKit live in this environment, needsStart requested a fresh Activity")
+        }
+        await controller.flushActivityUpdates()
+        await controller.endNow()
+    }
 }
 
 /// Regression coverage for the agent label leaking onto a session that is no
@@ -523,6 +655,36 @@ final class SessionActivityRuntimeTests: XCTestCase {
         XCTAssertTrue(ended, "an adopted orphan with no matching sessions must be ended at launch")
 
         await relaunched.endNow()
+    }
+
+    /// The abandoned-session janitor against a REAL ActivityKit Activity: a
+    /// paused card whose app has sat backgrounded past `activityAbandonWindow`
+    /// must be ended by the sweep (the BGAppRefresh handler's core), flushed
+    /// the same way the handler flushes before reporting completion.
+    func testJanitorSweepEndsRealAbandonedActivity() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+
+        let sid = UUID()
+        controller.update(with: [summary(id: sid, state: "suspended", monitor: nil)])
+        await controller.flushActivityUpdates()
+        _ = await waitForLiveState { $0.sessions.first?.state == "suspended" }
+        XCTAssertEqual(Activity<SessionActivityAttributes>.activities.count, 1)
+
+        // Backgrounded a full window ago; the janitor wake arrives "now".
+        controller.noteDidEnterBackground(
+            now: Date(timeIntervalSinceNow: -SessionActivityController.activityAbandonWindow - 1)
+        )
+        XCTAssertTrue(controller.performJanitorSweep())
+        await controller.flushActivityUpdates()
+        let ended = await waitUntilEndedOrGone()
+        XCTAssertTrue(ended, "the janitor must end the real Activity of an abandoned app")
+
+        await controller.endNow()
     }
 }
 

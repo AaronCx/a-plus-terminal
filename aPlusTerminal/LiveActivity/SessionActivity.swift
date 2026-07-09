@@ -6,9 +6,11 @@ import UIKit
 /// updates on add/remove/state change, and represents **open app sessions**,
 /// not live sockets — a suspended session renders as "Paused" and keeps the
 /// Activity alive. It ends only when the last session is *closed* (zero-state
-/// grace wind-down), on foreground termination (willTerminate), or when a
+/// grace wind-down), on foreground termination (willTerminate), when a
 /// fresh launch adopts an orphan whose sessions no longer exist (the
-/// force-quit-while-suspended cleanup, via the launch-time zero push).
+/// force-quit-while-suspended cleanup, via the launch-time zero push), or
+/// when the background janitor sweeps an abandoned app — backgrounded past
+/// `activityAbandonWindow` with nothing live (`performJanitorSweep`).
 ///
 /// Two lifecycle traps this must survive:
 /// - The app gets suspended: an in-process grace timer never fires, so
@@ -37,6 +39,18 @@ final class SessionActivityController {
     /// a suspended app), whose orphan renders stale after this window and is
     /// ended for real by the next launch's reconcile.
     static let pausedStaleWindow: TimeInterval = 4 * 60 * 60
+    /// How long the app can sit backgrounded before the lock-screen presence
+    /// is dead weight: past this, the user has plainly abandoned the app and
+    /// the background janitor (a BGAppRefresh wake, see `SessionManager`)
+    /// ends the Activity outright. Distinct from `pausedStaleWindow`, which
+    /// stays 4h and governs how the paused *content renders* (stale styling)
+    /// when nothing removes it — this window is shorter, so on the wakes iOS
+    /// actually grants, the card is gone before it would ever render stale;
+    /// the 4h horizon remains the visual fallback for wakes that never come
+    /// (e.g. a force-quit right after backgrounding — iOS never wakes a
+    /// force-quit app, and only the next-launch reconcile or the system's
+    /// own cap removes that orphan).
+    static let activityAbandonWindow: TimeInterval = 2 * 60 * 60
 
     private var activity: Activity<SessionActivityAttributes>?
     /// Last content pushed to ActivityKit — also the regression-test seam.
@@ -44,6 +58,17 @@ final class SessionActivityController {
     /// staleDate of the last content built for ActivityKit — test seam for
     /// the live-vs-paused stale-horizon choice (mirrors `lastPushedState`).
     private(set) var lastPushedStaleDate: Date?
+    /// Wall-clock moment the app last entered the background — the reference
+    /// point `performJanitorSweep(now:)` measures the abandoned window from.
+    /// Cleared on foreground return (the abandonment clock stops).
+    private(set) var lastBackgroundedAt: Date?
+    /// Latch: the janitor ended the Activity because the app was abandoned.
+    /// While set, `update(with:)` must not request a replacement — a
+    /// straggler refresh in the dying moments of the BGAppRefresh wake would
+    /// build a brand-new Activity that nothing ever ends, recreating the
+    /// very orphan the janitor exists to remove. Cleared on foreground so
+    /// the needsStart path can build a fresh Activity for the returning user.
+    private(set) var endedForAbandonment = false
     /// Count of mutations actually dispatched to ActivityKit. Test seam for the
     /// de-duplication below — identical content must not burn the update budget.
     private(set) var pushCount = 0
@@ -132,7 +157,11 @@ final class SessionActivityController {
             if let activity {
                 pushCount += 1
                 enqueue { await activity.update(content) }
-            } else if ActivityAuthorizationInfo().areActivitiesEnabled {
+            } else if ActivityAuthorizationInfo().areActivitiesEnabled,
+                      // Janitor latch: after the abandonment end, a straggler
+                      // refresh must not request a doomed replacement — only
+                      // the foreground latch-clear reopens this path.
+                      !endedForAbandonment {
                 // Sweep anything still on screen (an ended-but-undismissed
                 // zero state, an orphan from a previous launch) so exactly one
                 // Activity exists. The sweep enumerates only the *pre-existing*
@@ -227,13 +256,69 @@ final class SessionActivityController {
         enqueue { await activity.update(content) }
     }
 
+    /// Janitor bookkeeping: records the timestamp `performJanitorSweep(now:)`
+    /// compares against. Called when the app enters the background — the
+    /// moment the abandonment clock starts.
+    func noteDidEnterBackground(now: Date = Date()) {
+        lastBackgroundedAt = now
+    }
+
+    /// Foreground return: the user is back, so the abandonment clock stops
+    /// and the janitor latch lifts — the next `update(with:)` may take the
+    /// needsStart path and rebuild the Activity the janitor ended.
+    func noteWillEnterForeground() {
+        lastBackgroundedAt = nil
+        endedForAbandonment = false
+    }
+
+    /// Core of the abandoned-session janitor, extracted from the BGAppRefresh
+    /// handler so the decision logic is unit-testable (the BGTask machinery
+    /// itself is not). Runs when iOS briefly wakes the suspended app after
+    /// backgrounding: if the user has genuinely abandoned the app — in the
+    /// background for at least `activityAbandonWindow` with no live session —
+    /// END the Activity with the final paused content and the default
+    /// dismissal, so the lock screen stops advertising sessions nobody is
+    /// coming back to. Ending here does NOT conflict with the
+    /// persistence-while-open contract (#83): persistence protects sessions
+    /// the user still cares about, and by definition the janitor only fires
+    /// when they have not looked at the app for hours; a returning user gets
+    /// a fresh Activity via the foreground latch-clear + needsStart rebuild.
+    /// (Ending at *suspension* time is the forbidden design — ActivityKit
+    /// removes ended Activities from the Dynamic Island immediately, deferred
+    /// dismissal date or not.) Returns whether the abandonment path was taken.
+    @discardableResult
+    func performJanitorSweep(now: Date = Date()) -> Bool {
+        // Idempotent: a straggler wake after the end must not run twice.
+        guard !endedForAbandonment else { return false }
+        guard let backgroundedAt = lastBackgroundedAt,
+              now.timeIntervalSince(backgroundedAt) >= Self.activityAbandonWindow
+        else { return false }
+        // Post-grace every open session is suspended, so a live one
+        // (connected/connecting/reconnecting) cannot reach a janitor wake —
+        // but never end a live session's card, so guard anyway.
+        if let state = lastPushedState, state.activeCount > 0, !state.allPaused {
+            return false
+        }
+        endedForAbandonment = true
+        stopHeartbeat()
+        guard let activity else { return true }
+        self.activity = nil
+        let content = lastPushedState.map { makeContent(for: $0) }
+        pushCount += 1
+        enqueue { await activity.end(content, dismissalPolicy: .default) }
+        return true
+    }
+
     /// Awaits every queued ActivityKit mutation. Called at the tail of the
     /// background grace window, after sessions are suspended: the final
     /// *paused* update enqueued by that suspend (paused summaries + the long
     /// `pausedStaleWindow` horizon) must be submitted while the process still
     /// has background time — once iOS suspends us nothing runs until
     /// foreground, and the Activity would keep claiming connected sessions
-    /// whose sockets are gone. Safe to call with an empty queue.
+    /// whose sockets are gone. The BGAppRefresh janitor flushes through here
+    /// too: its end mutation must be submitted before the task reports
+    /// completion, or iOS re-suspends the process with the end still queued.
+    /// Safe to call with an empty queue.
     func flushActivityUpdates() async {
         await applyTask?.value
     }

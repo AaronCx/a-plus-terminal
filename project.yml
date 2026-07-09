@@ -65,6 +65,13 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSSupportsLiveActivities: true
+        # Abandoned-session janitor: a BGAppRefresh wake ends the Live
+        # Activity once the app has sat backgrounded past the abandon window
+        # (SessionManager.janitorTaskIdentifier — the strings must match).
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.aaroncx.aplusterminal.activity-janitor
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: "a+Terminal browses your local network for SSH servers you choose to add, checks whether your saved servers are reachable, and sends wake packets when you ask. Everything stays on your network — nothing is collected."
         NSBonjourServices:

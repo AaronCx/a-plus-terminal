@@ -1,3 +1,4 @@
+import BackgroundTasks
 import SwiftUI
 import SwiftTerm
 import Observation
@@ -754,12 +755,23 @@ final class SessionManager {
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
+    /// BGAppRefresh identifier of the abandoned-session janitor. Must match
+    /// `BGTaskSchedulerPermittedIdentifiers` in project.yml (app target).
+    static let janitorTaskIdentifier = "com.aaroncx.aplusterminal.activity-janitor"
+    /// BGTaskScheduler allows exactly one registration per identifier per
+    /// process, and only before didFinishLaunching returns. The app's
+    /// SessionManager is built in `APlusTerminalApp.init` (inside launch),
+    /// so the first init registers; any further instances in this process
+    /// (unit tests build their own managers) must skip.
+    private static var janitorTaskRegistered = false
+
     init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.passwords = passwords
         self.settings = settings
         self.profiles = profiles
+        registerJanitorTask()
         // A surviving Live Activity from a previous launch must reflect this
         // process's truth (no sessions yet) instead of stale ones (§4.5).
         // The controller adopts one survivor in its init; this zero push then
@@ -864,6 +876,14 @@ final class SessionManager {
     /// up front so even a forced suspend can reattach. The session survives the
     /// disconnect server-side; the user chooses reattach-vs-fresh on return.
     func appDidEnterBackground() {
+        // Abandoned-session janitor bookkeeping runs for ANY open session —
+        // including a re-background where everything is already suspended
+        // (no live socket needs the grace hold below, but the paused card
+        // still needs the abandoned-window cleanup).
+        if sessions.contains(where: { $0.state.representsOpenSession }) {
+            activityController.noteDidEnterBackground()
+            scheduleJanitorTask()
+        }
         guard sessions.contains(where: { $0.state == .connected }) else { return }
         // iOS calls this expiration handler just before reclaiming our
         // background time — that's the latest safe moment to suspend cleanly.
@@ -886,6 +906,12 @@ final class SessionManager {
         graceTask?.cancel()
         graceTask = nil
         endBackgroundTask()
+        // The user is back: the pending janitor wake is moot — cancel it, and
+        // lift the janitor latch BEFORE the refresh below so that, if the
+        // janitor already ended the Activity while we were suspended, the
+        // needsStart path is allowed to build a fresh one.
+        cancelJanitorTask()
+        activityController.noteWillEnterForeground()
         // Push the Activity's stale horizon out — content only goes stale
         // when the process is killed or frozen long enough to stop updating.
         // refreshActivity() coalesces when the session list is unchanged (the
@@ -922,5 +948,87 @@ final class SessionManager {
         guard backgroundTaskID != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTaskID)
         backgroundTaskID = .invalid
+    }
+
+    // MARK: - Abandoned-session janitor (BGAppRefresh)
+
+    /// The persist-paused contract (#83) keeps the Live Activity alive while
+    /// app sessions are open — but if the user backgrounds the app and never
+    /// comes back, the paused card sits on the lock screen until the next
+    /// launch or iOS's own multi-hour cap. Ending the Activity at suspension
+    /// time is forbidden (ActivityKit removes ended Activities from the
+    /// Dynamic Island immediately — the regression PR #86 was closed for),
+    /// so instead a BGAppRefresh wake is scheduled for
+    /// `activityAbandonWindow` after backgrounding: iOS briefly wakes the
+    /// *suspended* app (never a force-quit one) and the janitor ends the
+    /// Activity with runtime, keeping persistence untouched until that point.
+    private func registerJanitorTask() {
+        guard !Self.janitorTaskRegistered else { return }
+        Self.janitorTaskRegistered = true
+        _ = BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: Self.janitorTaskIdentifier,
+            using: .main
+        ) { [weak self] task in
+            // Registered with the main queue, so hopping onto the MainActor
+            // is a documented invariant rather than an assumption.
+            MainActor.assumeIsolated {
+                guard let self else {
+                    task.setTaskCompleted(success: true)
+                    return
+                }
+                self.handleJanitorTask(task)
+            }
+        }
+    }
+
+    private func handleJanitorTask(_ task: BGTask) {
+        let completion = JanitorTaskCompletion()
+        // iOS can reclaim the wake at any moment; completing from the
+        // expiration handler keeps the app in good scheduling standing. A
+        // torn run is safe: either the end mutation was already submitted,
+        // or the next-launch reconcile / system cap still backstops removal.
+        task.expirationHandler = {
+            completion.complete(task, success: false)
+        }
+        Task { @MainActor [activityController] in
+            if activityController.performJanitorSweep() {
+                // The end mutation must reach ActivityKit before the task
+                // reports completion — after that, iOS re-suspends us and
+                // nothing runs until foreground.
+                await activityController.flushActivityUpdates()
+            }
+            completion.complete(task, success: true)
+        }
+    }
+
+    private func scheduleJanitorTask() {
+        let request = BGAppRefreshTaskRequest(identifier: Self.janitorTaskIdentifier)
+        request.earliestBeginDate = Date(
+            timeIntervalSinceNow: SessionActivityController.activityAbandonWindow
+        )
+        // Submitting can fail (simulator, Background App Refresh disabled) —
+        // then the pre-existing fallbacks stay in charge: next-launch
+        // reconcile and the system's own dismissal cap.
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
+    private func cancelJanitorTask() {
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.janitorTaskIdentifier)
+    }
+}
+
+/// `setTaskCompleted` must be called exactly once per BGTask wake, but the
+/// normal path and the expiration handler race to do it (potentially from
+/// different queues) — this dedupes whichever lands second.
+private final class JanitorTaskCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+
+    func complete(_ task: BGTask, success: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        task.setTaskCompleted(success: success)
     }
 }
