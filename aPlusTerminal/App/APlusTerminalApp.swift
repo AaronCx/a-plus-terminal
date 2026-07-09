@@ -74,17 +74,39 @@ struct APlusTerminalApp: App {
     }
 }
 
+/// Top-level tabs. Selection lives on the router so deep links and App
+/// Intents — consumed by TerminalTabView, which stays mounted while Settings
+/// is frontmost — bring their tab forward instead of mutating a background
+/// tab's navigation.
+enum AppTab: Hashable {
+    case terminal, settings
+}
+
 struct RootTabView: View {
+    @Environment(DeepLinkRouter.self) private var router
+
     var body: some View {
-        TabView {
+        @Bindable var router = router
+        TabView(selection: $router.selectedTab) {
             TerminalTabView()
                 .tabItem {
                     Label("Terminal", systemImage: "terminal")
                 }
+                .tag(AppTab.terminal)
             SettingsScreen()
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
+                .tag(AppTab.settings)
+        }
+        // Load-bearing: reading selectedTab here registers the Observation
+        // dependency for this always-frontmost view. On iOS 26 the
+        // UIKit-bridged TabView's selection binding alone does NOT register
+        // one, so a programmatic `router.selectedTab = .terminal` (deep link
+        // / intent) never re-rendered the TabView — TabBarRegressionUITests
+        // stays red without this modifier.
+        .onChange(of: router.selectedTab) { old, new in
+            deepLinkLog.debug("tabview: selection \(String(describing: old), privacy: .public) -> \(String(describing: new), privacy: .public)")
         }
     }
 }
@@ -93,6 +115,11 @@ struct RootTabView: View {
 /// Dynamic Island into the matching session (§4.5).
 @Observable
 final class DeepLinkRouter: @unchecked Sendable {
+    /// Tab selection, owned here so deep-link/intent consumption can bring
+    /// the Terminal tab forward BEFORE mutating its navigation path — a path
+    /// mutation in a background tab applied `.toolbar(.hidden, for: .tabBar)`
+    /// to the shared bar underneath Settings (the tab-bar-vanishes bug).
+    var selectedTab: AppTab = .terminal
     /// Set when a deep link arrives; TerminalTabView consumes it.
     var targetSessionID: UUID?
     /// Set when an App Intent (or aplusterminal://connect/<uuid>) asks to
@@ -101,6 +128,12 @@ final class DeepLinkRouter: @unchecked Sendable {
 
     func requestConnect(toServer id: UUID) {
         deepLinkLog.debug("router: connect request \(id.uuidString, privacy: .public)")
+        // Front the Terminal tab at request time: while Settings is frontmost
+        // the background tab's onChange never fires (iOS 26), so the request
+        // would sit pending — and on-device the background path mutation hid
+        // the shared tab bar. Fronting the tab lets TerminalTabView's
+        // onAppear consume the pending request.
+        selectedTab = .terminal
         connectServerID = id
     }
 
@@ -114,6 +147,9 @@ final class DeepLinkRouter: @unchecked Sendable {
         case "session":
             guard let id = UUID(uuidString: url.lastPathComponent) else { break }
             deepLinkLog.debug("router: target=\(id.uuidString, privacy: .public)")
+            // Same request-time fronting as requestConnect — see the comment
+            // there.
+            selectedTab = .terminal
             targetSessionID = id
             return
         case "connect":
