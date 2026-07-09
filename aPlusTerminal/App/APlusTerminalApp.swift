@@ -39,7 +39,7 @@ struct APlusTerminalApp: App {
         AppDependencyManager.shared.add(dependency: router)
         AppDependencyManager.shared.add(dependency: servers)
         #if DEBUG
-        TestSeed.applyIfRequested(servers: servers, keys: keys)
+        TestSeed.applyIfRequested(servers: servers, keys: keys, router: router)
         #endif
     }
 
