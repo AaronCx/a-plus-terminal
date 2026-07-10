@@ -17,6 +17,7 @@ struct APlusTerminalApp: App {
     @State private var sessions: SessionManager
     @State private var router: DeepLinkRouter
     @State private var tipStore = TipStore()
+    @State private var exitDiagnostics: BackgroundExitDiagnostics
 
     init() {
         let theme = ThemeStore()
@@ -31,7 +32,12 @@ struct APlusTerminalApp: App {
         _profiles = State(initialValue: profiles)
         let passwords = PasswordStore()
         _passwords = State(initialValue: passwords)
-        _sessions = State(initialValue: SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles))
+        // Constructed before SessionManager: its init classifies how the
+        // PREVIOUS process died (watchdog forensics) from the record that
+        // process left in UserDefaults, then resets the record for this run.
+        let exitDiagnostics = BackgroundExitDiagnostics()
+        _exitDiagnostics = State(initialValue: exitDiagnostics)
+        _sessions = State(initialValue: SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles, diagnostics: exitDiagnostics))
         let router = DeepLinkRouter()
         _router = State(initialValue: router)
         // App Intents resolve these via @Dependency; the intents run in this
@@ -55,6 +61,7 @@ struct APlusTerminalApp: App {
             .environment(sessions)
             .environment(router)
             .environment(tipStore)
+            .environment(exitDiagnostics)
             .preferredColorScheme(theme.theme.colorScheme)
             .dynamicTypeSize(theme.appTypeSize)
             .onOpenURL { url in
