@@ -754,6 +754,56 @@ final class SessionManager {
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
+    /// Budget for the background grace preamble (the per-session multiplexer
+    /// target recording below). Recording opens an exec channel per session
+    /// with no deadline of its own, so a single stalled channel could
+    /// otherwise pin the grace task for the entire background stay. Long
+    /// enough for a healthy round-trip, small next to the ~30s allowance.
+    /// Overridable in tests for fast, deterministic assertions.
+    static let defaultBackgroundPreambleBudget: TimeInterval = 5
+    @ObservationIgnored var backgroundPreambleBudget = SessionManager.defaultBackgroundPreambleBudget
+    /// Test seam: replaced to simulate a hanging exec channel in the grace
+    /// preamble without a wedgeable live server.
+    @ObservationIgnored var recordTargetForGrace: (TerminalSession) async -> Void = { session in
+        await session.recordMultiplexerTarget()
+    }
+    /// Test seam: flips true once the grace preamble has finished — or been
+    /// abandoned by its budget — i.e. the moment the grace path is unblocked.
+    @ObservationIgnored private(set) var gracePreambleFinished = false
+
+    /// Awaits `operation`, but gives up after `seconds` and returns anyway.
+    /// The abandoned work is cancelled best-effort (a truly wedged exec
+    /// channel ignores cooperative cancellation) and left to finish or die on
+    /// its own — the caller must treat the operation as fire-and-forget-safe.
+    private static func raceAgainstTimeout(
+        seconds: TimeInterval,
+        operation: @escaping @MainActor () async -> Void
+    ) async {
+        final class ResumeOnce: @unchecked Sendable {
+            private let lock = NSLock()
+            private var resumed = false
+            func claim() -> Bool {
+                lock.withLock {
+                    if resumed { return false }
+                    resumed = true
+                    return true
+                }
+            }
+        }
+        let once = ResumeOnce()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let work = Task {
+                await operation()
+                if once.claim() { continuation.resume() }
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                work.cancel()
+                if once.claim() { continuation.resume() }
+            }
+        }
+    }
+
     init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
         self.keyStore = keyStore
         self.serverStore = serverStore
@@ -870,12 +920,25 @@ final class SessionManager {
         backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "aplusterminal.session-grace") { [weak self] in
             self?.finishGrace()
         }
+        gracePreambleFinished = false
         graceTask = Task { [weak self] in
             guard let self else { return }
-            // Record targets immediately, while definitely still attached.
-            for session in self.sessions where session.state == .connected {
-                await session.recordMultiplexerTarget()
+            // Record targets immediately, while definitely still attached —
+            // but never unbounded: each recording opens an exec channel, and
+            // one stalled channel would otherwise pin this preamble (and the
+            // session's record single-flight) for the whole background stay.
+            // Abandoning a slow refresh is harmless: the keepalive recorded a
+            // target recently and records again on the next connected tick,
+            // so the reattach guess is at worst slightly stale.
+            let budget = self.backgroundPreambleBudget
+            let record = self.recordTargetForGrace
+            let connected = self.sessions.filter { $0.state == .connected }
+            await Self.raceAgainstTimeout(seconds: budget) {
+                for session in connected where session.state == .connected {
+                    await record(session)
+                }
             }
+            self.gracePreambleFinished = true
             // No fixed timer: leave the sockets open until iOS fires the
             // expiration handler above, maximizing the quick-switch window.
         }
