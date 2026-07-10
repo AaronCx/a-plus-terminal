@@ -611,6 +611,27 @@ final class SessionManagerTests: XCTestCase {
         try await Task.sleep(for: .seconds(1))
         XCTAssertEqual(shell.windowSizes.count, afterSuspend, "keepalive must stop once suspended")
     }
+
+    func testBackgroundGracePreambleIsBoundedDespiteHangingRecord() async throws {
+        // The grace preamble records the multiplexer target per connected
+        // session over an exec channel with no deadline of its own. A wedged
+        // channel (never returns, ignores cancellation — the worst case) must
+        // not pin the grace path for the whole background stay: the preamble
+        // races a budget and is abandoned when it elapses.
+        let session = manager.open(server: makeServer())
+        try await waitFor("session to connect") { session.state == .connected }
+
+        manager.backgroundPreambleBudget = 0.3
+        manager.recordTargetForGrace = { _ in
+            while true { try? await Task.sleep(for: .seconds(1)) }
+        }
+
+        manager.appDidEnterBackground()
+        try await waitFor("grace preamble to be abandoned within its budget", timeout: 5) {
+            self.manager.gracePreambleFinished
+        }
+        manager.appWillEnterForeground()  // release the background task
+    }
 }
 
 @MainActor
