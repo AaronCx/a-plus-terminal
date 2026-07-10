@@ -204,6 +204,17 @@ final class SessionActivityControllerTests: XCTestCase {
         await controller.flushActivityUpdates() // must not hang
         XCTAssertEqual(controller.pushCount, 0)
     }
+
+    /// The product rule is "the Activity lives exactly as long as the app
+    /// does": force-quit kills the sessions, the card must follow. Only
+    /// `.transient` gives that — the system ends a transient Activity when
+    /// the process dies, including a force-quit while suspended (no
+    /// willTerminate), verified empirically in the iOS 26 simulator. A
+    /// `.standard` request would leave a force-quit orphan behind.
+    func testActivityRequestStyleIsTransient() {
+        XCTAssertEqual(SessionActivityController.requestStyle, .transient,
+                       "regressing to .standard resurrects the force-quit orphan")
+    }
 }
 
 /// Regression coverage for the agent label leaking onto a session that is no
@@ -492,6 +503,34 @@ final class SessionActivityRuntimeTests: XCTestCase {
         XCTAssertEqual(controller.lastPushedState?.activeCount, 0)
         let ended = await waitUntilEndedOrGone()
         XCTAssertTrue(ended, "closing the last session must end the Activity (grace wind-down)")
+
+        await controller.endNow()
+    }
+
+    /// The Activity actually started in the simulator must have been
+    /// requested `.transient` — that is what makes the system end it when
+    /// the process dies (the force-quit case). ActivityKit exposes no
+    /// readable `style` on a running `Activity` (checked against the iOS 26
+    /// SDK .swiftinterface: only the `request` overloads take a style), so
+    /// this asserts via the controller's request-path seam right after a
+    /// real request succeeded.
+    func testStartedActivityWasRequestedTransient() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+        XCTAssertNil(controller.lastRequestedStyle, "no request yet")
+
+        controller.update(with: [summary(id: UUID(), state: "connected", monitor: nil)])
+        _ = await waitForLiveState { $0.activeCount == 1 }
+        XCTAssertEqual(
+            Activity<SessionActivityAttributes>.activities.count, 1,
+            "a real Live Activity should be running in the simulator"
+        )
+        XCTAssertEqual(controller.lastRequestedStyle, .transient,
+                       "the running Activity must have been requested transient")
 
         await controller.endNow()
     }

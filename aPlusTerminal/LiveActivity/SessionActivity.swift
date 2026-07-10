@@ -6,9 +6,12 @@ import UIKit
 /// updates on add/remove/state change, and represents **open app sessions**,
 /// not live sockets — a suspended session renders as "Paused" and keeps the
 /// Activity alive. It ends only when the last session is *closed* (zero-state
-/// grace wind-down), on foreground termination (willTerminate), or when a
-/// fresh launch adopts an orphan whose sessions no longer exist (the
-/// force-quit-while-suspended cleanup, via the launch-time zero push).
+/// grace wind-down), on foreground termination (willTerminate), or with the
+/// death of the process itself: the Activity is requested `.transient` (see
+/// `requestStyle`), so the system ends it when the app is killed — including
+/// a force-quit while suspended, which delivers no willTerminate. The launch
+/// reconcile (adopt one survivor, zero-push ends an orphan whose sessions no
+/// longer exist) remains as a guard for restart/adopt edge cases.
 ///
 /// Two lifecycle traps this must survive:
 /// - The app gets suspended: an in-process grace timer never fires, so
@@ -21,6 +24,31 @@ import UIKit
 @MainActor
 final class SessionActivityController {
     static let graceWindow: TimeInterval = 300
+    /// Every Activity is requested with `ActivityStyle.transient` (iOS 18
+    /// API, available since this app targets iOS 26). This is the
+    /// platform-native fix for the force-quit orphan: the product rule is
+    /// "the Activity lives exactly as long as the app does" — force-quit
+    /// kills the sessions, so the card must follow (DoorDash-style), with
+    /// zero data leaving the device and no push infrastructure.
+    ///
+    /// Verified empirically in the iOS 26 simulator (real ActivityKit,
+    /// local-only activities):
+    /// - `.transient` + normal suspension → Activity SURVIVES (paused
+    ///   sessions keep their card, as required);
+    /// - `.transient` + process killed while suspended (the force-quit
+    ///   case, where iOS delivers no `willTerminate`) → the system ENDS
+    ///   the Activity itself — no orphan;
+    /// - `.standard` + the same kill (control) → Activity survives as an
+    ///   orphan, which is exactly the failure mode transient eliminates.
+    ///
+    /// Accepted trade-off: a system memory reclaim (jetsam) of the
+    /// *suspended* app also counts as process death and ends the card.
+    /// That is correct by the same rule — a dead process's sessions are
+    /// dead, nothing can reattach them until the user relaunches — and it
+    /// matches how pro apps behave. The staleDate + launch reconcile
+    /// machinery below stays as a belt-and-braces guard for restart/adopt
+    /// edge cases.
+    static let requestStyle: ActivityStyle = .transient
     /// Force-killing the app leaves the Activity orphaned with no way to end
     /// it (iOS gives no on-kill hook). Content older than this renders as
     /// stale in the widget instead of pretending sessions are still live.
@@ -47,6 +75,11 @@ final class SessionActivityController {
     /// Count of mutations actually dispatched to ActivityKit. Test seam for the
     /// de-duplication below — identical content must not burn the update budget.
     private(set) var pushCount = 0
+    /// Style the last successful `Activity.request` was made with. Test seam:
+    /// ActivityKit exposes no readable `style` on a running `Activity`
+    /// (verified against the iOS 26 SDK .swiftinterface — only the `request`
+    /// overloads take it), so the runtime tests assert the request path here.
+    private(set) var lastRequestedStyle: ActivityStyle?
 
     /// Serializes async ActivityKit mutations. `refreshActivity` fires from many
     /// sites in quick succession (state changes, agent transitions, open/close),
@@ -145,12 +178,19 @@ final class SessionActivityController {
                 }
                 activity = try? Activity.request(
                     attributes: SessionActivityAttributes(),
-                    content: content
+                    content: content,
                     // No pushType: local-only, zero-data posture.
+                    // Transient so the system ends the Activity when the
+                    // process dies (force-quit while suspended included) —
+                    // see the `requestStyle` doc for the verified matrix.
+                    style: Self.requestStyle
                 )
                 // Only count a push that actually started an Activity — a failed
                 // request (activities disabled, per-app limit) leaves activity nil.
-                if activity != nil { pushCount += 1 }
+                if activity != nil {
+                    pushCount += 1
+                    lastRequestedStyle = Self.requestStyle
+                }
             }
         } else if let activity {
             // Zero open sessions: only the user closing the last session (or
