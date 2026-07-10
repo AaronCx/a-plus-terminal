@@ -39,6 +39,18 @@ final class SessionActivityController {
     static let pausedStaleWindow: TimeInterval = 4 * 60 * 60
 
     private var activity: Activity<SessionActivityAttributes>?
+    /// Watches the tracked Activity's state stream for an end the app did not
+    /// initiate — a user swipe-dismiss or a system cap ends the Activity
+    /// behind our back, and without noticing it the stale non-nil handle
+    /// blocks `needsStart` forever: every later refresh happily enqueues
+    /// updates onto a dead Activity and the card can never come back until a
+    /// full app restart. Stored alongside the handle and swapped with it in
+    /// `track(_:)` only, so an observer can never outlive its Activity swap
+    /// and clear a successor's handle.
+    private var activityStateObserver: Task<Void, Never>?
+    /// Test seam: the id of the Activity the controller believes it owns
+    /// (nil once an external end has been noticed and the handle dropped).
+    var trackedActivityID: String? { activity?.id }
     /// Last content pushed to ActivityKit — also the regression-test seam.
     private(set) var lastPushedState: SessionActivityAttributes.ContentState?
     /// staleDate of the last content built for ActivityKit — test seam for
@@ -78,7 +90,7 @@ final class SessionActivityController {
     init(heartbeatInterval: TimeInterval = 240) {
         self.heartbeatInterval = heartbeatInterval
         let survivors = Activity<SessionActivityAttributes>.activities
-        activity = survivors.first
+        track(survivors.first)
         for orphan in survivors.dropFirst() {
             Task { await orphan.end(nil, dismissalPolicy: .immediate) }
         }
@@ -109,8 +121,59 @@ final class SessionActivityController {
     }
 
     deinit {
+        activityStateObserver?.cancel()
         if let terminateObserver {
             NotificationCenter.default.removeObserver(terminateObserver)
+        }
+    }
+
+    /// Single write path for the Activity handle. Swapping the external-end
+    /// observer atomically with the handle it watches makes it impossible to
+    /// leak an observer across an Activity swap: a new request/adopt always
+    /// cancels the previous observer, and the identity guard below covers a
+    /// terminal state the stream had already buffered for a replaced task.
+    private func track(_ newActivity: Activity<SessionActivityAttributes>?) {
+        activityStateObserver?.cancel()
+        activityStateObserver = nil
+        activity = newActivity
+        guard let newActivity else { return }
+        activityStateObserver = Task { @MainActor [weak self] in
+            for await state in newActivity.activityStateUpdates {
+                // `.stale` is a rendering hint, not a lifecycle end.
+                guard state == .ended || state == .dismissed else { continue }
+                // Never clear a successor's handle: by the time this
+                // delivers, a newer Activity may already be tracked.
+                guard !Task.isCancelled, let self,
+                      self.activity?.id == newActivity.id else { return }
+                self.dropDeadHandle()
+                return
+            }
+        }
+    }
+
+    /// The tracked Activity was ended behind the app's back. Drop the dead
+    /// handle (and its observer) so the next refresh sees `activity == nil`,
+    /// takes the `needsStart` path, and re-requests the card while sessions
+    /// are live — previously this required a full app restart.
+    private func dropDeadHandle() {
+        track(nil)
+        stopHeartbeat()
+    }
+
+    /// Ground-truth reconcile against ActivityKit, called on foreground. The
+    /// state-stream observer cannot run while the process is suspended (the
+    /// stream only delivers on resume), so an end that happened in the
+    /// background — user swipe-dismiss, system cap — is reconciled here
+    /// deterministically instead of racing the stream: if the tracked
+    /// Activity is gone from `Activity.activities` or sits in a terminal
+    /// state, the handle is dropped BEFORE the foreground refresh runs, so
+    /// that refresh re-requests for the still-open sessions.
+    func reconcileExternalEnd() {
+        guard let activity else { return }
+        let stillListed = Activity<SessionActivityAttributes>.activities
+            .contains { $0.id == activity.id }
+        if !stillListed || activity.activityState == .ended || activity.activityState == .dismissed {
+            dropDeadHandle()
         }
     }
 
@@ -143,11 +206,11 @@ final class SessionActivityController {
                     let stale = stale
                     enqueue { await stale.end(nil, dismissalPolicy: .immediate) }
                 }
-                activity = try? Activity.request(
+                track(try? Activity.request(
                     attributes: SessionActivityAttributes(),
                     content: content
                     // No pushType: local-only, zero-data posture.
-                )
+                ))
                 // Only count a push that actually started an Activity — a failed
                 // request (activities disabled, per-app limit) leaves activity nil.
                 if activity != nil { pushCount += 1 }
@@ -158,7 +221,9 @@ final class SessionActivityController {
             // no longer exist) reaches here — suspended sessions still count
             // above. Show the truthful zero state during the grace window,
             // then let the system dismiss it — works even while suspended.
-            self.activity = nil
+            // track(nil) also cancels the observer BEFORE the end below
+            // runs, so our own wind-down never reads as an external end.
+            track(nil)
             pushCount += 1
             enqueue {
                 await activity.end(
@@ -247,7 +312,7 @@ final class SessionActivityController {
         stopHeartbeat()
         applyTask?.cancel()
         applyTask = nil
-        activity = nil
+        track(nil)
         for current in Activity<SessionActivityAttributes>.activities {
             await current.end(nil, dismissalPolicy: .immediate)
         }

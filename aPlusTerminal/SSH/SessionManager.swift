@@ -886,6 +886,13 @@ final class SessionManager {
         graceTask?.cancel()
         graceTask = nil
         endBackgroundTask()
+        // The system may have ended the Live Activity while we were suspended
+        // (user swipe-dismiss, system cap): the controller's state-stream
+        // observer only runs once the process resumes, so reconcile against
+        // ActivityKit's ground truth FIRST — a dead handle is dropped, and
+        // the refresh below then takes the needsStart path and re-requests
+        // the card for the still-open sessions.
+        activityController.reconcileExternalEnd()
         // Push the Activity's stale horizon out — content only goes stale
         // when the process is killed or frozen long enough to stop updating.
         // refreshActivity() coalesces when the session list is unchanged (the
