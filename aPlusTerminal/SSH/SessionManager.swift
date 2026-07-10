@@ -394,6 +394,24 @@ final class TerminalSession: Identifiable, Hashable {
         state = .suspended
     }
 
+    /// Last-resort suspension for the background-task expiration handler:
+    /// mark the session suspended WITHOUT the network teardown.
+    /// `connection.disconnect()` is SSH channel teardown — network I/O the
+    /// expiration handler must never wait on (a slow handler is exactly the
+    /// watchdog kill this exists to avoid). Skipping it is safe: iOS closes
+    /// the sockets when it suspends the process, the server-side multiplexer
+    /// session survives just as it does after a clean disconnect, and every
+    /// reconnect path already tears down the old connection first
+    /// (`establish()` disconnects before dialing). Synchronous by design —
+    /// never awaits.
+    func suspendAbruptly() {
+        guard state == .connected else { return }
+        pumpTask?.cancel()
+        pumpTask = nil
+        agentMonitor.reset()
+        state = .suspended
+    }
+
     /// All sessions available to reattach, captured live so the paused card can
     /// offer a picker (we can't query once the socket is gone). Empty for
     /// profiles that can't list/attach (e.g. `none`).
@@ -751,15 +769,49 @@ final class SessionManager {
     private let settings: AppSettings
     private let profiles: ProfileStore
     private let activityController = SessionActivityController()
+    private let diagnostics: BackgroundExitDiagnostics
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
-    init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
+    /// Safety margin against the background watchdog. While backgrounded, the
+    /// sockets are deliberately held open for nearly the entire background
+    /// allowance (build-6 intent: a quick app-switch keeps the live session).
+    /// But the wind-down itself — `session.suspend()` is SSH channel teardown,
+    /// i.e. network I/O, plus the final ActivityKit flush — must NOT run
+    /// inside the `beginBackgroundTask` expiration handler: Apple's contract
+    /// is that the handler returns fast and calls `endBackgroundTask`
+    /// promptly, and a handler that dawdles gets the process killed with
+    /// 0x8badf00d. So the manager polls `backgroundTimeRemaining` and starts
+    /// the wind-down *proactively* once the remaining allowance drops below
+    /// this margin: late enough that the sessions still get the allowance
+    /// minus only these ~10s, early enough that suspend + flush comfortably
+    /// finish before the watchdog ever looks our way.
+    static let windDownSafetyMargin: TimeInterval = 10
+    /// Poll cadence for `backgroundTimeRemaining` while parked in the
+    /// background — a plain Task.sleep loop, valid for as long as the
+    /// background task assertion keeps the process running.
+    static let backgroundRemainingPollInterval: TimeInterval = 2
+
+    /// Remaining background allowance. UIApplication's number on device;
+    /// injected in tests — the simulator doesn't enforce the watchdog this
+    /// margin guards against, so the proactive path must be provable without it.
+    @ObservationIgnored var backgroundTimeRemaining: @MainActor () -> TimeInterval = {
+        UIApplication.shared.backgroundTimeRemaining
+    }
+    /// Overridable in tests for fast, deterministic wind-down assertions.
+    @ObservationIgnored var windDownPollInterval: TimeInterval = SessionManager.backgroundRemainingPollInterval
+    /// Single-flight guard for the wind-down: the proactive poll, the
+    /// expiration handler, and a foreground return can race (same discipline
+    /// as `graceTask` cancellation). First starter wins; everyone else no-ops.
+    @ObservationIgnored private var windDownStarted = false
+
+    init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, diagnostics: BackgroundExitDiagnostics? = nil) {
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.passwords = passwords
         self.settings = settings
         self.profiles = profiles
+        self.diagnostics = diagnostics ?? BackgroundExitDiagnostics()
         // A surviving Live Activity from a previous launch must reflect this
         // process's truth (no sessions yet) instead of stale ones (§4.5).
         // The controller adopts one survivor in its init; this zero push then
@@ -858,17 +910,29 @@ final class SessionManager {
         sessions.first { $0.id == id }
     }
 
-    /// Hold sockets open for the *entire* background allowance iOS grants
-    /// (~30s) so a quick app-switch keeps the live session, then close cleanly
-    /// only when iOS is about to suspend us. The multiplexer target is recorded
-    /// up front so even a forced suspend can reattach. The session survives the
-    /// disconnect server-side; the user chooses reattach-vs-fresh on return.
+    /// Hold sockets open for *nearly* the entire background allowance iOS
+    /// grants (~30s) so a quick app-switch keeps the live session, then close
+    /// cleanly — proactively, while there is still comfortably enough time —
+    /// once the allowance runs down to `windDownSafetyMargin`. The multiplexer
+    /// target is recorded up front so even a forced suspend can reattach. The
+    /// session survives the disconnect server-side; the user chooses
+    /// reattach-vs-fresh on return.
+    ///
+    /// Watchdog history: builds 6–26 triggered the whole wind-down FROM the
+    /// expiration handler, i.e. network teardown + ActivityKit flush racing
+    /// the very deadline the handler announces — structurally 0x8badf00d
+    /// bait on device (the simulator never enforces it). The handler is now
+    /// a synchronous last resort only.
     func appDidEnterBackground() {
         guard sessions.contains(where: { $0.state == .connected }) else { return }
-        // iOS calls this expiration handler just before reclaiming our
-        // background time — that's the latest safe moment to suspend cleanly.
+        windDownStarted = false
+        diagnostics.markBackgrounded()
+        // LAST RESORT — should never fire, because the proactive poll below
+        // winds down before the allowance expires. If it does fire, it must
+        // be fast, synchronous, and end the task immediately (Apple's
+        // contract); anything slower is itself the watchdog kill.
         backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "aplusterminal.session-grace") { [weak self] in
-            self?.finishGrace()
+            self?.handleBackgroundTaskExpiration()
         }
         graceTask = Task { [weak self] in
             guard let self else { return }
@@ -876,8 +940,17 @@ final class SessionManager {
             for session in self.sessions where session.state == .connected {
                 await session.recordMultiplexerTarget()
             }
-            // No fixed timer: leave the sockets open until iOS fires the
-            // expiration handler above, maximizing the quick-switch window.
+            // Hold the sockets while watching the allowance; wind down
+            // proactively once it drops below the safety margin. Cancelled
+            // by a foreground return (sockets stay live — the quick-switch
+            // window) or preempted by the expiration handler.
+            while !Task.isCancelled {
+                if self.backgroundTimeRemaining() <= Self.windDownSafetyMargin {
+                    await self.windDownProactively()
+                    return
+                }
+                try? await Task.sleep(for: .seconds(self.windDownPollInterval))
+            }
         }
     }
 
@@ -886,6 +959,7 @@ final class SessionManager {
         graceTask?.cancel()
         graceTask = nil
         endBackgroundTask()
+        diagnostics.markForegrounded()
         // Push the Activity's stale horizon out — content only goes stale
         // when the process is killed or frozen long enough to stop updating.
         // refreshActivity() coalesces when the session list is unchanged (the
@@ -897,25 +971,55 @@ final class SessionManager {
         // shows a paused card so the user picks reattach-tmux vs. fresh shell.
     }
 
-    private func finishGrace() {
+    /// Proactive wind-down, run INSIDE `graceTask` when the remaining
+    /// allowance hits the safety margin: suspend sessions cleanly (real SSH
+    /// disconnects), flush ActivityKit, then relinquish the background task —
+    /// all while there are still ~10s of runway, instead of inside the
+    /// expiration handler where this work used to race the watchdog.
+    private func windDownProactively() async {
+        guard !windDownStarted else { return }
+        windDownStarted = true
+        diagnostics.markWindDownStarted(trigger: .proactive)
+        for session in sessions where session.state == .connected {
+            await session.suspend()
+        }
+        // Each suspend() fires onStateChange → refreshActivity(), whose
+        // final push carries the sessions as *paused* (they still count —
+        // the app session is open and reattachable) with the hours-long
+        // pausedStaleWindow horizon, since nothing runs after iOS
+        // suspends us. That mutation must reach ActivityKit before the
+        // suspension, or the lock screen keeps claiming connected
+        // sessions whose sockets are gone — same flush criticality as
+        // PR #76's zero-state wind-down, different final content.
+        await activityController.flushActivityUpdates()
+        diagnostics.markWindDownCompleted()
+        endBackgroundTask()
+    }
+
+    /// LAST RESORT — the `beginBackgroundTask` expiration handler. Apple's
+    /// contract: be fast and call `endBackgroundTask` promptly; a slow handler
+    /// IS the 0x8badf00d kill this redesign eliminates. So this never awaits
+    /// anything: it synchronously marks state (`suspendAbruptly` — no network
+    /// teardown; iOS closes the sockets with the suspension and reconnect
+    /// already handles dead sockets) and ends the task immediately. The
+    /// ActivityKit updates enqueued by the state changes are best-effort.
+    /// Internal (not private) so the last-resort path is unit-testable —
+    /// production's only caller is the expiration handler.
+    func handleBackgroundTaskExpiration() {
         graceTask?.cancel()
         graceTask = nil
-        Task { [weak self] in
-            guard let self else { return }
-            for session in self.sessions where session.state == .connected {
-                await session.suspend()
-            }
-            // Each suspend() fires onStateChange → refreshActivity(), whose
-            // final push carries the sessions as *paused* (they still count —
-            // the app session is open and reattachable) with the hours-long
-            // pausedStaleWindow horizon, since nothing runs after iOS
-            // suspends us. That mutation must reach ActivityKit before the
-            // suspension, or the lock screen keeps claiming connected
-            // sessions whose sockets are gone — same flush criticality as
-            // PR #76's zero-state wind-down, different final content.
-            await self.activityController.flushActivityUpdates()
-            self.endBackgroundTask()
+        if !windDownStarted {
+            windDownStarted = true
+            diagnostics.markWindDownStarted(trigger: .expiration)
         }
+        // Also covers an expiration that lands mid-proactive-wind-down: any
+        // session the cancelled proactive pass hadn't reached yet is marked
+        // suspended here, synchronously; already-suspended ones no-op.
+        for session in sessions where session.state == .connected {
+            session.suspendAbruptly()
+        }
+        diagnostics.markWindDownCompleted()
+        endBackgroundTask()
     }
 
     private func endBackgroundTask() {
