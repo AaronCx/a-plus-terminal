@@ -1,6 +1,41 @@
 import Foundation
 import Observation
 
+/// How the Live Activity should behave across app close and device lock.
+/// The platform offers a pick-two: ActivityKit's transient style dies with
+/// the process (great: force-quit removes the card) but ALSO ends on device
+/// lock; the standard style survives lock and backgrounding but lingers
+/// after a background force-quit until the next launch reconciles it. There
+/// is no style that does both, so the trade-off is the user's to make.
+enum LiveActivityMode: String, CaseIterable, Identifiable {
+    /// ActivityKit's transient style: the Activity dies with the process —
+    /// and, as an iOS limitation of that style, on device lock too.
+    case endOnClose
+    /// The standard (style-less) request: survives lock and backgrounding;
+    /// a force-quit orphan is cleared by the next launch's reconcile.
+    case persistThroughLock
+
+    var id: String { rawValue }
+
+    /// Picker row label.
+    var label: String {
+        switch self {
+        case .endOnClose: return "End when app closes"
+        case .persistThroughLock: return "Stay through the lock screen"
+        }
+    }
+
+    /// Settings footnote spelling out the mode's exact platform behavior.
+    var footnote: String {
+        switch self {
+        case .endOnClose:
+            return "The Live Activity disappears when you close the app — and also when the phone locks (an iOS limitation of this mode)."
+        case .persistThroughLock:
+            return "The Live Activity survives locking and backgrounding; after a force quit it clears the next time you open the app."
+        }
+    }
+}
+
 /// Behavior preferences, persisted to UserDefaults. Appearance lives in
 /// ThemeStore.
 @Observable
@@ -43,6 +78,13 @@ final class AppSettings {
         didSet { defaults.set(keyBarItems.map(\.rawValue), forKey: Keys.keyBarItems) }
     }
 
+    /// §4.5 — Live Activity behavior across close/lock (see LiveActivityMode).
+    /// Defaults to endOnClose: "the card is gone when I close the app" is the
+    /// least surprising baseline; persisting through lock is the opt-in.
+    var liveActivityMode: LiveActivityMode {
+        didSet { defaults.set(liveActivityMode.rawValue, forKey: Keys.liveActivityMode) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -63,6 +105,8 @@ final class AppSettings {
         } else {
             self.keyBarItems = KeyBarItem.defaultItems
         }
+        self.liveActivityMode = defaults.string(forKey: Keys.liveActivityMode)
+            .flatMap(LiveActivityMode.init(rawValue:)) ?? .endOnClose
     }
 
     private enum Keys {
@@ -73,6 +117,7 @@ final class AppSettings {
         static let defaultAgentProfileID = "defaultAgentProfileID"
         static let defaultMultiplexerProfileID = "defaultMultiplexerProfileID"
         static let keyBarItems = "keyBarItems"
+        static let liveActivityMode = "liveActivityMode"
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"

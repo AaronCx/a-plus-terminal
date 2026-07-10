@@ -8,6 +8,7 @@ struct SettingsScreen: View {
     @Environment(AppSettings.self) private var settings
     @Environment(TipStore.self) private var tipStore
     @Environment(ProfileStore.self) private var profiles
+    @Environment(SessionManager.self) private var sessions
     @Environment(BackgroundExitDiagnostics.self) private var exitDiagnostics
 
     private let supportURL = URL(string: "https://github.com/AaronCx/a-plus-terminal/issues")!
@@ -83,6 +84,24 @@ struct SettingsScreen: View {
                     Text("Scrolling & Behavior")
                 } footer: {
                     Text("Auto-reattach multiplexer: when a connection resumes, return to your running session (tmux/zellij/screen) instead of a fresh shell — picking from your live sessions when more than one is open. Off = always a fresh shell. Swipes scroll natively when the app requests mouse reporting; dictation is processed entirely on this device.")
+                }
+
+                Section {
+                    Picker("Lock screen card", selection: $settings.liveActivityMode) {
+                        ForEach(LiveActivityMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .onChange(of: settings.liveActivityMode) {
+                        // Restyle a live Activity in place — ActivityKit can't
+                        // change a running Activity's style, so the manager
+                        // ends and re-requests it with the same content.
+                        sessions.liveActivityModeChanged()
+                    }
+                } header: {
+                    Text("Live Activity")
+                } footer: {
+                    Text(settings.liveActivityMode.footnote)
                 }
 
                 Section {

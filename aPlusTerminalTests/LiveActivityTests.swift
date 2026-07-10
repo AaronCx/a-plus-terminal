@@ -204,6 +204,28 @@ final class SessionActivityControllerTests: XCTestCase {
         await controller.flushActivityUpdates() // must not hang
         XCTAssertEqual(controller.pushCount, 0)
     }
+
+    /// The user-facing mode → ActivityKit request-style mapping (§4.5) —
+    /// the platform pick-two each mode deliberately picks a side of.
+    func testModeToStyleMapping() {
+        XCTAssertEqual(SessionActivityController.style(for: .endOnClose), .transient,
+                       "end-on-close rides the transient style: dies with the process (and on lock)")
+        XCTAssertEqual(SessionActivityController.style(for: .persistThroughLock), .standard,
+                       "persist-through-lock is the style-less request this app always made")
+    }
+
+    /// Flipping the mode with no live Activity must be a no-op: there is
+    /// nothing to restyle, and the next request reads the new mode anyway.
+    func testApplyModeChangeWithoutLiveActivityIsANoOp() async {
+        let controller = SessionActivityController(mode: { .persistThroughLock })
+        // Clean slate: init may have adopted a leftover Activity from an
+        // earlier test — drop it so this is genuinely the "none live" case.
+        await controller.endNow()
+        controller.applyModeChange()
+        XCTAssertNil(controller.trackedActivityID)
+        XCTAssertEqual(controller.pushCount, 0)
+        XCTAssertNil(controller.lastRequestedStyle, "no request may happen without live content")
+    }
 }
 
 /// Regression coverage for the agent label leaking onto a session that is no
@@ -658,6 +680,87 @@ final class SessionActivityRuntimeTests: XCTestCase {
                        "ending the old Activity must not clear the new handle")
         XCTAssertTrue(Activity<SessionActivityAttributes>.activities.contains { $0.id == secondID },
                       "the new Activity must still be running")
+
+        await controller.endNow()
+    }
+
+    /// A bare controller (no mode injected) must behave like a fresh install:
+    /// the default mode is endOnClose, so the request carries `.transient`.
+    func testDefaultModeRequestsTransientStyle() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+
+        controller.update(with: [summary(id: UUID(), state: "connected", monitor: nil)])
+        _ = await waitForLiveState { $0.activeCount == 1 }
+        XCTAssertNotNil(controller.trackedActivityID, "the request must have started an Activity")
+        XCTAssertEqual(controller.lastRequestedStyle, .transient,
+                       "the default endOnClose mode maps to the transient style")
+
+        await controller.endNow()
+    }
+
+    /// persistThroughLock must produce the style-less (.standard) request —
+    /// exactly what this app shipped before the mode existed.
+    func testPersistThroughLockRequestsStandardStyle() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController(mode: { .persistThroughLock })
+        await controller.endNow()
+
+        controller.update(with: [summary(id: UUID(), state: "connected", monitor: nil)])
+        _ = await waitForLiveState { $0.activeCount == 1 }
+        XCTAssertNotNil(controller.trackedActivityID, "the request must have started an Activity")
+        XCTAssertEqual(controller.lastRequestedStyle, .standard,
+                       "persistThroughLock maps to the standard (style-less) request")
+
+        await controller.endNow()
+    }
+
+    /// Flipping the mode in Settings while an Activity is live must restyle it
+    /// in place: end the current Activity (.immediate) and re-request a fresh
+    /// one in the new style with the SAME content — ActivityKit offers no way
+    /// to change a running Activity's style.
+    func testModeToggleEndsAndRerequestsWithPreservedContent() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        var mode = LiveActivityMode.persistThroughLock
+        let controller = SessionActivityController(mode: { mode })
+        await controller.endNow()
+
+        let sid = UUID()
+        controller.update(with: [summary(id: sid, state: "connected", monitor: "working")])
+        _ = await waitForLiveState { $0.activeCount == 1 }
+        let original = try XCTUnwrap(controller.trackedActivityID)
+        XCTAssertEqual(controller.lastRequestedStyle, .standard)
+        let contentBefore = try XCTUnwrap(controller.lastPushedState)
+
+        // The Settings toggle: mode flips, then the manager restyles in place.
+        mode = .endOnClose
+        controller.applyModeChange()
+        await controller.flushActivityUpdates()
+
+        let replacement = try XCTUnwrap(controller.trackedActivityID,
+                                        "the mode change must re-request, not just end")
+        XCTAssertNotEqual(replacement, original, "a fresh Activity must replace the old one")
+        XCTAssertEqual(controller.lastRequestedStyle, .transient,
+                       "the re-request must carry the NEW mode's style")
+        XCTAssertEqual(controller.lastPushedState, contentBefore,
+                       "the restyle must preserve the content")
+        await waitUntilExternallyEnded(id: original)
+        XCTAssertFalse(
+            Activity<SessionActivityAttributes>.activities.contains { $0.id == original && $0.activityState == .active },
+            "the old-style Activity must be ended immediately"
+        )
+        let live = await waitForLiveState { $0.activeCount == 1 }
+        XCTAssertEqual(live, contentBefore, "the replacement Activity must show the same content")
 
         await controller.endNow()
     }

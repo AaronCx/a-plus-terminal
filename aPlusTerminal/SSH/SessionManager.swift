@@ -851,7 +851,7 @@ final class SessionManager {
     private let passwords: PasswordStore
     private let settings: AppSettings
     private let profiles: ProfileStore
-    private let activityController = SessionActivityController()
+    private let activityController: SessionActivityController
     private let diagnostics: BackgroundExitDiagnostics
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
@@ -945,6 +945,10 @@ final class SessionManager {
         self.settings = settings
         self.profiles = profiles
         self.diagnostics = diagnostics ?? BackgroundExitDiagnostics()
+        // The mode is read at *request time* (§4.5): flipping it in Settings
+        // affects the next Activity request without re-plumbing, and
+        // liveActivityModeChanged() below restyles a live one in place.
+        self.activityController = SessionActivityController(mode: { settings.liveActivityMode })
         // A surviving Live Activity from a previous launch must reflect this
         // process's truth (no sessions yet) instead of stale ones (§4.5).
         // The controller adopts one survivor in its init; this zero push then
@@ -1041,6 +1045,14 @@ final class SessionManager {
 
     func session(for id: UUID) -> TerminalSession? {
         sessions.first { $0.id == id }
+    }
+
+    /// Settings changed `liveActivityMode`. A live Activity is restyled in
+    /// place (end + re-request with preserved content — user-initiated only,
+    /// so it cannot race the background wind-down paths); with none live, the
+    /// next request reads the new mode anyway.
+    func liveActivityModeChanged() {
+        activityController.applyModeChange()
     }
 
     /// Hold sockets open for *nearly* the entire background allowance iOS

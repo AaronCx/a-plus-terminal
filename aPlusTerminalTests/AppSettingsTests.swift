@@ -23,6 +23,8 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertFalse(settings.multiplexerHintShown)
         XCTAssertEqual(settings.defaultAgentProfileID, "auto")
         XCTAssertEqual(settings.defaultMultiplexerProfileID, "tmux")
+        XCTAssertEqual(settings.liveActivityMode, .endOnClose,
+                       "the Live Activity defaults to ending when the app closes (§4.5)")
     }
 
     func testPersistsAcrossInstances() {
@@ -33,6 +35,7 @@ final class AppSettingsTests: XCTestCase {
         settings.multiplexerHintShown = true
         settings.defaultAgentProfileID = "codex"
         settings.defaultMultiplexerProfileID = "zellij"
+        settings.liveActivityMode = .persistThroughLock
 
         let reloaded = AppSettings(defaults: defaults)
         XCTAssertFalse(reloaded.autoReattachMultiplexer)
@@ -41,6 +44,13 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(reloaded.multiplexerHintShown)
         XCTAssertEqual(reloaded.defaultAgentProfileID, "codex")
         XCTAssertEqual(reloaded.defaultMultiplexerProfileID, "zellij")
+        XCTAssertEqual(reloaded.liveActivityMode, .persistThroughLock)
+    }
+
+    func testGarbageLiveActivityModeFallsBackToDefault() {
+        defaults.set("not-a-mode", forKey: "liveActivityMode")
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertEqual(settings.liveActivityMode, .endOnClose)
     }
 
     func testMigratesLegacyKeys() {

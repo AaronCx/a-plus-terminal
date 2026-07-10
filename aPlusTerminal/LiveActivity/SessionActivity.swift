@@ -56,6 +56,27 @@ final class SessionActivityController {
     /// staleDate of the last content built for ActivityKit — test seam for
     /// the live-vs-paused stale-horizon choice (mirrors `lastPushedState`).
     private(set) var lastPushedStaleDate: Date?
+    /// ActivityStyle passed to the most recent `Activity.request` — test seam
+    /// for the mode→style mapping (mirrors `lastPushedState`/`lastPushedStaleDate`).
+    private(set) var lastRequestedStyle: ActivityStyle?
+    /// Reads the user's Live Activity mode **at request time** — a mode change
+    /// in Settings takes effect on the next request without re-plumbing.
+    /// Injected by SessionManager (backed by AppSettings); the default matches
+    /// the AppSettings default so a bare controller behaves like a fresh install.
+    private let mode: () -> LiveActivityMode
+
+    /// The user-facing mode → ActivityKit request-style mapping, §4.5:
+    /// - `.endOnClose` → `.transient` (iOS 18 style), which dies with the
+    ///   process — and, per the platform's pick-two, also on device lock.
+    /// - `.persistThroughLock` → `.standard`, the style-less request this app
+    ///   always made: survives lock/backgrounding, and a background force-quit
+    ///   orphan is cleared by the next launch's reconcile.
+    static func style(for mode: LiveActivityMode) -> ActivityStyle {
+        switch mode {
+        case .endOnClose: return .transient
+        case .persistThroughLock: return .standard
+        }
+    }
     /// Count of mutations actually dispatched to ActivityKit. Test seam for the
     /// de-duplication below — identical content must not burn the update budget.
     private(set) var pushCount = 0
@@ -87,8 +108,12 @@ final class SessionActivityController {
     /// outlives the controller with no way to remove it.
     private var terminateObserver: NSObjectProtocol?
 
-    init(heartbeatInterval: TimeInterval = 240) {
+    init(
+        heartbeatInterval: TimeInterval = 240,
+        mode: @escaping () -> LiveActivityMode = { .endOnClose }
+    ) {
         self.heartbeatInterval = heartbeatInterval
+        self.mode = mode
         let survivors = Activity<SessionActivityAttributes>.activities
         track(survivors.first)
         for orphan in survivors.dropFirst() {
@@ -195,25 +220,8 @@ final class SessionActivityController {
             if let activity {
                 pushCount += 1
                 enqueue { await activity.update(content) }
-            } else if ActivityAuthorizationInfo().areActivitiesEnabled {
-                // Sweep anything still on screen (an ended-but-undismissed
-                // zero state, an orphan from a previous launch) so exactly one
-                // Activity exists. The sweep enumerates only the *pre-existing*
-                // activities, so the new request below is never in that set; the
-                // request stays synchronous (not enqueued) so `activity` is set
-                // immediately and a rapid second update can't double-request.
-                for stale in Activity<SessionActivityAttributes>.activities {
-                    let stale = stale
-                    enqueue { await stale.end(nil, dismissalPolicy: .immediate) }
-                }
-                track(try? Activity.request(
-                    attributes: SessionActivityAttributes(),
-                    content: content
-                    // No pushType: local-only, zero-data posture.
-                ))
-                // Only count a push that actually started an Activity — a failed
-                // request (activities disabled, per-app limit) leaves activity nil.
-                if activity != nil { pushCount += 1 }
+            } else {
+                requestActivity(with: content)
             }
         } else if let activity {
             // Zero open sessions: only the user closing the last session (or
@@ -235,6 +243,62 @@ final class SessionActivityController {
 
         // Keep an idle-but-live Activity fresh; stop once there's nothing live.
         if self.activity != nil {
+            startHeartbeat()
+        } else {
+            stopHeartbeat()
+        }
+    }
+
+    /// Requests a fresh Activity in the style the user's mode maps to, after
+    /// sweeping anything still on screen (an ended-but-undismissed zero state,
+    /// an orphan from a previous launch) so exactly one Activity exists. The
+    /// sweep enumerates only the *pre-existing* activities, so the new request
+    /// below is never in that set; the request stays synchronous (not
+    /// enqueued) so `activity` is set immediately and a rapid second update
+    /// can't double-request.
+    private func requestActivity(with content: ActivityContent<SessionActivityAttributes.ContentState>) {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        for stale in Activity<SessionActivityAttributes>.activities {
+            let stale = stale
+            enqueue { await stale.end(nil, dismissalPolicy: .immediate) }
+        }
+        let style = Self.style(for: mode())
+        lastRequestedStyle = style
+        if style == .transient {
+            track(try? Activity.request(
+                attributes: SessionActivityAttributes(),
+                content: content,
+                pushType: nil, // local-only, zero-data posture
+                style: .transient
+            ))
+        } else {
+            // The style-less request this app has always made (.standard).
+            track(try? Activity.request(
+                attributes: SessionActivityAttributes(),
+                content: content
+                // No pushType: local-only, zero-data posture.
+            ))
+        }
+        // Only count a push that actually started an Activity — a failed
+        // request (activities disabled, per-app limit) leaves activity nil.
+        if activity != nil { pushCount += 1 }
+    }
+
+    /// The user flipped the Live Activity mode in Settings while an Activity
+    /// is on screen: restyle it in place instead of waiting for the next
+    /// request. ActivityKit offers no way to change a running Activity's
+    /// style, so this ends the current one (`.immediate`, via the sweep in
+    /// `requestActivity`) and synchronously re-requests with the same content
+    /// in the new style — the `track(_:)` swap cancels the old observer with
+    /// the handle, so our own end never reads as an external end. Strictly
+    /// user-initiated from foreground Settings, so it cannot race the
+    /// wind-down/reconcile paths, which stay mode-agnostic. With no live
+    /// Activity there is nothing to restyle — the next request simply reads
+    /// the new mode.
+    func applyModeChange() {
+        guard activity != nil, let state = lastPushedState, state.activeCount > 0 else { return }
+        requestActivity(with: makeContent(for: state))
+        if activity != nil {
             startHeartbeat()
         } else {
             stopHeartbeat()
