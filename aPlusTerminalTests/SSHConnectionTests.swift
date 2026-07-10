@@ -231,6 +231,28 @@ final class SSHConnectionTests: XCTestCase {
         }
     }
 
+    func testConnectTimeoutBoundsUnreachableHost() async {
+        // TEST-NET-1 (192.0.2.0/24, RFC 5737) is reserved for documentation
+        // and non-routable (same fixture idea as ReachabilityTests): the
+        // connect can't succeed, so the only question is how long it takes to
+        // fail. With a 1s budget it must fail well under Citadel's 30s
+        // default — the property the candidate-host walk relies on so one
+        // dead address can't stall the whole attempt.
+        var config = SSHConnection.Configuration(
+            host: "192.0.2.1", port: 22, username: "u", auth: .password("x"))
+        config.connectTimeout = 1
+
+        let connection = SSHConnection()
+        let start = Date()
+        do {
+            try await connection.connect(config)
+            XCTFail("connect to TEST-NET-1 must fail")
+        } catch {
+            XCTAssertLessThan(Date().timeIntervalSince(start), 10,
+                              "the configured connect budget must bound the attempt")
+        }
+    }
+
     func testSendBeforeConnectThrows() async throws {
         let connection = SSHConnection()
         do {

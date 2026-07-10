@@ -68,11 +68,17 @@ struct DiscoveryView: View {
         errorMessage = nil
         Task {
             defer { resolvingID = nil }
-            guard let (host, port) = await BonjourBrowser.resolve(service.endpoint) else {
+            guard let resolved = await BonjourBrowser.resolve(service.endpoint) else {
                 errorMessage = "Couldn't resolve \(service.name). Make sure you're on the same network."
                 return
             }
-            onSelect(Server(name: service.name, host: host, port: port, username: ""))
+            onSelect(Server(
+                name: service.name,
+                host: resolved.host,
+                port: resolved.port,
+                username: "",
+                lastKnownAddress: resolved.concreteAddress
+            ))
             dismiss()
         }
     }
