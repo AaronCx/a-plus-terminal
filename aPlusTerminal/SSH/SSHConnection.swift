@@ -95,6 +95,11 @@ actor SSHConnection {
         var terminal: String = "xterm-256color"
         var cols: Int = 80
         var rows: Int = 24
+        /// TCP connect budget in seconds, forwarded to Citadel's
+        /// `SSHClientSettings.connectTimeout` (whose default this mirrors).
+        /// The candidate-host walk shortens it so one dead address can't eat
+        /// the whole connect attempt.
+        var connectTimeout: TimeInterval = 30
     }
 
     enum State {
@@ -130,7 +135,7 @@ actor SSHConnection {
     func connect(_ config: Configuration) async throws {
         state = .connecting
         let validator = TOFUHostKeyValidator(pinnedKey: config.knownHostKey)
-        let settings = SSHClientSettings(
+        var settings = SSHClientSettings(
             host: config.host,
             port: config.port,
             authenticationMethod: { [auth = config.auth, username = config.username] in
@@ -149,6 +154,7 @@ actor SSHConnection {
             },
             hostKeyValidator: .custom(validator)
         )
+        settings.connectTimeout = .milliseconds(Int64(config.connectTimeout * 1000))
 
         do {
             let client = try await SSHClient.connect(to: settings)
