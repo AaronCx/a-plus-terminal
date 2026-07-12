@@ -8,6 +8,7 @@ struct SettingsScreen: View {
     @Environment(AppSettings.self) private var settings
     @Environment(TipStore.self) private var tipStore
     @Environment(ProfileStore.self) private var profiles
+    @Environment(BackgroundExitDiagnostics.self) private var exitDiagnostics
 
     private let supportURL = URL(string: "https://github.com/AaronCx/a-plus-terminal/issues")!
     // Trailing slash matches the GitHub Pages canonical URL (and SupportView).
@@ -100,10 +101,25 @@ struct SettingsScreen: View {
                     }
                 }
 
-                Section("Support") {
+                Section {
                     Link(destination: supportURL) {
                         Label("Report an Issue", systemImage: "questionmark.circle")
                     }
+                    // Device-truth diagnostics row: how the previous process
+                    // run ended (clean vs. suspected background kill).
+                    // Deliberately visible in TestFlight/App Store builds so
+                    // a background-kill report can be read straight off the
+                    // phone after reproducing — no Xcode attach needed.
+                    // Plain local text; nothing leaves the device.
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Last Exit")
+                        Text(exitDiagnostics.previousExitSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                } header: {
+                    Text("Support")
                 }
 
                 Section("Legal") {
@@ -119,6 +135,10 @@ struct SettingsScreen: View {
                 }
             }
             .navigationTitle("Settings")
+            // Settings never hides the tab bar — asserting it explicitly
+            // guards against any future writer latching the shared bar
+            // hidden underneath this tab.
+            .toolbar(.visible, for: .tabBar)
             .task {
                 if tipStore.loadState != .loaded {
                     await tipStore.load()

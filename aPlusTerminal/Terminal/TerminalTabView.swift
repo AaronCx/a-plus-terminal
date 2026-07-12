@@ -92,8 +92,11 @@ struct TerminalTabView: View {
                 }
             }
             .navigationTitle("Terminal")
-            // Explicit restore: relying on the pushed screen's `.hidden` alone
-            // sometimes leaves the tab bar gone after popping back.
+            // SOLE owner of tab-bar visibility for this tab (do not add other
+            // writers): hidden while a session is pushed, visible at the
+            // list. Two writers — this plus the pushed screen's own unconditional
+            // `.hidden` — raced during pop/tab transitions and could latch
+            // the bar hidden; the screen-side writer was removed.
             .toolbar(path.isEmpty ? .visible : .hidden, for: .tabBar)
             .navigationDestination(for: TerminalSession.self) { session in
                 // Identity-keyed: swapping the path A→B updates the pushed
@@ -218,6 +221,7 @@ struct TerminalTabView: View {
             return
         }
         deepLinkLog.debug("consume: switching path to \(session.id.uuidString, privacy: .public)")
+        router.selectedTab = .terminal
         path = [session]
     }
 
@@ -234,10 +238,12 @@ struct TerminalTabView: View {
         }
         if let existing = sessionManager.sessions.first(where: { $0.server.id == server.id }) {
             deepLinkLog.debug("connect: focusing existing session \(existing.id.uuidString, privacy: .public)")
+            router.selectedTab = .terminal
             path = [existing]
             return
         }
         deepLinkLog.debug("connect: opening session to \(server.name, privacy: .public)")
+        router.selectedTab = .terminal
         path = [sessionManager.open(server: server)]
     }
 }
