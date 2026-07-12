@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Settings tab (§4.6) — cards in spec order: Support (tips), Application,
 /// Terminal, App Protection, Theme, Scrolling,
-/// Support, Legal.
+/// Support, Legal, version footer.
 struct SettingsScreen: View {
     @Environment(ThemeStore.self) private var theme
     @Environment(AppSettings.self) private var settings
@@ -132,6 +132,18 @@ struct SettingsScreen: View {
                     Link(destination: privacyPolicyURL) {
                         Label("Privacy Policy (Web)", systemImage: "safari")
                     }
+                }
+
+                // Version footer — "which build am I on" must be answerable
+                // in-app (TestFlight builds are otherwise indistinguishable).
+                Section {
+                } footer: {
+                    Text(AppVersion.current)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .multilineTextAlignment(.center)
+                        .textSelection(.enabled)
                 }
             }
             .navigationTitle("Settings")
