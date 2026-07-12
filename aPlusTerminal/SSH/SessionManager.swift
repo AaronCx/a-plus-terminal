@@ -110,6 +110,26 @@ final class TerminalSession: Identifiable, Hashable {
     var awaitNetworkPath: (TimeInterval) async -> NetworkPathWaiter.Result = {
         await NetworkPathWaiter.awaitPath(timeout: $0)
     }
+    /// Per-candidate connect budget when a server derives several candidate
+    /// hosts (discovered ".local" servers). Short on purpose: a dead ".local"
+    /// name on LTE must not eat the whole attempt before the VPN-resolvable
+    /// bare name gets its turn. Single-candidate servers keep the transport
+    /// default (today's behavior, untouched).
+    static let defaultCandidateConnectTimeout: TimeInterval = 4
+    /// Overridable in tests (same pattern as `keepaliveInterval`).
+    var candidateConnectTimeout = TerminalSession.defaultCandidateConnectTimeout
+    /// In-memory winner of the last successful candidate walk — reconnects
+    /// within this session try it first. Never persisted; reset when the
+    /// network path changes (the best candidate likely changed with it).
+    private var preferredCandidateHost: String?
+    /// One row per candidate actually attempted in the most recent establish
+    /// run, in order — a deterministic test seam for candidate ordering and
+    /// the per-candidate timeout budget (nil = transport default).
+    struct CandidateAttempt: Equatable {
+        let host: String
+        let timeout: TimeInterval?
+    }
+    private(set) var lastCandidateAttempts: [CandidateAttempt] = []
     private(set) var lastRequestedSize: (cols: Int, rows: Int)?
 
     /// Outbound writes (keystrokes, resizes) flow through one FIFO stream
@@ -515,6 +535,11 @@ final class TerminalSession: Identifiable, Hashable {
                     switch await awaitNetworkPath(pathWaitBudget) {
                     case .restored:
                         delay = 0.5
+                        // The network changed under us (Wi-Fi → LTE, VPN up):
+                        // the previous winner is likely the wrong candidate
+                        // now, so the next attempt re-runs candidate selection
+                        // from the top in derived order.
+                        preferredCandidateHost = nil
                     case .alreadySatisfied, .timedOut:
                         try? await Task.sleep(for: .seconds(delay))
                         delay = min(delay * 2, 2.0)
@@ -586,17 +611,7 @@ final class TerminalSession: Identifiable, Hashable {
         pumpTask?.cancel()
         await connection.disconnect()
 
-        let fresh = SSHConnection()
-        let size = currentWindowSize()
-        try await fresh.connect(SSHConnection.Configuration(
-            host: server.host,
-            port: server.port,
-            username: server.username,
-            auth: auth,
-            knownHostKey: server.knownHostKey,
-            cols: size.cols,
-            rows: size.rows
-        ))
+        let fresh = try await connectBestCandidate(auth: auth)
         connection = fresh
         // Clear whatever the dead PTY left on screen before the new shell and
         // tmux attach repaint — otherwise old and new frames overlay.
@@ -612,6 +627,69 @@ final class TerminalSession: Identifiable, Hashable {
         // shell's working/waiting reading.
         agentMonitor.reset()
         startPump(reading: fresh)
+    }
+
+    /// Walks the server's candidate hosts in order (last winner first within
+    /// this session) and returns the first connection that completes an SSH
+    /// handshake under the pinned host key.
+    ///
+    /// Security rule (non-negotiable): a host-key MISMATCH on a candidate
+    /// other than the stored primary host means "wrong machine behind an
+    /// untrusted resolver" — that candidate is skipped silently, WITHOUT
+    /// recording `hostKeyConflict` or offering the re-pin sheet. The
+    /// review-then-re-pin flow (PR #78) stays reserved for the stored primary
+    /// host, where it still aborts the walk immediately (never quietly
+    /// connect elsewhere past a MITM warning). A first connect with no pinned
+    /// key does TOFU on whichever candidate connects first, exactly as today.
+    private func connectBestCandidate(auth: SSHConnection.AuthMethod) async throws -> SSHConnection {
+        var candidates = server.connectionCandidates
+        if let preferred = preferredCandidateHost,
+           let index = candidates.firstIndex(of: preferred), index > 0 {
+            candidates.remove(at: index)
+            candidates.insert(preferred, at: 0)
+        }
+        // The short per-candidate budget applies only when there is a queue
+        // behind the current candidate; a single-candidate (manually-entered)
+        // server keeps the transport default exactly as before.
+        let perCandidateTimeout: TimeInterval? = candidates.count > 1 ? candidateConnectTimeout : nil
+        let size = currentWindowSize()
+
+        lastCandidateAttempts = []
+        var firstFailure: Error?
+        for candidate in candidates {
+            lastCandidateAttempts.append(CandidateAttempt(host: candidate, timeout: perCandidateTimeout))
+            var config = SSHConnection.Configuration(
+                host: candidate,
+                port: server.port,
+                username: server.username,
+                auth: auth,
+                knownHostKey: server.knownHostKey,
+                cols: size.cols,
+                rows: size.rows
+            )
+            if let perCandidateTimeout { config.connectTimeout = perCandidateTimeout }
+
+            let fresh = SSHConnection()
+            do {
+                try await fresh.connect(config)
+                preferredCandidateHost = candidate
+                return fresh
+            } catch {
+                if case SSHConnectionError.hostKeyMismatch = error {
+                    // Primary host → surface the mismatch for review (PR #78)
+                    // and stop the walk. Fallback → skip silently (see doc).
+                    if candidate == server.host { throw error }
+                    continue
+                }
+                if firstFailure == nil { firstFailure = error }
+            }
+        }
+        if candidates.count > 1 {
+            throw SessionError.allCandidatesFailed(lastCandidateAttempts.map(\.host))
+        }
+        // Single candidate: rethrow the underlying error untouched — today's
+        // behavior and error copy, exactly.
+        throw firstFailure ?? SessionError.allCandidatesFailed(candidates)
     }
 
     /// Best-known terminal dimensions: what the layout last reported, falling
@@ -689,6 +767,9 @@ final class TerminalSession: Identifiable, Hashable {
     enum SessionError: LocalizedError {
         case noCredentials
         case keyUnavailable(String)
+        /// Every candidate host failed — carries the addresses tried, in
+        /// order, so the user sees exactly what was attempted.
+        case allCandidatesFailed([String])
 
         var errorDescription: String? {
             switch self {
@@ -696,6 +777,8 @@ final class TerminalSession: Identifiable, Hashable {
                 return "No credentials are set for this server. Edit the server and pick a key or set a password."
             case .keyUnavailable(let detail):
                 return "Couldn't load the configured SSH key (\(detail)). Re-import it in Settings → Manage Keys."
+            case .allCandidatesFailed(let hosts):
+                return "Tried \(hosts.joined(separator: ", ")) — none reachable."
             }
         }
     }
