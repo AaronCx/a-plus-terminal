@@ -50,21 +50,41 @@ final class BonjourBrowser {
         isBrowsing = false
     }
 
+    /// What a discovered service resolved to.
+    struct Resolution: Equatable {
+        /// Host to store and connect to — the mDNS hostname when it resolved
+        /// ("mac-mini.local"), otherwise a concrete address.
+        var host: String
+        var port: Int
+        /// Concrete address observed at discovery time, kept as the
+        /// last-resort connect candidate for when the ".local" name can't
+        /// resolve (off the home network). Nil when it wasn't observed or
+        /// when it *is* `host`.
+        var concreteAddress: String?
+    }
+
     /// Resolves a Bonjour endpoint to a connectable host + port.
     ///
     /// **Primary path:** resolve the service's advertised mDNS hostname
     /// ("mac-mini.local") via NetService and return that. A hostname is
     /// stable across relaunches and network changes, and getaddrinfo
     /// re-resolves it to a correctly-scoped address on every connect —
-    /// link-local IPv6 included.
+    /// link-local IPv6 included. The concrete address is additionally
+    /// captured (best-effort, short budget) as a fallback connect candidate.
     /// **Fallback:** the short-lived-TCP trick below, now preserving the
     /// IPv6 interface zone.
-    nonisolated static func resolve(_ endpoint: NWEndpoint, timeout: TimeInterval = 5) async -> (host: String, port: Int)? {
+    nonisolated static func resolve(_ endpoint: NWEndpoint, timeout: TimeInterval = 5) async -> Resolution? {
         if case .service(let name, let type, let domain, _) = endpoint,
            let byHostname = await resolveHostname(name: name, type: type, domain: domain, timeout: timeout) {
-            return byHostname
+            let concrete = await resolveConcreteAddress(endpoint, timeout: min(timeout, 2))?.host
+            return Resolution(
+                host: byHostname.host,
+                port: byHostname.port,
+                concreteAddress: concrete == byHostname.host ? nil : concrete
+            )
         }
-        return await resolveConcreteAddress(endpoint, timeout: timeout)
+        guard let concrete = await resolveConcreteAddress(endpoint, timeout: timeout) else { return nil }
+        return Resolution(host: concrete.host, port: concrete.port, concreteAddress: nil)
     }
 
     /// Resolves the advertised mDNS hostname for a discovered service.

@@ -468,6 +468,117 @@ final class SessionManagerTests: XCTestCase {
                        "no conflict → accept must not trigger a reconnect")
     }
 
+    // MARK: - Candidate-host fallback (discovered servers over VPN/LTE)
+
+    /// 127.0.0.2 is loopback too (127/8 routes to lo0 on Darwin) but nothing
+    /// listens there, so a connect is refused instantly — a fast, hermetic
+    /// "dead primary host" fixture.
+    private static let deadPrimaryHost = "127.0.0.2"
+
+    private func makeMultiCandidateServer(knownHostKey: String? = nil) -> Server {
+        let entry = Server(name: "test", host: Self.deadPrimaryHost, port: port,
+                           username: "aplusterminal-test", keyID: storedKey.id,
+                           knownHostKey: knownHostKey, lastKnownAddress: "127.0.0.1")
+        serverStore.add(entry)
+        return entry
+    }
+
+    func testFallbackCandidateConnectsWhenPrimaryIsDead() async throws {
+        let session = manager.open(server: makeMultiCandidateServer())
+        try await waitFor("fallback candidate to connect") { session.state == .connected }
+        XCTAssertEqual(session.lastCandidateAttempts.map(\.host),
+                       [Self.deadPrimaryHost, "127.0.0.1"],
+                       "the walk must try the stored host first, then the recorded address")
+        XCTAssertNotNil(session.server.knownHostKey,
+                        "first connect TOFU-pins whichever candidate connected, as today")
+    }
+
+    func testReconnectTriesPreviousWinnerFirst() async throws {
+        let session = manager.open(server: makeMultiCandidateServer())
+        try await waitFor("fallback candidate to connect") { session.state == .connected }
+
+        await session.suspend()
+        await session.reconnect(attachTo: nil, maxAttempts: 1)
+        XCTAssertEqual(session.state, .connected)
+        XCTAssertEqual(session.lastCandidateAttempts.map(\.host), ["127.0.0.1"],
+                       "a reconnect within the session must try the last winner first")
+    }
+
+    func testRestoredPathRerunsCandidateSelectionFromTheTop() async throws {
+        let session = manager.open(server: makeMultiCandidateServer())
+        try await waitFor("fallback candidate to connect") { session.state == .connected }
+
+        // Suspend cleanly FIRST (closing the server under a live channel
+        // would race the drop-triggered auto-reconnect), then kill the server
+        // so every candidate fails, and reconnect with a seam that reports
+        // the network path was restored between attempts.
+        await session.suspend()
+        try await server.close()
+        session.awaitNetworkPath = { _ in .restored }
+        await session.reconnect(attachTo: nil, maxAttempts: 2)
+
+        XCTAssertEqual(session.state, .suspended)
+        XCTAssertEqual(session.lastCandidateAttempts.map(\.host),
+                       [Self.deadPrimaryHost, "127.0.0.1"],
+                       "after a path change the walk must restart in derived order, not winner-first")
+    }
+
+    func testMismatchOnFallbackCandidateIsSkippedSilently() async throws {
+        // Pin an impostor key. The primary is dead; the fallback reaches the
+        // real test server, whose key does NOT match the pin. That reads as
+        // "wrong machine behind an untrusted resolver": the candidate must be
+        // skipped — no hostKeyConflict, no re-pin sheet — and the walk must
+        // end in the multi-address failure.
+        let impostorLine = String(
+            openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        )
+        let entry = makeMultiCandidateServer(knownHostKey: impostorLine)
+        let session = manager.open(server: entry)
+        try await waitFor("all candidates to fail") { session.state == .suspended }
+
+        XCTAssertNil(session.hostKeyConflict,
+                     "a mismatch on a NON-primary candidate must never surface the re-pin flow")
+        XCTAssertEqual(serverStore.server(for: entry.id)?.knownHostKey, impostorLine,
+                       "the pinned key must be untouched")
+        let message = try XCTUnwrap(session.lastError)
+        XCTAssertTrue(message.contains(Self.deadPrimaryHost) && message.contains("127.0.0.1"),
+                      "the failure must list every address tried, got: \(message)")
+    }
+
+    func testMismatchOnPrimaryStillSurfacesRepinAndStopsTheWalk() async throws {
+        // The primary IS the real server (with a mismatching pin) and a
+        // fallback address exists. The primary mismatch must record the
+        // conflict for review (PR #78) and abort the walk — never quietly
+        // connect to another candidate past a MITM warning.
+        let impostorLine = String(
+            openSSHPublicKey: NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey()).publicKey
+        )
+        let entry = Server(name: "test", host: "127.0.0.1", port: port,
+                           username: "aplusterminal-test", keyID: storedKey.id,
+                           knownHostKey: impostorLine, lastKnownAddress: Self.deadPrimaryHost)
+        serverStore.add(entry)
+        let session = manager.open(server: entry)
+        try await waitFor("mismatch to suspend the session") { session.state == .suspended }
+
+        XCTAssertNotNil(session.hostKeyConflict, "the primary host keeps the review flow")
+        XCTAssertEqual(session.lastCandidateAttempts.map(\.host), ["127.0.0.1"],
+                       "the walk must stop at the primary mismatch, not try further candidates")
+    }
+
+    func testPerCandidateTimeoutBudgetAppliesOnlyWhenWalkingCandidates() async throws {
+        // Multi-candidate: every attempt carries the short walk budget.
+        let session = manager.open(server: makeMultiCandidateServer())
+        try await waitFor("fallback candidate to connect") { session.state == .connected }
+        XCTAssertEqual(session.lastCandidateAttempts.map(\.timeout),
+                       [session.candidateConnectTimeout, session.candidateConnectTimeout])
+
+        // Single candidate (manually-entered server): the transport default
+        // stays in force — today's behavior, untouched.
+        let single = manager.open(server: makeServer())
+        try await waitFor("single-candidate server to connect") { single.state == .connected }
+        XCTAssertEqual(single.lastCandidateAttempts.map(\.timeout), [nil])
+    }
+
     func testKeepaliveEmitsPeriodicWindowChangesWhileIdle() async throws {
         // The drop-at-~3min regression: with no typing, the keepalive must keep
         // putting real packets on the *live PTY channel* (a no-op window-change)
@@ -499,6 +610,27 @@ final class SessionManagerTests: XCTestCase {
         // quiescent — a leaked task would keep pinging a dead channel.
         try await Task.sleep(for: .seconds(1))
         XCTAssertEqual(shell.windowSizes.count, afterSuspend, "keepalive must stop once suspended")
+    }
+
+    func testBackgroundGracePreambleIsBoundedDespiteHangingRecord() async throws {
+        // The grace preamble records the multiplexer target per connected
+        // session over an exec channel with no deadline of its own. A wedged
+        // channel (never returns, ignores cancellation — the worst case) must
+        // not pin the grace path for the whole background stay: the preamble
+        // races a budget and is abandoned when it elapses.
+        let session = manager.open(server: makeServer())
+        try await waitFor("session to connect") { session.state == .connected }
+
+        manager.backgroundPreambleBudget = 0.3
+        manager.recordTargetForGrace = { _ in
+            while true { try? await Task.sleep(for: .seconds(1)) }
+        }
+
+        manager.appDidEnterBackground()
+        try await waitFor("grace preamble to be abandoned within its budget", timeout: 5) {
+            self.manager.gracePreambleFinished
+        }
+        manager.appWillEnterForeground()  // release the background task
     }
 }
 

@@ -93,6 +93,66 @@ final class ServerModelTests: XCTestCase {
         let decoded = try JSONDecoder().decode([Server].self, from: data)
         XCTAssertEqual(decoded[0].macAddress, "aa:bb:cc:dd:ee:ff")
     }
+
+    /// Server lists saved by builds that predate lastKnownAddress must keep
+    /// decoding (migration-free, decodeIfPresent).
+    func testLegacyServerJSONDecodesWithoutLastKnownAddress() throws {
+        let legacy = """
+        [{"id":"00000000-0000-0000-0000-000000000001","name":"mini",
+          "host":"mac-mini.local","port":22,"username":"user"}]
+        """
+        let servers = try JSONDecoder().decode([Server].self, from: Data(legacy.utf8))
+        XCTAssertEqual(servers.count, 1)
+        XCTAssertNil(servers[0].lastKnownAddress)
+    }
+
+    func testLastKnownAddressRoundTripsThroughJSON() throws {
+        var server = Server(name: "mini", host: "mac-mini.local", username: "user")
+        server.lastKnownAddress = "192.168.1.20"
+        let data = try JSONEncoder().encode([server])
+        let decoded = try JSONDecoder().decode([Server].self, from: data)
+        XCTAssertEqual(decoded[0].lastKnownAddress, "192.168.1.20")
+    }
+}
+
+final class ServerConnectionCandidatesTests: XCTestCase {
+    func testLocalHostDerivesBareNameAndStoredAddress() {
+        let server = Server(name: "mini", host: "mac-mini.local", username: "u",
+                            lastKnownAddress: "192.168.1.20")
+        XCTAssertEqual(server.connectionCandidates,
+                       ["mac-mini.local", "mac-mini", "192.168.1.20"],
+                       "stored host first, VPN-resolvable bare name second, concrete address last")
+    }
+
+    func testLocalHostWithoutStoredAddressStillGetsBareName() {
+        let server = Server(name: "mini", host: "mac-mini.local", username: "u")
+        XCTAssertEqual(server.connectionCandidates, ["mac-mini.local", "mac-mini"])
+    }
+
+    func testLocalSuffixMatchesCaseInsensitively() {
+        let server = Server(name: "mini", host: "Mac-Mini.LOCAL", username: "u")
+        XCTAssertEqual(server.connectionCandidates, ["Mac-Mini.LOCAL", "Mac-Mini"])
+    }
+
+    func testManuallyEnteredHostKeepsSingleCandidate() {
+        // Non-".local" hosts have no bare-name variant and (manually entered)
+        // no recorded address — exactly today's single-candidate behavior.
+        XCTAssertEqual(Server(name: "a", host: "example.com", username: "u").connectionCandidates,
+                       ["example.com"])
+        XCTAssertEqual(Server(name: "a", host: "10.0.0.5", username: "u").connectionCandidates,
+                       ["10.0.0.5"])
+    }
+
+    func testStoredAddressEqualToHostIsDeduplicated() {
+        let server = Server(name: "a", host: "192.168.1.20", username: "u",
+                            lastKnownAddress: "192.168.1.20")
+        XCTAssertEqual(server.connectionCandidates, ["192.168.1.20"])
+    }
+
+    func testDegenerateLocalHostAddsNoEmptyCandidate() {
+        let server = Server(name: "a", host: ".local", username: "u")
+        XCTAssertEqual(server.connectionCandidates, [".local"])
+    }
 }
 
 final class BonjourResolveHelpersTests: XCTestCase {

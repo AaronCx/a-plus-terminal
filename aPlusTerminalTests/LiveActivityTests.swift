@@ -524,6 +524,143 @@ final class SessionActivityRuntimeTests: XCTestCase {
 
         await relaunched.endNow()
     }
+
+    /// Waits (ground truth only — never via the controller) until the given
+    /// Activity has left `Activity.activities` or reached a terminal state.
+    private func waitUntilExternallyEnded(id: String, timeout: TimeInterval = 10) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Activity<SessionActivityAttributes>.activities
+                .contains(where: { $0.id == id && $0.activityState == .active }),
+              Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// The system can end the Activity behind the app's back (user
+    /// swipe-dismiss, Live Activity system cap). Before the fix nothing
+    /// observed `activityStateUpdates`: the stale non-nil handle blocked
+    /// `needsStart` forever, every refresh enqueued updates onto the dead
+    /// Activity, and the card could only come back after a full app restart.
+    func testExternalEndIsNoticedAndNextRefreshRestarts() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+
+        let sid = UUID()
+        let summaries = [summary(id: sid, state: "connected", monitor: nil)]
+        controller.update(with: summaries)
+        _ = await waitForLiveState { $0.activeCount == 1 }
+        let original = try XCTUnwrap(Activity<SessionActivityAttributes>.activities.first)
+        XCTAssertEqual(controller.trackedActivityID, original.id)
+
+        // Simulate a system end: end via the Activity's OWN handle, exactly
+        // what the controller experiences when the user swipe-dismisses.
+        await original.end(nil, dismissalPolicy: .immediate)
+
+        // The state-stream observer must notice and drop the dead handle.
+        let deadline = Date().addingTimeInterval(10)
+        while controller.trackedActivityID != nil, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertNil(controller.trackedActivityID,
+                     "an externally-ended Activity must clear the controller's handle")
+
+        // Identical content — needsStart must now fire and request a FRESH
+        // Activity (the coalescing must not swallow the restart).
+        controller.update(with: summaries)
+        await controller.flushActivityUpdates()
+        _ = await waitForLiveState { $0.activeCount == 1 }
+        let revived = try XCTUnwrap(Activity<SessionActivityAttributes>.activities.first)
+        XCTAssertNotEqual(revived.id, original.id, "recovery must request a new Activity")
+        XCTAssertEqual(controller.trackedActivityID, revived.id)
+
+        await controller.endNow()
+    }
+
+    /// An end that happens while the process is suspended reaches the state
+    /// stream only on resume — recovery must not race it. The foreground
+    /// reconcile checks ActivityKit's ground truth and drops a dead handle
+    /// synchronously, so the refresh that follows re-requests deterministically.
+    func testForegroundReconcileDropsDeadHandle() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+
+        let sid = UUID()
+        let summaries = [summary(id: sid, state: "connected", monitor: nil)]
+        controller.update(with: summaries)
+        _ = await waitForLiveState { $0.activeCount == 1 }
+        let original = try XCTUnwrap(Activity<SessionActivityAttributes>.activities.first)
+
+        await original.end(nil, dismissalPolicy: .immediate)
+        // Wait on ActivityKit's ground truth only — this test must hold even
+        // when the stream observer hasn't fired yet (the suspended case).
+        await waitUntilExternallyEnded(id: original.id)
+
+        // The reconcile entry (what appWillEnterForeground calls first) must
+        // leave the handle dropped by the time it returns.
+        controller.reconcileExternalEnd()
+        XCTAssertNil(controller.trackedActivityID,
+                     "reconcile must drop a handle whose Activity the system ended")
+
+        // What the foreground refresh then does: same sessions, needsStart
+        // path, fresh Activity.
+        controller.update(with: summaries)
+        await controller.flushActivityUpdates()
+        _ = await waitForLiveState { $0.activeCount == 1 }
+        let revived = try XCTUnwrap(Activity<SessionActivityAttributes>.activities.first)
+        XCTAssertNotEqual(revived.id, original.id, "the reconciled refresh must start a new Activity")
+        XCTAssertEqual(controller.trackedActivityID, revived.id)
+
+        await controller.endNow()
+    }
+
+    /// Two sequential Activities through one controller: requesting the
+    /// second must replace the first's observer. Ending the OLD activity
+    /// after the new one started must never clear the NEW handle — a leaked
+    /// observer nil-ing the current handle would silently kill the successor
+    /// card on the next coalesced refresh.
+    func testObserverSwapsCleanlyAcrossSequentialActivities() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let controller = SessionActivityController()
+        await controller.endNow()
+
+        let sid = UUID()
+        let summaries = [summary(id: sid, state: "connected", monitor: nil)]
+        controller.update(with: summaries)
+        _ = await waitForLiveState { $0.activeCount == 1 }
+        let first = try XCTUnwrap(Activity<SessionActivityAttributes>.activities.first)
+
+        // Close the last session (grace wind-down on the first Activity),
+        // then a new session arrives: the controller requests a SECOND
+        // Activity while the first is still winding down.
+        controller.update(with: [])
+        controller.update(with: summaries)
+        let secondID = try XCTUnwrap(controller.trackedActivityID)
+        XCTAssertNotEqual(secondID, first.id, "a fresh Activity must have been requested")
+        await controller.flushActivityUpdates()
+
+        // The first Activity ends (wind-down, sweep, and this explicit
+        // external end all deliver terminal states around now). None of them
+        // may touch the new handle.
+        await first.end(nil, dismissalPolicy: .immediate)
+        try? await Task.sleep(nanoseconds: 700_000_000)  // room for a stray observer to misfire
+        XCTAssertEqual(controller.trackedActivityID, secondID,
+                       "ending the old Activity must not clear the new handle")
+        XCTAssertTrue(Activity<SessionActivityAttributes>.activities.contains { $0.id == secondID },
+                      "the new Activity must still be running")
+
+        await controller.endNow()
+    }
 }
 
 final class SessionStateActivityTests: XCTestCase {

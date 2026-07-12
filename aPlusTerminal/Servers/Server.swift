@@ -29,9 +29,38 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     /// MAC address for Wake-on-LAN (e.g. "aa:bb:cc:dd:ee:ff"). Optional —
     /// older saved lists decode with nil.
     var macAddress: String?
+    /// Concrete address (e.g. "192.168.1.20") observed when this server was
+    /// discovered over Bonjour — the last-resort connect candidate once mDNS
+    /// can't resolve the ".local" name (off the home network). Optional —
+    /// older saved lists and manually-entered servers decode with nil.
+    var lastKnownAddress: String?
 
     var displayAddress: String {
         port == 22 ? host : "\(host):\(port)"
+    }
+
+    /// Ordered, de-duplicated hosts to try when connecting, best-first:
+    /// 1. the stored host exactly as saved;
+    /// 2. for ".local" (mDNS) hosts, the bare name — off the local network the
+    ///    multicast name is dead, but a VPN with search domains (e.g.
+    ///    Tailscale MagicDNS) resolves the bare name through the OS resolver,
+    ///    with zero VPN-specific code here;
+    /// 3. the concrete address recorded at discovery time, if any.
+    /// A manually-entered non-".local" host has no bare-name variant and no
+    /// recorded address, so it keeps single-candidate behavior exactly.
+    /// Fallback candidates are only trusted under the pinned host key — see
+    /// `TerminalSession.connectBestCandidate`.
+    var connectionCandidates: [String] {
+        var candidates = [host]
+        if host.lowercased().hasSuffix(".local") {
+            let bare = String(host.dropLast(".local".count))
+            if !bare.isEmpty { candidates.append(bare) }
+        }
+        if let lastKnownAddress, !lastKnownAddress.isEmpty {
+            candidates.append(lastKnownAddress)
+        }
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0.lowercased()).inserted }
     }
 
     // Only current keys — the synthesized `encode(to:)` uses these, so legacy
@@ -39,7 +68,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     private enum CodingKeys: String, CodingKey {
         case id, name, host, port, username, group, keyID, passwordRef
         case lastMultiplexerTarget, agentProfileID, multiplexerProfileID
-        case knownHostKey, macAddress
+        case knownHostKey, macAddress, lastKnownAddress
     }
 
     /// Read-only key from pre-refactor saved lists, consulted during migration.
@@ -50,7 +79,8 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     init(id: UUID = UUID(), name: String, host: String, port: Int = 22, username: String,
          group: String? = nil, keyID: UUID? = nil, passwordRef: UUID? = nil,
          lastMultiplexerTarget: String? = nil, agentProfileID: String? = nil,
-         multiplexerProfileID: String? = nil, knownHostKey: String? = nil, macAddress: String? = nil) {
+         multiplexerProfileID: String? = nil, knownHostKey: String? = nil, macAddress: String? = nil,
+         lastKnownAddress: String? = nil) {
         self.id = id
         self.name = name
         self.host = host
@@ -64,6 +94,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
         self.multiplexerProfileID = multiplexerProfileID
         self.knownHostKey = knownHostKey
         self.macAddress = macAddress
+        self.lastKnownAddress = lastKnownAddress
     }
 
     init(from decoder: Decoder) throws {
@@ -84,5 +115,6 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
         multiplexerProfileID = try c.decodeIfPresent(String.self, forKey: .multiplexerProfileID)
         knownHostKey = try c.decodeIfPresent(String.self, forKey: .knownHostKey)
         macAddress = try c.decodeIfPresent(String.self, forKey: .macAddress)
+        lastKnownAddress = try c.decodeIfPresent(String.self, forKey: .lastKnownAddress)
     }
 }

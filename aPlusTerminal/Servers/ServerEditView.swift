@@ -27,6 +27,11 @@ struct ServerEditView: View {
     @State private var errorMessage: String?
 
     private let isNew: Bool
+    /// Host as it was when editing began — if the user changes it, the
+    /// discovery-recorded concrete address belongs to the *old* host and is
+    /// dropped on save (it must never become a connect candidate for a
+    /// different machine).
+    private let originalHost: String
 
     init(server: Server? = nil) {
         let initial = server ?? Server(name: "", host: "", username: "")
@@ -34,6 +39,7 @@ struct ServerEditView: View {
         _portText = State(initialValue: String(initial.port))
         _authMode = State(initialValue: initial.passwordRef != nil && initial.keyID == nil ? .password : .key)
         isNew = server == nil
+        originalHost = initial.host
     }
 
     /// A brand-new server with fields pre-filled (e.g. from Bonjour discovery).
@@ -42,6 +48,7 @@ struct ServerEditView: View {
         _portText = State(initialValue: String(prefill.port))
         _authMode = State(initialValue: .key)
         isNew = true
+        originalHost = prefill.host
     }
 
     var body: some View {
@@ -206,6 +213,9 @@ struct ServerEditView: View {
 
     private func save() {
         server.port = Int(portText) ?? 22
+        if server.host != originalHost {
+            server.lastKnownAddress = nil
+        }
         if authMode == .password {
             server.keyID = nil
             let ref = server.passwordRef ?? UUID()
