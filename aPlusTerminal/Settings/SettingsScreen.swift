@@ -119,6 +119,10 @@ struct SettingsScreen: View {
                 }
             }
             .navigationTitle("Settings")
+            // Settings never hides the tab bar — asserting it explicitly
+            // guards against any future writer latching the shared bar
+            // hidden underneath this tab.
+            .toolbar(.visible, for: .tabBar)
             .task {
                 if tipStore.loadState != .loaded {
                     await tipStore.load()

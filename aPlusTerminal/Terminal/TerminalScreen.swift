@@ -88,7 +88,9 @@ struct TerminalScreen: View {
         }
         .navigationTitle(session.server.name)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
+        // Tab-bar visibility is owned solely by TerminalTabView's
+        // `path.isEmpty` modifier — a second unconditional `.hidden` here
+        // raced it during pop/tab transitions (see the tab-bar-vanishes PR).
         .overlay(alignment: .top) {
             if session.isAttaching {
                 uploadingIndicator
