@@ -65,6 +65,10 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSSupportsLiveActivities: true
+        # "Audio, AirPlay, and Picture in Picture" — required for Pop-Out
+        # Sessions (view-only PiP session monitor). No entitlement needed.
+        UIBackgroundModes:
+          - audio
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: "a+Terminal browses your local network for SSH servers you choose to add, checks whether your saved servers are reachable, and sends wake packets when you ask. Everything stays on your network — nothing is collected."
         NSBonjourServices:
