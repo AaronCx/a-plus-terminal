@@ -5,11 +5,13 @@ import SwiftUI
 struct TerminalTabView: View {
     @Environment(ServerStore.self) private var serverStore
     @Environment(SessionManager.self) private var sessionManager
+    @Environment(VNCMonitorManager.self) private var vncManager
     @Environment(PasswordStore.self) private var passwords
     @Environment(DeepLinkRouter.self) private var router
 
     @State private var editingServer: Server?
     @State private var addingServer = false
+    @State private var addingMonitor = false
     @State private var discovering = false
     @State private var discoveredServer: Server?
     @State private var reachability = ReachabilityStore()
@@ -44,6 +46,20 @@ struct TerminalTabView: View {
                     }
                 }
 
+                if !vncManager.sessions.isEmpty {
+                    Section("Monitors") {
+                        ForEach(vncManager.sessions) { monitor in
+                            VNCMonitorRow(session: monitor) {
+                                vncManager.close(monitor)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                vncManager.presented = monitor
+                            }
+                        }
+                    }
+                }
+
                 if serverStore.servers.isEmpty {
                     Section("Servers") {
                         ContentUnavailableView(
@@ -59,7 +75,11 @@ struct TerminalTabView: View {
                                 ServerRow(server: server, status: reachability.statuses[server.id] ?? .unknown)
                                     .contentShape(Rectangle())
                                     .onTapGesture {
-                                        path = [sessionManager.open(server: server)]
+                                        if server.kind == .vncMonitor {
+                                            vncManager.open(server: server)
+                                        } else {
+                                            path = [sessionManager.open(server: server)]
+                                        }
                                     }
                                     .contextMenu {
                                         Button {
@@ -132,6 +152,11 @@ struct TerminalTabView: View {
                             Label("Add Server", systemImage: "plus")
                         }
                         Button {
+                            addingMonitor = true
+                        } label: {
+                            Label("Add Monitor (VNC)", systemImage: "display")
+                        }
+                        Button {
                             discovering = true
                         } label: {
                             Label("Discover on Network…", systemImage: "antenna.radiowaves.left.and.right")
@@ -152,8 +177,15 @@ struct TerminalTabView: View {
             .sheet(isPresented: $addingServer) {
                 ServerEditView()
             }
+            .sheet(isPresented: $addingMonitor) {
+                VNCMonitorEditView()
+            }
             .sheet(item: $editingServer) { server in
-                ServerEditView(server: server)
+                if server.kind == .vncMonitor {
+                    VNCMonitorEditView(server: server)
+                } else {
+                    ServerEditView(server: server)
+                }
             }
             .sheet(isPresented: $discovering) {
                 DiscoveryView { found in
@@ -162,6 +194,12 @@ struct TerminalTabView: View {
             }
             .sheet(item: $discoveredServer) { server in
                 ServerEditView(prefill: server)
+            }
+            .fullScreenCover(item: Binding(
+                get: { vncManager.presented },
+                set: { vncManager.presented = $0 }
+            )) { monitor in
+                VNCMonitorScreen(session: monitor)
             }
             .alert(
                 "Wake packet sent",
@@ -216,13 +254,20 @@ struct TerminalTabView: View {
     private func consumeDeepLink() {
         guard let target = router.targetSessionID else { return }
         router.targetSessionID = nil
-        guard let session = sessionManager.session(for: target) else {
-            deepLinkLog.debug("consume: no session for \(target.uuidString, privacy: .public)")
+        if let session = sessionManager.session(for: target) {
+            deepLinkLog.debug("consume: switching path to \(session.id.uuidString, privacy: .public)")
+            router.selectedTab = .terminal
+            path = [session]
             return
         }
-        deepLinkLog.debug("consume: switching path to \(session.id.uuidString, privacy: .public)")
-        router.selectedTab = .terminal
-        path = [session]
+        // A pop-out restore can target a VNC monitor too — present its cover.
+        if let monitor = vncManager.session(for: target) {
+            deepLinkLog.debug("consume: presenting monitor \(monitor.id.uuidString, privacy: .public)")
+            router.selectedTab = .terminal
+            vncManager.presented = monitor
+            return
+        }
+        deepLinkLog.debug("consume: no session for \(target.uuidString, privacy: .public)")
     }
 
     /// App Intent / aplusterminal://connect/<uuid> → open a session to the
@@ -284,6 +329,47 @@ struct SessionRow: View {
     }
 }
 
+/// One open VNC monitor: state dot, name, started time, close button —
+/// the SessionRow treatment for monitors.
+struct VNCMonitorRow: View {
+    let session: VNCMonitorSession
+    var onClose: () -> Void
+
+    var body: some View {
+        HStack {
+            Circle()
+                .fill(stateColor)
+                .frame(width: 9, height: 9)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.server.name)
+                    .font(.body.weight(.medium))
+                Text(session.startedAt, style: .time)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "display")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button(role: .destructive, action: onClose) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Close Monitor")
+        }
+    }
+
+    private var stateColor: Color {
+        switch session.state {
+        case .connected: return .green
+        case .connecting, .authenticating, .reconnecting: return .orange
+        case .suspended: return .orange
+        case .idle, .failed, .closed: return .gray
+        }
+    }
+}
+
 /// Warning row shown when a store's last save failed — a full disk or
 /// container failure would otherwise be silent data loss on next launch.
 /// A plain list row (not an alert) on purpose: it must survive being ignored.
@@ -317,12 +403,19 @@ struct ServerRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
                     .font(.body.weight(.medium))
-                Text("\(server.username)@\(server.displayAddress)")
+                Text(server.username.isEmpty ? server.displayAddress : "\(server.username)@\(server.displayAddress)")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if let keyID = server.keyID, keyStore.key(for: keyID) != nil {
+            if server.kind == .vncMonitor {
+                Text("Monitor")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.blue.opacity(0.2), in: Capsule())
+                    .foregroundStyle(.blue)
+            } else if let keyID = server.keyID, keyStore.key(for: keyID) != nil {
                 Text("Key")
                     .font(.caption2.weight(.semibold))
                     .padding(.horizontal, 8)

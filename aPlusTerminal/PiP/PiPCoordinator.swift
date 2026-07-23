@@ -13,7 +13,8 @@ final class PiPCoordinator {
 
     private let settings: AppSettings
     @ObservationIgnored private var engine: PiPEngine?
-    @ObservationIgnored private weak var boundSession: TerminalSession?
+    /// The terminal or VNC session currently bound to the engine.
+    @ObservationIgnored private weak var boundOwner: AnyObject?
 
     /// Mirrors the engine for SwiftUI/SessionManager reads.
     private(set) var isActive = false
@@ -50,9 +51,43 @@ final class PiPCoordinator {
     /// The session screen left. Disarm unless the pop-out is live (leaving
     /// via the app switcher with PiP up must not tear the surface down).
     func sessionScreenDisappeared(_ session: TerminalSession) {
-        guard boundSession === session, !isActive else { return }
+        disarm(ifBoundTo: session)
+    }
+
+    // MARK: - VNC monitors (same engine, same rules)
+
+    func popOut(vnc session: VNCMonitorSession) {
+        guard isAvailable else { return }
+        bind(vnc: session)
+        engine?.start()
+    }
+
+    func vncScreenAppeared(_ session: VNCMonitorSession) {
+        guard isAvailable, settings.autoPopOutOnAppSwitch else { return }
+        bind(vnc: session)
+    }
+
+    func vncScreenDisappeared(_ session: VNCMonitorSession) {
+        disarm(ifBoundTo: session)
+    }
+
+    private func bind(vnc session: VNCMonitorSession) {
+        let engine = ensureEngine()
+        if boundOwner !== session || engine.source == nil {
+            let source = VNCFrameSource(session: session)
+            session.pipInvalidate = { [weak source] in source?.noteFrame() }
+            source.onDetach = { [weak session] in session?.pipInvalidate = nil }
+            boundOwner = session
+            engine.arm(source: source, autoStartOnAppSwitch: settings.autoPopOutOnAppSwitch)
+        } else {
+            engine.arm(source: engine.source!, autoStartOnAppSwitch: settings.autoPopOutOnAppSwitch)
+        }
+    }
+
+    private func disarm(ifBoundTo owner: AnyObject) {
+        guard boundOwner === owner, !isActive else { return }
         engine?.disarm()
-        boundSession = nil
+        boundOwner = nil
     }
 
     /// Master toggle turned off: release every AVKit object so no engine,
@@ -60,13 +95,13 @@ final class PiPCoordinator {
     func masterToggleTurnedOff() {
         engine?.invalidate()
         engine = nil
-        boundSession = nil
+        boundOwner = nil
         isActive = false
     }
 
     private func bind(_ session: TerminalSession) {
         let engine = ensureEngine()
-        if boundSession !== session || engine.source == nil {
+        if boundOwner !== session || engine.source == nil {
             let source = TerminalPiPFrameSource(
                 terminalView: session.terminalView,
                 sessionID: session.id,
@@ -81,7 +116,7 @@ final class PiPCoordinator {
             // unhooked when the engine drops the source.
             session.pipInvalidate = { [weak source] in source?.onInvalidate?() }
             source.onDetach = { [weak session] in session?.pipInvalidate = nil }
-            boundSession = session
+            boundOwner = session
             engine.arm(source: source, autoStartOnAppSwitch: settings.autoPopOutOnAppSwitch)
         } else {
             engine.arm(source: engine.source!, autoStartOnAppSwitch: settings.autoPopOutOnAppSwitch)
