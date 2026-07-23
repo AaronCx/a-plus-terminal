@@ -43,6 +43,20 @@ final class AppSettings {
         didSet { defaults.set(keyBarItems.map(\.rawValue), forKey: Keys.keyBarItems) }
     }
 
+    /// Pop-Out Sessions (beta) master toggle: a view-only PiP monitor of a
+    /// session. While off, the PiP engine is never constructed — no toolbar
+    /// button, no audio-session activity, no observable background-mode
+    /// behavior.
+    var popOutSessions: Bool {
+        didSet { defaults.set(popOutSessions, forKey: Keys.popOutSessions) }
+    }
+
+    /// Sub-toggle: let the system start the pop-out on app switch
+    /// (`canStartPictureInPictureAutomaticallyFromInline`).
+    var autoPopOutOnAppSwitch: Bool {
+        didSet { defaults.set(autoPopOutOnAppSwitch, forKey: Keys.autoPopOutOnAppSwitch) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -63,6 +77,9 @@ final class AppSettings {
         } else {
             self.keyBarItems = KeyBarItem.defaultItems
         }
+        // Both default OFF for v1 (brief §3.3).
+        self.popOutSessions = defaults.bool(forKey: Keys.popOutSessions)
+        self.autoPopOutOnAppSwitch = defaults.bool(forKey: Keys.autoPopOutOnAppSwitch)
     }
 
     private enum Keys {
@@ -73,6 +90,8 @@ final class AppSettings {
         static let defaultAgentProfileID = "defaultAgentProfileID"
         static let defaultMultiplexerProfileID = "defaultMultiplexerProfileID"
         static let keyBarItems = "keyBarItems"
+        static let popOutSessions = "popOutSessions"
+        static let autoPopOutOnAppSwitch = "autoPopOutOnAppSwitch"
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"

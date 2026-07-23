@@ -18,6 +18,7 @@ struct APlusTerminalApp: App {
     @State private var router: DeepLinkRouter
     @State private var tipStore = TipStore()
     @State private var exitDiagnostics: BackgroundExitDiagnostics
+    @State private var pip: PiPCoordinator
 
     init() {
         let theme = ThemeStore()
@@ -37,9 +38,26 @@ struct APlusTerminalApp: App {
         // process left in UserDefaults, then resets the record for this run.
         let exitDiagnostics = BackgroundExitDiagnostics()
         _exitDiagnostics = State(initialValue: exitDiagnostics)
-        _sessions = State(initialValue: SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles, diagnostics: exitDiagnostics))
+        let sessions = SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles, diagnostics: exitDiagnostics)
+        _sessions = State(initialValue: sessions)
         let router = DeepLinkRouter()
         _router = State(initialValue: router)
+        // Pop-Out Sessions (beta): the coordinator is a cheap facade — the
+        // AVKit engine only exists while the setting is on and PiP is in use.
+        let pip = PiPCoordinator(settings: settings)
+        _pip = State(initialValue: pip)
+        pip.onRestore = { sessionID in
+            // Same mechanism as the Live Activity deep link: front the tab,
+            // then let TerminalTabView consume the target.
+            router.selectedTab = .terminal
+            router.targetSessionID = sessionID
+        }
+        // While a pop-out is live, the background wind-down must not kill
+        // the sessions it is monitoring…
+        sessions.pipKeepsProcessAlive = { [weak pip] in pip?.isActive ?? false }
+        // …and when the pop-out ends while still backgrounded, the normal
+        // grace window starts at that moment instead.
+        pip.onStoppedInBackground = { [weak sessions] in sessions?.appDidEnterBackground() }
         // App Intents resolve these via @Dependency; the intents run in this
         // process (openAppWhenRun), so they share the live instances.
         AppDependencyManager.shared.add(dependency: router)
@@ -62,6 +80,7 @@ struct APlusTerminalApp: App {
             .environment(router)
             .environment(tipStore)
             .environment(exitDiagnostics)
+            .environment(pip)
             .preferredColorScheme(theme.theme.colorScheme)
             .dynamicTypeSize(theme.appTypeSize)
             .onOpenURL { url in

@@ -23,6 +23,8 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertFalse(settings.multiplexerHintShown)
         XCTAssertEqual(settings.defaultAgentProfileID, "auto")
         XCTAssertEqual(settings.defaultMultiplexerProfileID, "tmux")
+        XCTAssertFalse(settings.popOutSessions, "Pop-Out Sessions beta defaults OFF (PiP brief §3.3)")
+        XCTAssertFalse(settings.autoPopOutOnAppSwitch, "auto pop-out defaults OFF (PiP brief §3.3)")
     }
 
     func testPersistsAcrossInstances() {
@@ -33,6 +35,8 @@ final class AppSettingsTests: XCTestCase {
         settings.multiplexerHintShown = true
         settings.defaultAgentProfileID = "codex"
         settings.defaultMultiplexerProfileID = "zellij"
+        settings.popOutSessions = true
+        settings.autoPopOutOnAppSwitch = true
 
         let reloaded = AppSettings(defaults: defaults)
         XCTAssertFalse(reloaded.autoReattachMultiplexer)
@@ -41,6 +45,8 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertTrue(reloaded.multiplexerHintShown)
         XCTAssertEqual(reloaded.defaultAgentProfileID, "codex")
         XCTAssertEqual(reloaded.defaultMultiplexerProfileID, "zellij")
+        XCTAssertTrue(reloaded.popOutSessions)
+        XCTAssertTrue(reloaded.autoPopOutOnAppSwitch)
     }
 
     func testMigratesLegacyKeys() {
