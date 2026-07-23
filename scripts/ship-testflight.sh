@@ -87,6 +87,19 @@ if [[ -n "$meta" ]] && grep -riE 'mac|iphone|ipad|siri|apple' "$meta" >/dev/null
   die "ITMS-90626 gate: platform word found in $meta — fix App Intents phrases before uploading"
 fi
 
+# [5b] dyld gate (build-30 lesson): every @rpath framework the app binary
+# references must exist inside the bundle's Frameworks/ — a missing embed
+# (e.g. a dynamic SPM product XcodeGen doesn't embed) passes CI, the full
+# test suite, sim runs, AND ASC processing, then aborts at launch on device.
+app_dir=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name '*.app' | head -1)
+app_bin="$app_dir/$(basename "$app_dir" .app)"
+while read -r fw; do
+  [[ -z "$fw" ]] && continue
+  [[ -e "$app_dir/Frameworks/$fw" ]] \
+    || die "dyld gate: app binary references @rpath/$fw but it is NOT embedded in Frameworks/ — this archive would crash at launch on device"
+done < <(DEVELOPER_DIR="$DEV_DIR" xcrun otool -L "$app_bin" \
+  | grep -oE '@rpath/[^/]+\.framework' | sed 's|@rpath/||' | sort -u)
+
 # [6] Single-step upload (no separate export+altool)
 exp=$(mktemp -t exportopts).plist
 cat > "$exp" <<PLIST
