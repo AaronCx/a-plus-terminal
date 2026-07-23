@@ -14,8 +14,16 @@ enum TestSeed {
     }
 
     @MainActor
-    static func applyIfRequested(servers: ServerStore, keys: KeyStore, router: DeepLinkRouter) {
+    static func applyIfRequested(servers: ServerStore, keys: KeyStore, router: DeepLinkRouter, settings: AppSettings? = nil) {
         let env = ProcessInfo.processInfo.environment
+        // Pop-out live QA: enable the beta toggles from the environment so a
+        // headless harness (devicectl launch, no UI driving) can exercise
+        // the system auto-pop-out path end to end.
+        if env["APLUSTERMINAL_TEST_ENABLE_POPOUT"] == "1", let settings {
+            settings.popOutSessions = true
+            settings.autoPopOutOnAppSwitch = true
+            print("TESTSEED: pop-out toggles enabled")
+        }
         guard let json = env["APLUSTERMINAL_TEST_SERVER"],
               let pemBase64 = env["APLUSTERMINAL_TEST_PRIVATE_KEY"],
               let pemData = Data(base64Encoded: pemBase64),
