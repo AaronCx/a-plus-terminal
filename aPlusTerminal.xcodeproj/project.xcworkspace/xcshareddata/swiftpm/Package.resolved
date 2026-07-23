@@ -1,5 +1,5 @@
 {
-  "originHash" : "631f97dcf66a59cbf5d5a2438db4a4b9cc3267fb3f71e1258d65b9512cc8eb52",
+  "originHash" : "8e056ed43aecd431bcfae4106b40d215f0823c131f5c5bfa19d0c46780c49539",
   "pins" : [
     {
       "identity" : "bigint",
@@ -24,7 +24,6 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/royalapplications/CryptoSwift.git",
       "state" : {
-        "branch" : "foundationessentials",
         "revision" : "a59b4d91ebb22011656c830f874fe7152e183a57"
       }
     },
