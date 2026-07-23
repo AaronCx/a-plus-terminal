@@ -984,6 +984,7 @@ final class SessionManager {
             guard let self, let session else { return }
             self.sessions.removeAll { $0.id == session.id }
             self.refreshActivity()
+            self.pipSessionClosed?(session)
             // Tear the session down like the X button does. Dropping it from
             // the list alone leaks the SSH connection (its socket is never
             // disconnected) and the outbox Task — which holds the session
@@ -997,10 +998,16 @@ final class SessionManager {
         return session
     }
 
+    /// Wired at app init: a closing session must also end any pop-out that
+    /// is mirroring it (a dead session's PiP window would otherwise linger,
+    /// frozen on its last frame).
+    @ObservationIgnored var pipSessionClosed: ((TerminalSession) -> Void)?
+
     func close(_ session: TerminalSession) {
         sessions.removeAll { $0.id == session.id }
         Task { await session.close() }
         refreshActivity()
+        pipSessionClosed?(session)
     }
 
     func closeAll() {
@@ -1008,6 +1015,7 @@ final class SessionManager {
         sessions.removeAll()
         for session in closing {
             Task { await session.close() }
+            pipSessionClosed?(session)
         }
         refreshActivity()
     }
@@ -1082,6 +1090,10 @@ final class SessionManager {
         // ends while still backgrounded, PiPCoordinator re-enters this method
         // and the normal grace window starts then.
         guard !pipKeepsProcessAlive() else { return }
+        // A grace cycle is already in flight (double entry via the PiP-stopped
+        // path) — starting a second one would overwrite and leak the task and
+        // race two wind-down loops.
+        guard backgroundTaskID == .invalid else { return }
         // LAST RESORT — should never fire, because the proactive poll below
         // winds down before the allowance expires. If it does fire, it must
         // be fast, synchronous, and end the task immediately (Apple's

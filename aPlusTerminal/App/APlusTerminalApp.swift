@@ -19,6 +19,7 @@ struct APlusTerminalApp: App {
     @State private var tipStore = TipStore()
     @State private var exitDiagnostics: BackgroundExitDiagnostics
     @State private var pip: PiPCoordinator
+    @State private var vncMonitors: VNCMonitorManager
 
     init() {
         let theme = ThemeStore()
@@ -52,12 +53,21 @@ struct APlusTerminalApp: App {
             router.selectedTab = .terminal
             router.targetSessionID = sessionID
         }
+        let vncMonitors = VNCMonitorManager(passwords: passwords)
+        _vncMonitors = State(initialValue: vncMonitors)
         // While a pop-out is live, the background wind-down must not kill
         // the sessions it is monitoring…
         sessions.pipKeepsProcessAlive = { [weak pip] in pip?.isActive ?? false }
+        vncMonitors.pipKeepsProcessAlive = { [weak pip] in pip?.isActive ?? false }
         // …and when the pop-out ends while still backgrounded, the normal
         // grace window starts at that moment instead.
-        pip.onStoppedInBackground = { [weak sessions] in sessions?.appDidEnterBackground() }
+        pip.onStoppedInBackground = { [weak sessions, weak vncMonitors] in
+            sessions?.appDidEnterBackground()
+            vncMonitors?.appDidEnterBackground()
+        }
+        // Closing a session ends any pop-out mirroring it.
+        sessions.pipSessionClosed = { [weak pip] in pip?.sessionClosed($0) }
+        vncMonitors.pipSessionClosed = { [weak pip] in pip?.sessionClosed($0) }
         // App Intents resolve these via @Dependency; the intents run in this
         // process (openAppWhenRun), so they share the live instances.
         AppDependencyManager.shared.add(dependency: router)
@@ -81,6 +91,7 @@ struct APlusTerminalApp: App {
             .environment(tipStore)
             .environment(exitDiagnostics)
             .environment(pip)
+            .environment(vncMonitors)
             .preferredColorScheme(theme.theme.colorScheme)
             .dynamicTypeSize(theme.appTypeSize)
             .onOpenURL { url in
@@ -91,8 +102,10 @@ struct APlusTerminalApp: App {
             switch phase {
             case .background:
                 sessions.appDidEnterBackground()
+                vncMonitors.appDidEnterBackground()
             case .active:
                 sessions.appWillEnterForeground()
+                vncMonitors.appWillEnterForeground()
             default:
                 break
             }

@@ -35,6 +35,10 @@ connect; the mismatch protection is the property that matters most today.)
 ## Scope
 
 In scope: the app's handling of SSH credentials/keys, host-key verification
-(trust-on-first-use pinning), Keychain storage, attachment upload, and any path
-that could leak data off-device. Out of scope: vulnerabilities in the user's
-own SSH servers or networks, and issues requiring a jailbroken device.
+(trust-on-first-use pinning), Keychain storage, attachment upload, VNC monitor
+credential handling and its view-only guarantee (Monitor mode must never send
+keyboard/pointer/clipboard input to the host), and any path that could leak
+data off-device. Out of scope: vulnerabilities in the user's own SSH/VNC
+servers or networks, weaknesses inherent to the VNC protocol's native
+transport encryption (the app recommends a VPN or SSH tunnel), and issues
+requiring a jailbroken device.

@@ -29,10 +29,18 @@ we've set up for review. The connection is the app's core function.
    gesture-to-mouse bridge, the main reason this app exists.
 5. Optional: tap the microphone in the key bar to dictate a command; transcription
    is 100% on-device (no audio leaves the phone).
+6. Optional — Pop-Out Sessions (beta, off by default): enable Settings →
+   Pop-Out → "Pop-Out Sessions (beta)", open a session, then tap the
+   picture-in-picture button in the toolbar. A small view-only monitor window
+   appears so the user can watch a long-running task while using other apps.
+   PiP starts only from that user tap (or the system's app-switch auto-PiP if
+   the user turns that sub-toggle on) — never programmatically.
 
 Notes:
 - No account or signup is required. The app collects zero data; the only network
-  traffic is your own SSH connection to the host above.
+  traffic is your own connection to your own machines (the SSH host above, and —
+  if you try Monitor mode — a view-only VNC screen-sharing connection to a
+  computer you own; it sends no keyboard/pointer/clipboard input).
 - The Tip Jar (Settings) is optional consumable IAP; nothing in the app is paywalled.
 
 This demo server is temporary and will be taken offline after review. Thank you!
