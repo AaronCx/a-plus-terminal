@@ -1,5 +1,21 @@
 import Foundation
 
+/// What a saved entry connects to: an SSH shell (the default, and the only
+/// kind before VNC monitors existed) or a view-only VNC screen monitor.
+enum ServerKind: String, Codable {
+    case ssh
+    case vncMonitor
+}
+
+/// Auth flavor for a VNC monitor. ARD (username + password) is the primary
+/// path for macOS Screen Sharing — classic VNC auth on modern macOS lands on
+/// a login screen, ARD goes straight to the desktop.
+enum VNCAuthMethod: String, Codable {
+    case ard
+    case vncPassword
+    case none
+}
+
 /// One saved host. Compiled into both the app and the widget extension —
 /// the widget reads the shared server list to render status. Contains no
 /// secrets: keys and passwords stay in the Keychain, referenced by UUID.
@@ -9,6 +25,13 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     var host: String
     var port: Int = 22
     var username: String
+    /// SSH shell or VNC monitor. Older saved lists decode as `.ssh`.
+    var kind: ServerKind = .ssh
+    /// VNC monitors only: how to authenticate. Nil on SSH servers. For
+    /// `.ard` and `.vncPassword` the password lives in the Keychain behind
+    /// `passwordRef` (a VNC-kind server never uses SSH password auth, so the
+    /// field is unambiguous per kind).
+    var vncAuthMethod: VNCAuthMethod?
     /// Optional list grouping (e.g. "Home", "Work"). Nil = ungrouped.
     var group: String?
     /// Reference into KeyStore. Contains no secret material.
@@ -36,7 +59,8 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     var lastKnownAddress: String?
 
     var displayAddress: String {
-        port == 22 ? host : "\(host):\(port)"
+        let defaultPort = kind == .vncMonitor ? 5900 : 22
+        return port == defaultPort ? host : "\(host):\(port)"
     }
 
     /// Ordered, de-duplicated hosts to try when connecting, best-first:
@@ -69,6 +93,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
         case id, name, host, port, username, group, keyID, passwordRef
         case lastMultiplexerTarget, agentProfileID, multiplexerProfileID
         case knownHostKey, macAddress, lastKnownAddress
+        case kind, vncAuthMethod
     }
 
     /// Read-only key from pre-refactor saved lists, consulted during migration.
@@ -77,6 +102,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     }
 
     init(id: UUID = UUID(), name: String, host: String, port: Int = 22, username: String,
+         kind: ServerKind = .ssh, vncAuthMethod: VNCAuthMethod? = nil,
          group: String? = nil, keyID: UUID? = nil, passwordRef: UUID? = nil,
          lastMultiplexerTarget: String? = nil, agentProfileID: String? = nil,
          multiplexerProfileID: String? = nil, knownHostKey: String? = nil, macAddress: String? = nil,
@@ -86,6 +112,8 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
         self.host = host
         self.port = port
         self.username = username
+        self.kind = kind
+        self.vncAuthMethod = vncAuthMethod
         self.group = group
         self.keyID = keyID
         self.passwordRef = passwordRef
@@ -104,6 +132,8 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
         host = try c.decode(String.self, forKey: .host)
         port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 22
         username = try c.decode(String.self, forKey: .username)
+        kind = try c.decodeIfPresent(ServerKind.self, forKey: .kind) ?? .ssh
+        vncAuthMethod = try c.decodeIfPresent(VNCAuthMethod.self, forKey: .vncAuthMethod)
         group = try c.decodeIfPresent(String.self, forKey: .group)
         keyID = try c.decodeIfPresent(UUID.self, forKey: .keyID)
         passwordRef = try c.decodeIfPresent(UUID.self, forKey: .passwordRef)

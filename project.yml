@@ -130,6 +130,10 @@ targets:
       # at run time — linking the package twice breaks the test bundle link.
       - package: Citadel
         link: false
+      # Unlike Citadel (static product, symbols resolved from the host app
+      # binary), RoyalVNCKit is a DYNAMIC framework: the test bundle links it
+      # normally and dyld resolves to the copy embedded in the host app.
+      - package: RoyalVNCKit
   aPlusTerminalUITests:
     type: bundle.ui-testing
     platform: iOS
