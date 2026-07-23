@@ -135,6 +135,9 @@ final class VNCMonitorSession: Identifiable, Hashable {
     func connect() {
         guard state == .idle || state == .suspended || isFailed else { return }
         suspending = false
+        // A fresh user-initiated connect earns a fresh quiet-retry budget,
+        // same as retry().
+        reconnectAttempted = false
         openConnection(as: .connecting)
     }
 

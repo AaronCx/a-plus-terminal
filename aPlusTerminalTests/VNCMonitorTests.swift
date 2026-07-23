@@ -184,6 +184,51 @@ final class VNCMonitorSessionTests: XCTestCase {
     }
 }
 
+/// Session reuse rules: an edited monitor must reconnect with the NEW
+/// config, not re-present a stale session (review finding).
+@MainActor
+final class VNCMonitorManagerTests: XCTestCase {
+    func testOpenAfterEditReplacesStaleSessionSoRetryUsesNewConfig() {
+        let passwords = PasswordStore(secrets: InMemorySecretStore())
+        let manager = VNCMonitorManager(passwords: passwords, makeConnection: { _ in MockVNCConnection() })
+        var server = Server(name: "studio", host: "studio.local", port: 5901, username: "",
+                            kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        let stale = manager.open(server: server)
+        XCTAssertEqual(manager.sessions.count, 1)
+
+        server.port = 5900
+        let fresh = manager.open(server: server)
+        XCTAssertFalse(fresh === stale, "a config edit opens a fresh session")
+        XCTAssertEqual(fresh.server.port, 5900, "the fresh session carries the edited config")
+        XCTAssertEqual(stale.state, .closed, "the stale session was closed, not leaked")
+        XCTAssertEqual(manager.sessions.count, 1)
+        XCTAssertTrue(manager.presented === fresh)
+    }
+
+    func testOpenWithUnchangedConfigReusesTheExistingSession() {
+        let passwords = PasswordStore(secrets: InMemorySecretStore())
+        let manager = VNCMonitorManager(passwords: passwords, makeConnection: { _ in MockVNCConnection() })
+        let server = Server(name: "studio", host: "studio.local", port: 5900, username: "",
+                            kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        let first = manager.open(server: server)
+        let second = manager.open(server: server)
+        XCTAssertTrue(first === second, "same config re-presents the running monitor")
+        XCTAssertEqual(manager.sessions.count, 1)
+    }
+
+    func testCloseNotifiesThePopOutHook() {
+        let passwords = PasswordStore(secrets: InMemorySecretStore())
+        let manager = VNCMonitorManager(passwords: passwords, makeConnection: { _ in MockVNCConnection() })
+        let server = Server(name: "studio", host: "studio.local", port: 5900, username: "",
+                            kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        let session = manager.open(server: server)
+        var closed: [UUID] = []
+        manager.pipSessionClosed = { closed.append($0.id) }
+        manager.close(session)
+        XCTAssertEqual(closed, [session.id], "closing a monitor tells the PiP coordinator to let go")
+    }
+}
+
 /// The VNC pop-out source paces invalidations at ≤5 fps ahead of the
 /// engine's own coalescer (brief §4.3).
 @MainActor

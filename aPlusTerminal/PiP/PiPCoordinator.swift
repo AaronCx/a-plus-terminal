@@ -15,6 +15,10 @@ final class PiPCoordinator {
     @ObservationIgnored private var engine: PiPEngine?
     /// The terminal or VNC session currently bound to the engine.
     @ObservationIgnored private weak var boundOwner: AnyObject?
+    /// The session whose screen is currently on screen (nil between screens).
+    /// Tracked so a pop-out dismissed via its X — with the owning screen long
+    /// left — fully disarms instead of rendering into the void forever.
+    @ObservationIgnored private weak var visibleOwner: AnyObject?
 
     /// Mirrors the engine for SwiftUI/SessionManager reads.
     private(set) var isActive = false
@@ -44,6 +48,7 @@ final class PiPCoordinator {
     /// A session screen came on screen. With auto pop-out enabled the engine
     /// arms now, so the system can start PiP by itself on app switch.
     func sessionScreenAppeared(_ session: TerminalSession) {
+        visibleOwner = session
         guard isAvailable, settings.autoPopOutOnAppSwitch else { return }
         bind(session)
     }
@@ -51,7 +56,25 @@ final class PiPCoordinator {
     /// The session screen left. Disarm unless the pop-out is live (leaving
     /// via the app switcher with PiP up must not tear the surface down).
     func sessionScreenDisappeared(_ session: TerminalSession) {
+        if visibleOwner === session {
+            visibleOwner = nil
+        }
         disarm(ifBoundTo: session)
+    }
+
+    /// A session was closed/removed. If a pop-out is mirroring it, end the
+    /// pop-out — a dead session must not leave a frozen (terminal) or
+    /// "Connecting…" (VNC) PiP window on screen.
+    func sessionClosed(_ owner: AnyObject) {
+        guard boundOwner === owner else { return }
+        if isActive {
+            engine?.stop()
+            // didStop → onActiveChanged(false) → the visibility check below
+            // completes the disarm.
+        } else {
+            engine?.disarm()
+            boundOwner = nil
+        }
     }
 
     // MARK: - VNC monitors (same engine, same rules)
@@ -63,11 +86,15 @@ final class PiPCoordinator {
     }
 
     func vncScreenAppeared(_ session: VNCMonitorSession) {
+        visibleOwner = session
         guard isAvailable, settings.autoPopOutOnAppSwitch else { return }
         bind(vnc: session)
     }
 
     func vncScreenDisappeared(_ session: VNCMonitorSession) {
+        if visibleOwner === session {
+            visibleOwner = nil
+        }
         disarm(ifBoundTo: session)
     }
 
@@ -129,8 +156,22 @@ final class PiPCoordinator {
         engine.onActiveChanged = { [weak self] active in
             guard let self else { return }
             self.isActive = active
-            if !active, UIApplication.shared.applicationState == .background {
-                self.onStoppedInBackground?()
+            if !active {
+                if UIApplication.shared.applicationState == .background {
+                    self.onStoppedInBackground?()
+                }
+                // The pop-out ended. Unless the owning screen is back on
+                // screen with auto pop-out armed (restore-into-the-app), the
+                // engine must fully let go — otherwise the source keeps
+                // rendering frames into the invisible layer indefinitely.
+                let keepArmed = self.boundOwner != nil
+                    && self.boundOwner === self.visibleOwner
+                    && self.isAvailable
+                    && self.settings.autoPopOutOnAppSwitch
+                if !keepArmed {
+                    self.engine?.disarm()
+                    self.boundOwner = nil
+                }
             }
         }
         engine.onRestore = { [weak self] sessionID in

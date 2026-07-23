@@ -32,9 +32,15 @@ final class VNCMonitorManager {
 
     @discardableResult
     func open(server: Server) -> VNCMonitorSession {
+        // Reuse an open monitor only when its captured config is byte-for-byte
+        // the saved one — an edited host/port/username must NOT re-present a
+        // stale session whose Retry would reconnect with the old values.
         if let existing = sessions.first(where: { $0.server.id == server.id && $0.state.isOpen }) {
-            presented = existing
-            return existing
+            if existing.server == server {
+                presented = existing
+                return existing
+            }
+            close(existing)
         }
         let session = VNCMonitorSession(
             server: server,
@@ -47,12 +53,17 @@ final class VNCMonitorManager {
         return session
     }
 
+    /// Wired at app init: a closing session must also end any pop-out that
+    /// is mirroring it (a dead session's PiP window would otherwise linger).
+    @ObservationIgnored var pipSessionClosed: ((VNCMonitorSession) -> Void)?
+
     func close(_ session: VNCMonitorSession) {
         session.close()
         sessions.removeAll { $0.id == session.id }
         if presented === session {
             presented = nil
         }
+        pipSessionClosed?(session)
     }
 
     func session(for id: UUID) -> VNCMonitorSession? {
@@ -69,6 +80,9 @@ final class VNCMonitorManager {
     func appDidEnterBackground() {
         guard sessions.contains(where: { $0.state.isActiveConnection }) else { return }
         guard !pipKeepsProcessAlive() else { return }
+        // A grace cycle is already in flight (re-entry via the PiP-stopped
+        // path) — starting a second one would overwrite and leak the task.
+        guard backgroundTaskID == .invalid else { return }
         backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "aplusterminal.vnc-grace") { [weak self] in
             // Expiration last resort: disconnect() is non-blocking, safe here.
             self?.suspendAllNow()

@@ -65,6 +65,9 @@ struct APlusTerminalApp: App {
             sessions?.appDidEnterBackground()
             vncMonitors?.appDidEnterBackground()
         }
+        // Closing a session ends any pop-out mirroring it.
+        sessions.pipSessionClosed = { [weak pip] in pip?.sessionClosed($0) }
+        vncMonitors.pipSessionClosed = { [weak pip] in pip?.sessionClosed($0) }
         // App Intents resolve these via @Dependency; the intents run in this
         // process (openAppWhenRun), so they share the live instances.
         AppDependencyManager.shared.add(dependency: router)
