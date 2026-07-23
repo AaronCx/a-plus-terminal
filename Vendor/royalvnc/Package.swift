@@ -10,6 +10,14 @@
 //   * swift-jpeg / swift-png dropped: upstream only uses them on
 //     Linux/Windows/Android, and 4.5.x pulled unvetted transitives.
 //   * Windows-only vendored zlib removed (Apple platforms link system libz).
+//   * Library product made STATIC (upstream ships `type: .dynamic` for its
+//     C-bindings distribution): the XcodeGen-generated project embeds no
+//     Frameworks/ for dynamic SPM products, so the archived app referenced
+//     @rpath/RoyalVNCKit.framework that wasn't in the bundle — dyld abort at
+//     launch on device (the simulator masks it by resolving @rpath into the
+//     build products dir). Static links the code into the app binary; the
+//     test bundle compiles against it with `link: false`, the Citadel
+//     pattern.
 // Non-manifest trims: Design/, Bindings/, android scripts (no code targets).
 
 import PackageDescription
@@ -36,7 +44,6 @@ let package = Package(
     products: [
         .library(
             name: "RoyalVNCKit",
-            type: .dynamic,
             targets: [ "RoyalVNCKit" ]
         ),
 
