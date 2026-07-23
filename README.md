@@ -23,6 +23,7 @@ Free, tip-supported. No features are paywalled, ever.
 - Attach an image or file from your phone over the existing SSH connection.
 - On-device voice dictation straight into the terminal (never sent to a server).
 - Live Activities + Dynamic Island session awareness with tap-to-reattach.
+- **Pop-Out Sessions (beta):** watch a session's tail in a small floating Picture-in-Picture window while you use other apps — view-only monitoring with a running/waiting state chip and tap-to-return.
 - Reconnect where you left off: background drops offer reattach, with a live session picker when several multiplexer sessions are running.
 
 ## Privacy
