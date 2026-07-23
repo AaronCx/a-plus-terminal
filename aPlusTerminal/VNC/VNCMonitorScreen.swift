@@ -152,9 +152,12 @@ final class VNCCanvasScrollView: UIScrollView, UIScrollViewDelegate {
         showsHorizontalScrollIndicator = false
         imageView.layer.contentsGravity = .resizeAspect
         imageView.layer.contentsScale = 1
-        // Trilinear keeps downscaled text legible (vendor demo setting).
-        imageView.layer.minificationFilter = .trilinear
-        imageView.layer.magnificationFilter = .trilinear
+        // Linear, not trilinear: trilinear regenerates a full mip chain for
+        // the (large) remote-screen texture on EVERY frame — a measurable
+        // slice of the build-31 lag. The adapter already downscales frames
+        // near device resolution, so mips buy nothing.
+        imageView.layer.minificationFilter = .linear
+        imageView.layer.magnificationFilter = .linear
         addSubview(imageView)
     }
 

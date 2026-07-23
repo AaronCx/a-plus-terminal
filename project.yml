@@ -141,6 +141,14 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        # Both default to today's values (automatic signing, bare id). An
+        # on-device live-QA run overrides BOTH on the command line: bundle id
+        # com.aaroncx.aPlusTerminalUITests.qa + the DevLab wildcard profile
+        # (com.aaroncx.aPlusTerminalUITests.*), which then covers the test
+        # bundle AND the generated .xctrunner app under manual signing.
+        APLUSTERMINAL_UITESTS_BUNDLE_ID: com.aaroncx.aPlusTerminalUITests
+        PRODUCT_BUNDLE_IDENTIFIER: "$(APLUSTERMINAL_UITESTS_BUNDLE_ID)"
+        PROVISIONING_PROFILE_SPECIFIER: "$(APLUSTERMINAL_PROFILE_UITESTS)"
     sources:
       - aPlusTerminalUITests
     dependencies:

@@ -71,6 +71,18 @@ final class PiPEngine: NSObject {
     /// toolbar tap or the system's auto-inline path — can succeed.
     func arm(source newSource: any PiPFrameSource, autoStartOnAppSwitch: Bool) {
         guard Self.isSupported else { return }
+        // PiP eligibility keys off the audio session CATEGORY: with the
+        // default .soloAmbient in force, isPictureInPicturePossible stays
+        // false and startPictureInPicture() is a silent no-op (no delegate
+        // callback owed — the build-31 field bug). Setting the category is
+        // inert (nothing is interrupted until setActive, which stays in
+        // willStart), so the "session active only while PiP is live"
+        // guardrail holds.
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, options: [.mixWithOthers])
+        } catch {
+            log.error("pip: setCategory at arm failed: \(error.localizedDescription, privacy: .public)")
+        }
         if let source, source !== newSource {
             source.detach()
         }
@@ -242,11 +254,13 @@ final class PiPEngine: NSObject {
 
     // MARK: - Audio session
 
-    /// Category `.playback` marks the app as media-playing so the pop-out
-    /// keeps running in the background; `.mixWithOthers` so the user's music
-    /// is never interrupted. Active ONLY while PiP is (brief §3.2/§5) — the
-    /// "engine never constructed when the toggle is off" guarantee plus this
-    /// pairing keeps the audio session untouched outside a live pop-out.
+    /// Category `.playback` (set at arm — a PiP-eligibility precondition)
+    /// marks the app as media-playing so the pop-out keeps running in the
+    /// background; `.mixWithOthers` so the user's music is never
+    /// interrupted. ACTIVATION happens only here, between willStart and
+    /// didStop (brief §3.2/§5) — the "engine never constructed when the
+    /// toggle is off" guarantee plus this pairing keeps the audio session
+    /// untouched outside a live pop-out.
     private func activateAudioSession() {
         do {
             let session = AVAudioSession.sharedInstance()
