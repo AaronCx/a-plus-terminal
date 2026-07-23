@@ -25,6 +25,14 @@ packages:
     # Hard-pinned: TerminalEmulatorView documents a workaround for a glyph bug
     # whose upstream fix landed *after* 1.13.0, so a 1.x bump must be deliberate.
     exactVersion: "1.13.0"
+  # VNC monitor sessions (view-only). Vendored as a git submodule pinned to
+  # the 1.1.0 tag commit and consumed as a LOCAL package, because the 1.1.0
+  # manifest declares a branch-based CryptoSwift dependency — SPM forbids
+  # branch deps inside version-pinned dependencies, so a normal `exact:
+  # 1.1.0` reference fails resolution. This mirrors the vendor's own iOS
+  # demo. MIT licensed (transitives: CryptoSwift fork, system zlib, d3des).
+  RoyalVNCKit:
+    path: Vendor/royalvnc
 targets:
   aPlusTerminal:
     type: application
@@ -42,6 +50,7 @@ targets:
       - target: aPlusTerminalWidgets
       - package: Citadel
       - package: SwiftTerm
+      - package: RoyalVNCKit
     settings:
       base:
         # Locks into App Store Connect at first upload — do not rename after that.

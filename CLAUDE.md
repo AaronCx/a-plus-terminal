@@ -11,6 +11,6 @@ Privacy-first iOS SSH terminal. Spec: `~/Documents/github/relay-ios-terminal-spe
 
 ## Constraints
 
-- Dependency policy: SwiftTerm, Citadel, swift-crypto, XcodeGen (build-time) — nothing else.
+- Dependency policy: SwiftTerm, Citadel, swift-crypto, XcodeGen (build-time), RoyalVNCKit (vendored under `Vendor/royalvnc`, view-only VNC monitor) — nothing else. RoyalVNCKit is a patched vendor copy, not an SPM URL reference: see the header of `Vendor/royalvnc/Package.swift` before touching it.
 - Zero data collection: no analytics, no crash SDKs, no third-party network calls. Only user-initiated SSH traffic and on-device dictation.
 - iOS 26.0+, iPhone only.
