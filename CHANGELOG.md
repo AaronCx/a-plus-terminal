@@ -12,6 +12,13 @@ unreleased work accumulates at the top.
   Tap the window to jump back to the session; the system pause button freezes
   the view without touching the session. Off by default (Settings → Pop-Out),
   with an optional auto pop-out on app switch. Never interrupts your music.
+- **Monitor (VNC, beta):** a view-only window onto your own computer's screen
+  sharing. macOS (ARD) authentication lands straight on the desktop; classic
+  VNC password and no-auth servers are supported too. Pinch-zoom and pan;
+  the same pop-out monitoring works on the remote screen. No keyboard,
+  pointer, or clipboard data is ever sent to the host, and the connection
+  goes only to the host you enter (use Tailscale or an SSH tunnel as
+  transport — classic VNC's own encryption is weak).
 
 ## 1.0.2 (build 29) — 2026-07-13
 
