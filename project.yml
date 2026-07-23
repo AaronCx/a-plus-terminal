@@ -141,6 +141,9 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        # Empty by default (automatic signing). On-device live-QA runs pass
+        # the DevLab wildcard profile here (the .xctrunner bundle needs it).
+        PROVISIONING_PROFILE_SPECIFIER: "$(APLUSTERMINAL_PROFILE_UITESTS)"
     sources:
       - aPlusTerminalUITests
     dependencies:

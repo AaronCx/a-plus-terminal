@@ -93,7 +93,7 @@ struct VNCMonitorEditView: View {
     private var footerText: String {
         switch authMethod {
         case .ard:
-            return "Sign in with the Mac's user account — ARD authentication lands straight on the desktop instead of a login screen. The password is stored in this device's Keychain."
+            return "Sign in with the Mac's user account — ARD authentication lands straight on the desktop instead of a login screen. Note: if the Mac's screen is LOCKED you'll see its lock screen; a+Terminal is view-only and never types a password, so unlock the Mac (or relax its lock requirement on an always-on machine) to watch the desktop. The password is stored in this device's Keychain."
         case .vncPassword:
             return "Classic VNC authentication uses only the first 8 characters of the password. On modern macOS it usually lands on a login screen — prefer macOS (ARD)."
         case .none:

@@ -184,6 +184,55 @@ final class VNCMonitorSessionTests: XCTestCase {
     }
 }
 
+/// Frame pacing with a trailing edge (build-31 lag fix): bursts suppress to
+/// one emit per window plus ONE trailing re-emit, so the last frame of a
+/// burst always lands.
+final class VNCFrameThrottleTests: XCTestCase {
+    func testBurstEmitsLeadingThenSchedulesExactlyOneTrailing() {
+        let throttle = VNCFrameThrottle(minInterval: 10)
+        XCTAssertEqual(throttle.decide(force: false), .emit, "first frame emits immediately")
+        XCTAssertEqual(throttle.decide(force: false), .suppressed(scheduleTrailing: true),
+                       "first suppression schedules the trailing re-emit")
+        XCTAssertEqual(throttle.decide(force: false), .suppressed(scheduleTrailing: false),
+                       "later suppressions in the same window schedule nothing")
+    }
+
+    func testTrailingGateEmitsAfterWindowAndIsRedundantAfterFreshEmit() async throws {
+        let throttle = VNCFrameThrottle(minInterval: 0.05)
+        XCTAssertEqual(throttle.decide(force: false), .emit)
+        XCTAssertEqual(throttle.decide(force: false), .suppressed(scheduleTrailing: true))
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertTrue(throttle.trailingGate(), "past the window, the trailing pass emits")
+
+        // A regular emit right before the trailing fire makes it redundant.
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(throttle.decide(force: false), .emit)
+        XCTAssertEqual(throttle.decide(force: false), .suppressed(scheduleTrailing: true))
+        XCTAssertFalse(throttle.trailingGate(), "inside the window after an emit, trailing skips")
+    }
+
+    func testForceBypassesTheWindow() {
+        let throttle = VNCFrameThrottle(minInterval: 10)
+        XCTAssertEqual(throttle.decide(force: false), .emit)
+        XCTAssertEqual(throttle.decide(force: true), .emit, "framebuffer create/resize always emits")
+    }
+}
+
+/// Single-slot delivery (build-31 lag fix): only the newest frame hops to
+/// the main actor, one hop in flight.
+final class VNCLatestFrameBoxTests: XCTestCase {
+    func testOnlyNewestFrameSurvivesAndOneHopRuns() {
+        let box = VNCLatestFrameBox()
+        let img = testImage()
+        XCTAssertTrue(box.submit(img, size: CGSize(width: 1, height: 1)), "first submit starts a hop")
+        XCTAssertFalse(box.submit(img, size: CGSize(width: 2, height: 2)), "second submit coalesces")
+        XCTAssertFalse(box.submit(img, size: CGSize(width: 3, height: 3)))
+        XCTAssertEqual(box.take()?.size, CGSize(width: 3, height: 3), "the newest frame wins")
+        XCTAssertNil(box.take(), "drained — in-flight cleared")
+        XCTAssertTrue(box.submit(img, size: CGSize(width: 4, height: 4)), "next submit starts a fresh hop")
+    }
+}
+
 /// Session reuse rules: an edited monitor must reconnect with the NEW
 /// config, not re-present a stale session (review finding).
 @MainActor
