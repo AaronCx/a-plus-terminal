@@ -59,6 +59,12 @@ final class TerminalSession: Identifiable, Hashable {
     @ObservationIgnored var onStateChange: (() -> Void)?
     /// Fired when the remote shell ends on its own (the user typed `exit`).
     @ObservationIgnored var onShellExit: (() -> Void)?
+    /// The session's single pop-out slot: fired on every output chunk and —
+    /// via SessionManager's multicast — on state/agent transitions, while a
+    /// PiP surface mirrors this session. Owned by PiPCoordinator; do NOT
+    /// repurpose (`onStateChange`/`agentMonitor.onChange` stay reserved for
+    /// the Live Activity).
+    @ObservationIgnored var pipInvalidate: (() -> Void)?
 
     let bridge = TerminalBridge()
     let terminalView = TerminalEmulatorView(frame: .zero)
@@ -751,6 +757,7 @@ final class TerminalSession: Identifiable, Hashable {
                 let bytes = [UInt8](chunk)
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
+                self.pipInvalidate?()
             }
             guard let self, !Task.isCancelled else { return }
             self.channelEnded(connection)
@@ -963,11 +970,15 @@ final class SessionManager {
             settings: settings,
             profiles: profiles
         )
-        session.onStateChange = { [weak self] in
+        session.onStateChange = { [weak self, weak session] in
             self?.refreshActivity()
+            // State drives the pop-out's chip too — multicast into the
+            // session's PiP slot rather than letting PiP claim this closure.
+            session?.pipInvalidate?()
         }
-        session.agentMonitor.onChange = { [weak self] in
+        session.agentMonitor.onChange = { [weak self, weak session] in
             self?.refreshActivity()
+            session?.pipInvalidate?()
         }
         session.onShellExit = { [weak self, weak session] in
             guard let self, let session else { return }
@@ -1056,10 +1067,21 @@ final class SessionManager {
     /// the very deadline the handler announces — structurally 0x8badf00d
     /// bait on device (the simulator never enforces it). The handler is now
     /// a synchronous last resort only.
+    /// Seam: true while a pop-out (PiP) window keeps the process running in
+    /// the background. While true, the grace/wind-down machinery must NOT
+    /// suspend sessions — live monitoring is the feature. Wired to
+    /// PiPCoordinator at app init; tests override.
+    @ObservationIgnored var pipKeepsProcessAlive: () -> Bool = { false }
+
     func appDidEnterBackground() {
         guard sessions.contains(where: { $0.state == .connected }) else { return }
         windDownStarted = false
         diagnostics.markBackgrounded()
+        // A pop-out is up: iOS keeps the process (and its sockets) alive for
+        // the PiP window, so no background task or wind-down. If the pop-out
+        // ends while still backgrounded, PiPCoordinator re-enters this method
+        // and the normal grace window starts then.
+        guard !pipKeepsProcessAlive() else { return }
         // LAST RESORT — should never fire, because the proactive poll below
         // winds down before the allowance expires. If it does fire, it must
         // be fast, synchronous, and end the task immediately (Apple's
@@ -1091,6 +1113,13 @@ final class SessionManager {
             // by a foreground return (sockets stay live — the quick-switch
             // window) or preempted by the expiration handler.
             while !Task.isCancelled {
+                // Auto-pop-out can engage a beat AFTER backgrounding (the
+                // system starts PiP as part of the app switch): hand the
+                // background stay over to PiP and relinquish the task.
+                if self.pipKeepsProcessAlive() {
+                    self.endBackgroundTask()
+                    return
+                }
                 if self.backgroundTimeRemaining() <= Self.windDownSafetyMargin {
                     await self.windDownProactively()
                     return
@@ -1161,6 +1190,13 @@ final class SessionManager {
     func handleBackgroundTaskExpiration() {
         graceTask?.cancel()
         graceTask = nil
+        // With a pop-out live the allowance never realistically expires; if
+        // it somehow does, PiP is what keeps us running — do not kill the
+        // monitored sessions, just relinquish the task (fast + synchronous).
+        if pipKeepsProcessAlive() {
+            endBackgroundTask()
+            return
+        }
         if !windDownStarted {
             windDownStarted = true
             diagnostics.markWindDownStarted(trigger: .expiration)

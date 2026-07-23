@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct TerminalScreen: View {
     @Environment(ThemeStore.self) private var theme
     @Environment(SessionManager.self) private var sessionManager
+    @Environment(PiPCoordinator.self) private var pip
     @Environment(\.dismiss) private var dismiss
 
     let session: TerminalSession
@@ -88,6 +89,20 @@ struct TerminalScreen: View {
         }
         .navigationTitle(session.server.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // Pop-out (beta): user-initiated only — this tap (or the system's
+            // auto-inline path) is the sole way a PiP window appears (§5).
+            if pip.isAvailable && session.state == .connected {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        pip.popOut(session)
+                    } label: {
+                        Image(systemName: "pip.enter")
+                    }
+                    .accessibilityLabel("Pop Out Session")
+                }
+            }
+        }
         // Tab-bar visibility is owned solely by TerminalTabView's
         // `path.isEmpty` modifier — a second unconditional `.hidden` here
         // raced it during pop/tab transitions (see the tab-bar-vanishes PR).
@@ -152,6 +167,12 @@ struct TerminalScreen: View {
             default:
                 break
             }
+            // Pre-arm the pop-out engine so the system's auto path can start
+            // it on app switch (no-op unless both toggles are on).
+            pip.sessionScreenAppeared(session)
+        }
+        .onDisappear {
+            pip.sessionScreenDisappeared(session)
         }
     }
 

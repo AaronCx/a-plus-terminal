@@ -9,6 +9,7 @@ struct SettingsScreen: View {
     @Environment(TipStore.self) private var tipStore
     @Environment(ProfileStore.self) private var profiles
     @Environment(BackgroundExitDiagnostics.self) private var exitDiagnostics
+    @Environment(PiPCoordinator.self) private var pip
 
     private let supportURL = URL(string: "https://github.com/AaronCx/a-plus-terminal/issues")!
     // Trailing slash matches the GitHub Pages canonical URL (and SupportView).
@@ -83,6 +84,23 @@ struct SettingsScreen: View {
                     Text("Scrolling & Behavior")
                 } footer: {
                     Text("Auto-reattach multiplexer: when a connection resumes, return to your running session (tmux/zellij/screen) instead of a fresh shell — picking from your live sessions when more than one is open. Off = always a fresh shell. Swipes scroll natively when the app requests mouse reporting; dictation is processed entirely on this device.")
+                }
+
+                // Hidden entirely on hardware without PiP (brief §3.2).
+                if PiPCoordinator.isSupported {
+                    Section {
+                        Toggle("Pop-Out Sessions (beta)", isOn: $settings.popOutSessions)
+                        if settings.popOutSessions {
+                            Toggle("Auto pop-out on app switch", isOn: $settings.autoPopOutOnAppSwitch)
+                        }
+                    } header: {
+                        Text("Pop-Out")
+                    } footer: {
+                        Text("Watch a session in a small floating window while you use other apps — view-only, with a tap to jump back in. Auto pop-out opens it for the session you're viewing when you switch away.")
+                    }
+                    .onChange(of: settings.popOutSessions) { _, isOn in
+                        if !isOn { pip.masterToggleTurnedOff() }
+                    }
                 }
 
                 Section {
