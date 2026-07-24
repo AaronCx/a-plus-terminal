@@ -18,6 +18,11 @@
 //     build products dir). Static links the code into the app binary; the
 //     test bundle compiles against it with `link: false`, the Citadel
 //     pattern.
+// Source patches (each marked "a+Terminal VENDOR PATCH" in place):
+//   * SDK/Connection/VNCConnection.swift orderedEncodingTypes(): the Cursor
+//     pseudo-encoding is no longer advertised, so the server composites the
+//     mouse cursor into the framebuffer (no iOS consumer renders cursors,
+//     and shape-only updates make client-side rendering impossible).
 // Non-manifest trims: Design/, Bindings/, android scripts (no code targets).
 
 import PackageDescription

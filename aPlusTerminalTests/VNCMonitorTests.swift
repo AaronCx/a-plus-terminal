@@ -1,6 +1,9 @@
 import CoreGraphics
-import RoyalVNCKit
 import XCTest
+// @testable: VNCCursorEncodingTests pins the vendored patch via the
+// internal orderedEncodingTypes(). Xcode builds SPM deps with testability
+// in Debug, which is the only configuration tests run in.
+@testable import RoyalVNCKit
 @testable import aPlusTerminal
 
 /// Scripted `VNCConnecting` for driving the session state machine without a
@@ -181,6 +184,29 @@ final class VNCMonitorSessionTests: XCTestCase {
         XCTAssertNotNil(session.lastFrame)
         XCTAssertEqual(session.framebufferSize, CGSize(width: 4, height: 4))
         XCTAssertEqual(invalidations, 1)
+    }
+}
+
+/// Pins the vendored cursor patch (build-32 field bug: invisible mouse):
+/// advertising the Cursor pseudo-encoding makes the server stop drawing the
+/// cursor into the framebuffer, and nothing client-side renders it. The
+/// vendored SDK must never advertise it.
+final class VNCCursorEncodingTests: XCTestCase {
+    func testCursorPseudoEncodingIsNeverAdvertised() throws {
+        let settings = VNCConnection.Settings(
+            isDebugLoggingEnabled: false, hostname: "example.invalid", port: 5900,
+            isShared: true, isScalingEnabled: false, useDisplayLink: false,
+            inputMode: .none, isClipboardRedirectionEnabled: false,
+            colorDepth: .depth24Bit, frameEncodings: .default
+        )
+        let connection = VNCConnection(settings: settings)
+        let advertised = try connection.orderedEncodingTypes()
+        XCTAssertFalse(advertised.contains(VNCPseudoEncodingType.cursor.rawValue),
+                       "Cursor pseudo-encoding advertised — the server would omit the mouse from the framebuffer and the monitor shows no cursor")
+        XCTAssertTrue(advertised.contains(VNCFrameEncodingType.zrle.rawValue),
+                      "frame encodings still advertised")
+        XCTAssertTrue(advertised.contains(VNCPseudoEncodingType.desktopSize.rawValue),
+                      "other pseudo-encodings untouched")
     }
 }
 

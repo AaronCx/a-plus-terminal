@@ -168,10 +168,19 @@ public final class VNCConnection: NSObjectOrAnyObject {
 			VNCPseudoEncodingType.extendedDesktopSize.rawValue,
 			VNCPseudoEncodingType.desktopSize.rawValue,
 			VNCPseudoEncodingType.desktopName.rawValue,
-			VNCPseudoEncodingType.cursor.rawValue,
+			// a+Terminal VENDOR PATCH (see Package.swift header): the Cursor
+			// pseudo-encoding is deliberately NOT advertised. Advertising it
+			// tells the server the client renders the cursor locally, so the
+			// server stops compositing it into the framebuffer — but no iOS
+			// consumer renders it (upstream's own iOS demo no-ops
+			// didUpdateCursor), and client-side rendering is impossible
+			// anyway: the server sends cursor SHAPE only, never position.
+			// Without the advertisement the server draws the cursor into the
+			// framebuffer per the RFB spec, so a view-only monitor shows it.
+//			VNCPseudoEncodingType.cursor.rawValue,
 			// TODO: Implement
 //			VNCPseudoEncodingType.extendedClipboard.rawValue,
-            
+
             // TODO: Make configurable
 			VNCPseudoEncodingType.compressionLevel6.rawValue
 		])
