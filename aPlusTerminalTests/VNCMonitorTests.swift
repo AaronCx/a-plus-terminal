@@ -472,6 +472,78 @@ final class VNCFrameSourceTests: XCTestCase {
     }
 }
 
+/// Cursor bridge: parsing, host→framebuffer scaling, lifecycle, and the
+/// injected-input priority window.
+@MainActor
+final class VNCCursorBridgeTests: XCTestCase {
+    func testParseAcceptsWellFormedLinesAndRejectsGarbage() {
+        XCTAssertEqual(
+            VNCCursorBridge.parse(line: "627,828,1920,1080"),
+            VNCCursorBridge.Sample(position: CGPoint(x: 627, y: 828), screen: CGSize(width: 1920, height: 1080))
+        )
+        XCTAssertNil(VNCCursorBridge.parse(line: ""))
+        XCTAssertNil(VNCCursorBridge.parse(line: "not,numbers,at,all"))
+        XCTAssertNil(VNCCursorBridge.parse(line: "1,2,3"))
+        XCTAssertNil(VNCCursorBridge.parse(line: "1,2,0,0"), "zero screen would divide by zero downstream")
+        XCTAssertNil(VNCCursorBridge.parse(line: "inf,2,3,4"))
+    }
+
+    func testFramebufferScalingHandlesRetinaMismatch() {
+        let sample = VNCCursorBridge.Sample(
+            position: CGPoint(x: 960, y: 540), screen: CGSize(width: 1920, height: 1080)
+        )
+        XCTAssertEqual(
+            VNCCursorBridge.framebufferPoint(for: sample, framebuffer: CGSize(width: 3840, height: 2160)),
+            CGPoint(x: 1920, y: 1080),
+            "a 2x-Retina framebuffer doubles the coordinates"
+        )
+    }
+
+    func testBridgeSamplesDriveTheSessionCursorWhenConnected() async throws {
+        let passwords = PasswordStore(secrets: InMemorySecretStore())
+        let factory = MockConnectionFactory()
+        let server = Server(name: "m", host: "h", username: "", kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        let session = VNCMonitorSession(server: server, passwords: passwords, makeConnection: factory.make)
+
+        var feed: AsyncThrowingStream<String, Error>.Continuation!
+        let bridge = VNCCursorBridge {
+            AsyncThrowingStream { feed = $0 }
+        }
+        session.cursorBridge = bridge
+        session.connect()
+        factory.latest.emit(.connected)
+        factory.latest.emitFrame(testImage(), size: CGSize(width: 1920, height: 1080))
+        try await Task.sleep(for: .milliseconds(100))
+
+        feed.yield("100,200,1920,1080")
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(session.cursorPosition, CGPoint(x: 100, y: 200),
+                       "the physical pointer position reaches the overlay with Control mode OFF")
+        feed.finish()
+    }
+
+    func testFreshInjectedInputOutranksBridgeSamples() {
+        let passwords = PasswordStore(secrets: InMemorySecretStore())
+        let factory = MockConnectionFactory()
+        let server = Server(name: "m", host: "h", username: "", kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        let session = VNCMonitorSession(server: server, passwords: passwords, makeConnection: factory.make)
+        session.connect()
+        factory.latest.emit(.connected)
+        factory.latest.emitFrame(testImage(), size: CGSize(width: 1920, height: 1080))
+
+        session.setControlEnabled(true)
+        session.sendTap(at: CGPoint(x: 500, y: 500))
+        // A stale pre-tap sample must not yank the cursor backwards.
+        let bridge = VNCCursorBridge { AsyncThrowingStream { $0.finish() } }
+        session.cursorBridge = bridge
+        bridge.onSample?(VNCCursorBridge.Sample(
+            position: CGPoint(x: 10, y: 10), screen: CGSize(width: 1920, height: 1080)
+        ))
+        XCTAssertEqual(session.cursorPosition, CGPoint(x: 500, y: 500),
+                       "bridge samples defer to just-injected input")
+    }
+}
+
 /// Server model migration for the new kind/auth fields (ServerStore pattern).
 final class ServerKindCodableTests: XCTestCase {
     func testLegacyJSONWithoutKindDecodesAsSSH() throws {

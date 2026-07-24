@@ -194,6 +194,37 @@ actor SSHConnection {
         return String(buffer: buffer)
     }
 
+    /// Runs a long-lived command on its own exec channel and streams its
+    /// stdout as complete lines. Used by the VNC cursor bridge. The stream
+    /// ends when the command exits or the connection drops; cancel the
+    /// consuming task to stop.
+    func streamCommandLines(_ command: String) async throws -> AsyncThrowingStream<String, Error> {
+        guard let client else { throw SSHConnectionError.notConnected }
+        let output = try await client.executeCommandStream(command)
+        let (lines, continuation) = AsyncThrowingStream<String, Error>.makeStream()
+        let pump = Task {
+            var pending = ""
+            do {
+                for try await chunk in output {
+                    guard case .stdout(let buffer) = chunk else { continue }
+                    pending += String(buffer: buffer)
+                    while let newline = pending.firstIndex(of: "\n") {
+                        let line = String(pending[..<newline])
+                        pending = String(pending[pending.index(after: newline)...])
+                        if !line.isEmpty {
+                            continuation.yield(line)
+                        }
+                    }
+                }
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+        continuation.onTermination = { _ in pump.cancel() }
+        return lines
+    }
+
     /// Uploads `data` to the per-user inbox under `filename` over SFTP — a
     /// separate channel on the same authenticated session, so it overlaps the
     /// PTY without disturbing it. Returns the absolute remote path (agents read

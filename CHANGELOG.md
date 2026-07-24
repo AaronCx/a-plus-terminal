@@ -12,6 +12,11 @@ unreleased work accumulates at the top.
   Tap the window to jump back to the session; the system pause button freezes
   the view without touching the session. Off by default (Settings → Pop-Out),
   with an optional auto pop-out on app switch. Never interrupts your music.
+- **Monitor cursor bridge:** link a monitor to the same machine's saved SSH
+  server and the remote pointer's real position streams over SSH — the
+  cursor now tracks the physical mouse and anything running on the Mac, not
+  just your own taps (macOS screen sharing reports nothing about the cursor,
+  so this is the only way to show it). Optional; nothing changes if unlinked.
 - **Monitor Control mode:** an opt-in toggle turns the view-only monitor
   into a remote control — tap to click, drag to drag, long-press to
   right-click, plus a keyboard sheet (secure text entry, Return/Esc/Tab/

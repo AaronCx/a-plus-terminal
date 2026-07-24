@@ -32,6 +32,11 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     /// `passwordRef` (a VNC-kind server never uses SSH password auth, so the
     /// field is unambiguous per kind).
     var vncAuthMethod: VNCAuthMethod?
+    /// VNC monitors only: a saved SSH server (same machine) whose connection
+    /// streams the host's REAL pointer position for the cursor overlay —
+    /// macOS screen sharing itself reports nothing about the cursor. Nil =
+    /// no bridge (overlay shows injected positions only).
+    var cursorBridgeSSHServerID: UUID?
     /// Optional list grouping (e.g. "Home", "Work"). Nil = ungrouped.
     var group: String?
     /// Reference into KeyStore. Contains no secret material.
@@ -93,7 +98,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
         case id, name, host, port, username, group, keyID, passwordRef
         case lastMultiplexerTarget, agentProfileID, multiplexerProfileID
         case knownHostKey, macAddress, lastKnownAddress
-        case kind, vncAuthMethod
+        case kind, vncAuthMethod, cursorBridgeSSHServerID
     }
 
     /// Read-only key from pre-refactor saved lists, consulted during migration.
@@ -103,6 +108,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
 
     init(id: UUID = UUID(), name: String, host: String, port: Int = 22, username: String,
          kind: ServerKind = .ssh, vncAuthMethod: VNCAuthMethod? = nil,
+         cursorBridgeSSHServerID: UUID? = nil,
          group: String? = nil, keyID: UUID? = nil, passwordRef: UUID? = nil,
          lastMultiplexerTarget: String? = nil, agentProfileID: String? = nil,
          multiplexerProfileID: String? = nil, knownHostKey: String? = nil, macAddress: String? = nil,
@@ -114,6 +120,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
         self.username = username
         self.kind = kind
         self.vncAuthMethod = vncAuthMethod
+        self.cursorBridgeSSHServerID = cursorBridgeSSHServerID
         self.group = group
         self.keyID = keyID
         self.passwordRef = passwordRef
@@ -134,6 +141,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
         username = try c.decode(String.self, forKey: .username)
         kind = try c.decodeIfPresent(ServerKind.self, forKey: .kind) ?? .ssh
         vncAuthMethod = try c.decodeIfPresent(VNCAuthMethod.self, forKey: .vncAuthMethod)
+        cursorBridgeSSHServerID = try c.decodeIfPresent(UUID.self, forKey: .cursorBridgeSSHServerID)
         group = try c.decodeIfPresent(String.self, forKey: .group)
         keyID = try c.decodeIfPresent(UUID.self, forKey: .keyID)
         passwordRef = try c.decodeIfPresent(UUID.self, forKey: .passwordRef)

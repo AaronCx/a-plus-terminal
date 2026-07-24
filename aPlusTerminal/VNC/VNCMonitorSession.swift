@@ -122,7 +122,37 @@ final class VNCMonitorSession: Identifiable, Hashable {
             guard state != oldValue else { return }
             onStateChange?()
             pipInvalidate?()
+            // The cursor bridge lives exactly as long as the monitor is
+            // connected — a dead monitor must not hold an SSH channel open.
+            if state == .connected {
+                cursorBridge?.start()
+            } else {
+                cursorBridge?.stop()
+            }
         }
+    }
+
+    /// Optional SSH-backed source of the host's real pointer position
+    /// (assigned by the manager when the server links an SSH server).
+    @ObservationIgnored var cursorBridge: VNCCursorBridge? {
+        didSet {
+            oldValue?.stop()
+            cursorBridge?.onSample = { [weak self] sample in
+                self?.applyBridgeSample(sample)
+            }
+            if state == .connected {
+                cursorBridge?.start()
+            }
+        }
+    }
+    /// Freshly injected input outranks bridge samples briefly — a pre-tap
+    /// sample arriving late must not yank the overlay backwards.
+    @ObservationIgnored private var inputPriorityUntil = Date.distantPast
+
+    private func applyBridgeSample(_ sample: VNCCursorBridge.Sample) {
+        guard state == .connected, framebufferSize.width > 0,
+              Date() >= inputPriorityUntil else { return }
+        cursorPosition = VNCCursorBridge.framebufferPoint(for: sample, framebuffer: framebufferSize)
     }
     /// Latest decoded remote frame (whole-screen; dirty rects are not
     /// tracked — the monitor redraws the full image at a capped rate).
@@ -156,6 +186,7 @@ final class VNCMonitorSession: Identifiable, Hashable {
             y: min(max(point.y, 0), framebufferSize.height - 1)
         )
         cursorPosition = clamped
+        inputPriorityUntil = Date().addingTimeInterval(0.5)
         connection.sendPointer(action, x: UInt16(clamped.x), y: UInt16(clamped.y))
     }
 
@@ -234,6 +265,8 @@ final class VNCMonitorSession: Identifiable, Hashable {
 
     func close() {
         state = .closed
+        cursorBridge?.stop()
+        cursorBridge = nil
         connection?.delegate = nil
         connection?.disconnect()
         connection = nil
