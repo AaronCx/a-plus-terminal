@@ -162,7 +162,17 @@ public extension VNCKeyCode {
 		for scalar in character.unicodeScalars {
 			let unicodeValue = scalar.value
 
-			codes.append(.init(unicodeValue))
+			// a+Terminal VENDOR PATCH: X11 keysyms equal the codepoint only
+			// for Latin-1 (< 0x100); everything else must be sent as
+			// 0x01000000 | codepoint (RFC 6143 §7.5.4) — the raw value
+			// upstream sends is an undefined or WRONG keysym (e.g. U+017C
+			// 'ż' lands on an unrelated Latin-3 code), so non-Latin-1 text
+			// silently mistypes on the host.
+			let keysym = unicodeValue < 0x100
+				? unicodeValue
+				: 0x0100_0000 | unicodeValue
+
+			codes.append(.init(keysym))
 		}
 
 		return codes

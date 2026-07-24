@@ -134,10 +134,14 @@ final class RoyalVNCConnectionAdapter: NSObject, VNCConnecting {
             isShared: true,               // never kick the console session
             isScalingEnabled: false,
             useDisplayLink: false,
-            // Governs the SDK's macOS-client keyboard-shortcut capture, not
-            // the pointer/key APIs below — the app gates those on Control
-            // mode itself (VNCMonitorSession).
-            inputMode: .none,
+            // MUST be non-.none: the SDK's send queue silently DISCARDS
+            // every key/pointer event under .none (VNCConnection+Queue.swift
+            // guards) — .none shipped would make Control mode a convincing
+            // no-op (review finding; the cursor overlay still moves locally).
+            // The mode's shortcut-capture semantics only affect the SDK's
+            // own macOS views; the app's input gate is Control mode in
+            // VNCMonitorSession (default off — view-only stays true).
+            inputMode: .forwardKeyboardShortcutsIfNotInUseLocally,
             isClipboardRedirectionEnabled: false,
             colorDepth: .depth24Bit,
             frameEncodings: .default

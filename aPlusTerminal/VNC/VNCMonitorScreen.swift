@@ -183,6 +183,9 @@ private struct VNCKeyboardSheet: View {
                 .onSubmit { sendWithReturn() }
                 Button {
                     secure.toggle()
+                    // Swapping SecureField/TextField drops first-responder;
+                    // re-focus so typing continues uninterrupted.
+                    focused = true
                 } label: {
                     Image(systemName: secure ? "eye.slash" : "eye")
                 }
@@ -271,6 +274,9 @@ final class VNCCanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRe
     private var framebufferSize: CGSize = .zero
     private var cursor = CursorState(shape: nil, hotspot: .zero, position: nil)
     private var controlEnabled = false
+    /// True between our leftDown and leftUp — the release must fire exactly
+    /// once even across off-content exits and gesture cancellation.
+    private var dragButtonHeld = false
 
     private lazy var tapRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTap))
     private lazy var longPressRecognizer = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress))
@@ -348,6 +354,9 @@ final class VNCCanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRe
             contentSize = bounds.size
             contentSizeSet = true
         }
+        // Rotation/size changes arrive without a new frame — the overlay
+        // must re-map or it drifts (review finding).
+        layoutCursor()
     }
 
     func display(frame: CGImage?, size: CGSize, cursor: CursorState, controlEnabled: Bool) {
@@ -391,27 +400,49 @@ final class VNCCanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRe
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began, let point = framebufferPoint(for: gesture) else { return }
-        onPointer?(.move, point)
-        onPointer?(.rightClick, point)
+        switch gesture.state {
+        case .began:
+            guard let point = framebufferPoint(for: gesture) else { return }
+            // A held touch is a right-click, never also a drag: cancel the
+            // pan (disable/enable resets its tracking) so "hold then move"
+            // can't chase the right-click with a left-drag through the
+            // just-opened context menu (review finding). Movement before
+            // the hold threshold fails the long-press naturally, so real
+            // drags are unaffected.
+            dragRecognizer.isEnabled = false
+            onPointer?(.move, point)
+            onPointer?(.rightClick, point)
+        case .ended, .cancelled, .failed:
+            dragRecognizer.isEnabled = controlEnabled
+        default:
+            break
+        }
     }
 
     @objc private func handleDrag(_ gesture: UIPanGestureRecognizer) {
         guard let point = framebufferPoint(for: gesture) else {
-            if gesture.state == .ended || gesture.state == .cancelled {
+            if dragButtonHeld, gesture.state == .ended || gesture.state == .cancelled {
                 // Finger left the content mid-drag: release where we last were.
+                dragButtonHeld = false
                 onPointer?(.leftUp, cursor.position ?? .zero)
             }
             return
         }
         switch gesture.state {
         case .began:
+            dragButtonHeld = true
             onPointer?(.move, point)
             onPointer?(.leftDown, point)
         case .changed:
             onPointer?(.move, point)
         case .ended, .cancelled:
-            onPointer?(.leftUp, point)
+            // Guarded so a cancel arriving after an off-content release (or
+            // the long-press disabling us) can never double-release or
+            // strand a phantom up-event.
+            if dragButtonHeld {
+                dragButtonHeld = false
+                onPointer?(.leftUp, point)
+            }
         default:
             break
         }
@@ -440,20 +471,28 @@ final class VNCCanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRe
         let anchor = VNCPointMapping.viewPoint(
             from: position, content: framebufferSize, container: container
         )
-        // Server shapes are framebuffer-scale; the default arrow is drawn at
-        // 2x for crispness. Both map through the fitted-rect scale.
-        let pixelSize = cursor.shape != nil
-            ? CGSize(width: shape.width, height: shape.height)
-            : CGSize(width: 12, height: 19)
-        let hotspot = cursor.shape != nil ? cursor.hotspot : .zero
+        // Server shapes are framebuffer pixels — scale them through the
+        // fitted rect like any content. Our fallback arrow is a UI affordance
+        // and draws at a FIXED view-point size: framebuffer-scaling it made
+        // it ~3pt tall on a 1920px-wide desktop, imperceptible (review
+        // finding — the field symptom that started all of this).
+        let size: CGSize
+        let hotspotOffset: CGPoint
+        if cursor.shape != nil {
+            size = CGSize(width: CGFloat(shape.width) * scale, height: CGFloat(shape.height) * scale)
+            hotspotOffset = CGPoint(x: cursor.hotspot.x * scale, y: cursor.hotspot.y * scale)
+        } else {
+            size = CGSize(width: 14, height: 22)
+            hotspotOffset = .zero
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         cursorLayer.contents = shape
         cursorLayer.frame = CGRect(
-            x: anchor.x - hotspot.x * scale,
-            y: anchor.y - hotspot.y * scale,
-            width: pixelSize.width * scale,
-            height: pixelSize.height * scale
+            x: anchor.x - hotspotOffset.x,
+            y: anchor.y - hotspotOffset.y,
+            width: size.width,
+            height: size.height
         )
         cursorLayer.isHidden = false
         CATransaction.commit()
