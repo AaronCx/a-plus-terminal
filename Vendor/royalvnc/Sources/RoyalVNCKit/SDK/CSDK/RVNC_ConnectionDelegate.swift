@@ -145,4 +145,9 @@ extension VNCConnectionDelegate_C: VNCConnectionDelegate {
             cursor.unretainedPointer()
         )
     }
+
+    // a+Terminal VENDOR PATCH: PointerPos support — not surfaced through the
+    // C ABI (no consumer); deliberate no-op.
+    func connection(_ connection: VNCConnection,
+                    didMovePointerToX x: UInt16, y: UInt16) { }
 }

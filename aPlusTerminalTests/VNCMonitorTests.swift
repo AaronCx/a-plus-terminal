@@ -13,9 +13,19 @@ private final class MockVNCConnection: VNCConnecting {
     weak var delegate: VNCConnectingDelegate?
     private(set) var connectCalls = 0
     private(set) var disconnectCalls = 0
+    private(set) var pointerEvents: [(action: VNCPointerAction, x: UInt16, y: UInt16)] = []
+    private(set) var sentText: [String] = []
+    private(set) var sentSpecialKeys: [VNCSpecialKey] = []
 
     func connect() { connectCalls += 1 }
     func disconnect() { disconnectCalls += 1 }
+
+    func sendPointer(_ action: VNCPointerAction, x: UInt16, y: UInt16) {
+        pointerEvents.append((action, x, y))
+    }
+
+    func sendText(_ text: String) { sentText.append(text) }
+    func sendSpecialKey(_ key: VNCSpecialKey) { sentSpecialKeys.append(key) }
 
     func emit(_ state: VNCWireState) {
         delegate?.vncConnection(self, didChangeState: state)
@@ -30,6 +40,14 @@ private final class MockVNCConnection: VNCConnecting {
 
     func emitFrame(_ image: CGImage, size: CGSize) {
         delegate?.vncConnection(self, didUpdateFrame: image, size: size)
+    }
+
+    func emitCursorShape(_ shape: CGImage?, hotspot: CGPoint) {
+        delegate?.vncConnection(self, didUpdateCursorShape: shape, hotspot: hotspot)
+    }
+
+    func emitPointerPosition(_ position: CGPoint) {
+        delegate?.vncConnection(self, didMovePointerTo: position)
     }
 }
 
@@ -187,12 +205,12 @@ final class VNCMonitorSessionTests: XCTestCase {
     }
 }
 
-/// Pins the vendored cursor patch (build-32 field bug: invisible mouse):
-/// advertising the Cursor pseudo-encoding makes the server stop drawing the
-/// cursor into the framebuffer, and nothing client-side renders it. The
-/// vendored SDK must never advertise it.
+/// Pins the vendored cursor strategy (supersedes the build-33 approach —
+/// macOS composites no cursor regardless, probe-verified 2026-07-24): the
+/// client renders the cursor itself, so Cursor (shape) AND PointerPos
+/// (position, where servers support it) must both be advertised.
 final class VNCCursorEncodingTests: XCTestCase {
-    func testCursorPseudoEncodingIsNeverAdvertised() throws {
+    func testCursorAndPointerPosAreAdvertisedForClientSideRendering() throws {
         let settings = VNCConnection.Settings(
             isDebugLoggingEnabled: false, hostname: "example.invalid", port: 5900,
             isShared: true, isScalingEnabled: false, useDisplayLink: false,
@@ -201,12 +219,139 @@ final class VNCCursorEncodingTests: XCTestCase {
         )
         let connection = VNCConnection(settings: settings)
         let advertised = try connection.orderedEncodingTypes()
-        XCTAssertFalse(advertised.contains(VNCPseudoEncodingType.cursor.rawValue),
-                       "Cursor pseudo-encoding advertised — the server would omit the mouse from the framebuffer and the monitor shows no cursor")
+        XCTAssertTrue(advertised.contains(VNCPseudoEncodingType.cursor.rawValue),
+                      "Cursor (shape) must be advertised for the client-side cursor")
+        XCTAssertTrue(advertised.contains(VNCPseudoEncodingType.pointerPos.rawValue),
+                      "PointerPos (vendored patch) must be advertised for server-reported position")
         XCTAssertTrue(advertised.contains(VNCFrameEncodingType.zrle.rawValue),
                       "frame encodings still advertised")
-        XCTAssertTrue(advertised.contains(VNCPseudoEncodingType.desktopSize.rawValue),
-                      "other pseudo-encodings untouched")
+    }
+}
+
+/// View ↔ framebuffer geometry for touch controls and the cursor overlay.
+final class VNCPointMappingTests: XCTestCase {
+    // 1920x1080 content letterboxed into a 400x900 portrait container:
+    // fitted 400x225 at y=337.5.
+    private let content = CGSize(width: 1920, height: 1080)
+    private let container = CGSize(width: 400, height: 900)
+
+    func testFittedRectLetterboxes() {
+        let fitted = VNCPointMapping.fittedRect(content: content, in: container)
+        XCTAssertEqual(fitted, CGRect(x: 0, y: 337.5, width: 400, height: 225))
+    }
+
+    func testCenterMapsToCenterPixel() throws {
+        let point = try XCTUnwrap(VNCPointMapping.framebufferPoint(
+            from: CGPoint(x: 200, y: 450), content: content, container: container))
+        XCTAssertEqual(point.x, 960, accuracy: 1)
+        XCTAssertEqual(point.y, 540, accuracy: 1)
+    }
+
+    func testLetterboxTapsAreRejected() {
+        XCTAssertNil(VNCPointMapping.framebufferPoint(
+            from: CGPoint(x: 200, y: 100), content: content, container: container),
+            "a tap in the letterbox is not a tap on the remote screen")
+    }
+
+    func testEdgeClampsInsideValidPixels() throws {
+        let point = try XCTUnwrap(VNCPointMapping.framebufferPoint(
+            from: CGPoint(x: 399.9, y: 562.4), content: content, container: container))
+        XCTAssertLessThanOrEqual(point.x, 1919)
+        XCTAssertLessThanOrEqual(point.y, 1079)
+    }
+
+    func testRoundTripThroughViewPoint() throws {
+        let original = CGPoint(x: 700, y: 400)
+        let view = VNCPointMapping.viewPoint(from: original, content: content, container: container)
+        let back = try XCTUnwrap(VNCPointMapping.framebufferPoint(
+            from: view, content: content, container: container))
+        XCTAssertEqual(back.x, original.x, accuracy: 3)
+        XCTAssertEqual(back.y, original.y, accuracy: 3)
+    }
+
+    func testDegenerateSizesAreSafe() {
+        XCTAssertEqual(VNCPointMapping.fittedRect(content: .zero, in: container), .zero)
+        XCTAssertNil(VNCPointMapping.framebufferPoint(
+            from: .zero, content: .zero, container: container))
+    }
+}
+
+/// Control-mode plumbing: input flows only when enabled+connected, clamps,
+/// tracks the cursor, and keyboard rides the same gate.
+@MainActor
+final class VNCControlModeTests: XCTestCase {
+    private var passwords: PasswordStore!
+    private var factory: MockConnectionFactory!
+
+    override func setUp() {
+        super.setUp()
+        passwords = PasswordStore(secrets: InMemorySecretStore())
+        factory = MockConnectionFactory()
+    }
+
+    private func makeConnectedSession() -> VNCMonitorSession {
+        let server = Server(name: "studio", host: "studio.local", port: 5900, username: "",
+                            kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        let session = VNCMonitorSession(server: server, passwords: passwords, makeConnection: factory.make)
+        session.connect()
+        factory.latest.emit(.connected)
+        factory.latest.emitFrame(testImage(), size: CGSize(width: 1920, height: 1080))
+        return session
+    }
+
+    func testInputIsDroppedUntilControlEnabled() {
+        let session = makeConnectedSession()
+        session.sendTap(at: CGPoint(x: 10, y: 10))
+        session.sendText("hi")
+        session.sendSpecialKey(.return)
+        XCTAssertTrue(factory.latest.pointerEvents.isEmpty, "view-only by default — nothing forwarded")
+        XCTAssertTrue(factory.latest.sentText.isEmpty)
+        XCTAssertTrue(factory.latest.sentSpecialKeys.isEmpty)
+    }
+
+    func testTapForwardsMoveDownUpAndTracksCursor() {
+        let session = makeConnectedSession()
+        session.setControlEnabled(true)
+        session.sendTap(at: CGPoint(x: 100, y: 200))
+        XCTAssertEqual(factory.latest.pointerEvents.map(\.action), [.move, .leftDown, .leftUp])
+        XCTAssertEqual(factory.latest.pointerEvents.map(\.x), [100, 100, 100])
+        XCTAssertEqual(session.cursorPosition, CGPoint(x: 100, y: 200),
+                       "injected input drives the cursor overlay position")
+    }
+
+    func testPointerClampsToFramebufferBounds() {
+        let session = makeConnectedSession()
+        session.setControlEnabled(true)
+        session.sendPointer(.move, at: CGPoint(x: 5000, y: -20))
+        XCTAssertEqual(factory.latest.pointerEvents.last?.x, 1919)
+        XCTAssertEqual(factory.latest.pointerEvents.last?.y, 0)
+    }
+
+    func testKeyboardForwardsWhenEnabled() {
+        let session = makeConnectedSession()
+        session.setControlEnabled(true)
+        session.sendText("hunter") // lastgate-ignore (test fixture)
+        session.sendSpecialKey(.return)
+        XCTAssertEqual(factory.latest.sentText, ["hunter"]) // lastgate-ignore (test fixture)
+        XCTAssertEqual(factory.latest.sentSpecialKeys, [.return])
+    }
+
+    func testInputDropsAfterDisconnect() {
+        let session = makeConnectedSession()
+        session.setControlEnabled(true)
+        session.suspend()
+        session.sendTap(at: CGPoint(x: 10, y: 10))
+        XCTAssertTrue(factory.latest.pointerEvents.isEmpty, "no input on a dead connection")
+    }
+
+    func testServerCursorEventsUpdateSessionState() {
+        let session = makeConnectedSession()
+        let shape = testImage()
+        factory.latest.emitCursorShape(shape, hotspot: CGPoint(x: 2, y: 3))
+        factory.latest.emitPointerPosition(CGPoint(x: 640, y: 360))
+        XCTAssertTrue(session.cursorShape === shape)
+        XCTAssertEqual(session.cursorHotspot, CGPoint(x: 2, y: 3))
+        XCTAssertEqual(session.cursorPosition, CGPoint(x: 640, y: 360))
     }
 }
 

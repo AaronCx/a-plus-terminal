@@ -28,6 +28,11 @@ protocol VNCFramebufferDelegate: AnyObject {
     func framebuffer(_ framebuffer: VNCFramebuffer,
                      didUpdateCursor cursor: VNCCursor)
 
+    // a+Terminal VENDOR PATCH: PointerPos pseudo-encoding support.
+    /// Called when the server reports a new remote cursor position.
+    func framebuffer(_ framebuffer: VNCFramebuffer,
+                     didMovePointerTo position: VNCPoint)
+
     /// Called when the framebuffer's size or screen layout has changed.
     /// - Parameters:
     ///   - framebuffer: The framebuffer reporting the change.

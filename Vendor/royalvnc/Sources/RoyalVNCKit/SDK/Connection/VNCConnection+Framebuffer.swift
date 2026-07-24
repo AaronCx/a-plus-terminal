@@ -22,6 +22,12 @@ extension VNCConnection: VNCFramebufferDelegate {
 		notifyDelegateAboutUpdatedCursor(cursor)
 	}
 
+	// a+Terminal VENDOR PATCH: PointerPos pseudo-encoding support.
+	func framebuffer(_ framebuffer: VNCFramebuffer,
+					 didMovePointerTo position: VNCPoint) {
+		notifyDelegateAboutPointerPosition(position)
+	}
+
 	func framebuffer(_ framebuffer: VNCFramebuffer,
 					 sizeDidChange newSize: VNCSize,
 					 screens newScreens: [VNCScreen]) {

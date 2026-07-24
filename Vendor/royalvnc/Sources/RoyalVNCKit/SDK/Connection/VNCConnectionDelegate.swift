@@ -46,4 +46,12 @@ public protocol VNCConnectionDelegate: AnyObject {
 #endif
 	func connection(_ connection: VNCConnection,
 					didUpdateCursor cursor: VNCCursor)
+
+	// a+Terminal VENDOR PATCH: PointerPos pseudo-encoding support. Scalars
+	// (not VNCPoint) so the member stays ObjC-representable like the rest.
+#if canImport(ObjectiveC)
+    @objc
+#endif
+	func connection(_ connection: VNCConnection,
+					didMovePointerToX x: UInt16, y: UInt16)
 }

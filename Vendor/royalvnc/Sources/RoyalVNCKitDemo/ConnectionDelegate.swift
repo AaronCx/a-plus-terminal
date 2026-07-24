@@ -106,4 +106,10 @@ final class ConnectionDelegate: VNCConnectionDelegate {
                     didUpdateCursor cursor: VNCCursor) {
         connection.logger.logDebug("connection didUpdateCursor")
     }
+
+    // a+Terminal VENDOR PATCH: PointerPos support.
+    func connection(_ connection: VNCConnection,
+                    didMovePointerToX x: UInt16, y: UInt16) {
+        connection.logger.logDebug("connection didMovePointerTo \(x),\(y)")
+    }
 }

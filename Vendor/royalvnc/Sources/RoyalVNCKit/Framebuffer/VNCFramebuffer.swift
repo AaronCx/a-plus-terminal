@@ -422,6 +422,12 @@ extension VNCFramebuffer {
 		notifyDelegateCursorDidUpdate(cursor)
 	}
 
+	// a+Terminal VENDOR PATCH: PointerPos pseudo-encoding support.
+	func updatePointerPosition(_ position: VNCPoint) {
+		delegate?.framebuffer(self,
+							  didMovePointerTo: position)
+	}
+
 	func resize(to newSize: VNCSize) {
 		let newScreens: [VNCScreen] = [
 			.init(id: 0,

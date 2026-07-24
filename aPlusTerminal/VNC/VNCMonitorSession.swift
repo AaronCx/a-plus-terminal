@@ -40,6 +40,14 @@ enum VNCSuppliedCredential: Equatable {
     case usernamePassword(username: String, password: String)
 }
 
+/// A pointer event the app can inject when the user enables Control mode.
+enum VNCPointerAction: Equatable {
+    case move
+    case leftDown
+    case leftUp
+    case rightClick
+}
+
 /// Seam between the session state machine and RoyalVNCKit, so the state
 /// machine is unit-testable against a mock (brief §4.7). All calls and
 /// delegate events are main-actor.
@@ -48,6 +56,20 @@ protocol VNCConnecting: AnyObject {
     var delegate: VNCConnectingDelegate? { get set }
     func connect()
     func disconnect()
+    /// Coordinates are framebuffer pixels, pre-clamped by the session.
+    func sendPointer(_ action: VNCPointerAction, x: UInt16, y: UInt16)
+    /// Types text on the host (character key events).
+    func sendText(_ text: String)
+    /// A special (non-character) key press.
+    func sendSpecialKey(_ key: VNCSpecialKey)
+}
+
+/// Non-character keys the Control keyboard exposes.
+enum VNCSpecialKey: Equatable {
+    case `return`
+    case escape
+    case tab
+    case delete
 }
 
 @MainActor
@@ -59,6 +81,11 @@ protocol VNCConnectingDelegate: AnyObject {
         completion: @escaping (VNCSuppliedCredential?) -> Void
     )
     func vncConnection(_ connection: VNCConnecting, didUpdateFrame image: CGImage, size: CGSize)
+    /// The server sent a new cursor shape (nil = the empty cursor).
+    func vncConnection(_ connection: VNCConnecting, didUpdateCursorShape shape: CGImage?, hotspot: CGPoint)
+    /// The server reported the remote pointer's position (PointerPos —
+    /// framebuffer pixels). Only some servers send it.
+    func vncConnection(_ connection: VNCConnecting, didMovePointerTo position: CGPoint)
 }
 
 /// RoyalVNCKit errors → human-readable session errors, using the SDK's
@@ -80,10 +107,10 @@ enum VNCErrorMapper {
     }
 }
 
-/// One view-only VNC monitor of a remote screen. Owns the connection (via
-/// the `VNCConnecting` seam), the latest framebuffer image, and the state
-/// machine; sends no input of any kind by construction — the wire is opened
-/// with input disabled and this class exposes no input API.
+/// One VNC monitor of a remote screen. Owns the connection (via the
+/// `VNCConnecting` seam), the latest framebuffer image, the client-rendered
+/// cursor state, and the state machine. Opens view-only: every input path
+/// is gated on the per-session Control mode, which defaults off.
 @MainActor
 @Observable
 final class VNCMonitorSession: Identifiable, Hashable {
@@ -101,6 +128,53 @@ final class VNCMonitorSession: Identifiable, Hashable {
     /// tracked — the monitor redraws the full image at a capped rate).
     private(set) var lastFrame: CGImage?
     private(set) var framebufferSize: CGSize = .zero
+
+    // MARK: Control mode (touch + keyboard input; off = classic view-only)
+
+    /// Whether taps/keys are forwarded to the host. Per-session, defaults
+    /// off — the monitor stays view-only until the user opts in.
+    private(set) var controlEnabled = false
+    /// Remote cursor shape from the server (nil until one arrives).
+    private(set) var cursorShape: CGImage?
+    private(set) var cursorHotspot: CGPoint = .zero
+    /// Best-known remote cursor position (framebuffer pixels): last
+    /// injected position, or server-reported when the host sends PointerPos.
+    /// Nil until either source produces one (overlay hidden).
+    private(set) var cursorPosition: CGPoint?
+
+    func setControlEnabled(_ enabled: Bool) {
+        controlEnabled = enabled
+    }
+
+    /// Clamp + forward a pointer action; remembers the position so the
+    /// cursor overlay tracks the finger.
+    func sendPointer(_ action: VNCPointerAction, at point: CGPoint) {
+        guard controlEnabled, state == .connected, let connection,
+              framebufferSize.width > 0 else { return }
+        let clamped = CGPoint(
+            x: min(max(point.x, 0), framebufferSize.width - 1),
+            y: min(max(point.y, 0), framebufferSize.height - 1)
+        )
+        cursorPosition = clamped
+        connection.sendPointer(action, x: UInt16(clamped.x), y: UInt16(clamped.y))
+    }
+
+    /// A full tap: move there, press, release.
+    func sendTap(at point: CGPoint) {
+        sendPointer(.move, at: point)
+        sendPointer(.leftDown, at: point)
+        sendPointer(.leftUp, at: point)
+    }
+
+    func sendText(_ text: String) {
+        guard controlEnabled, state == .connected, !text.isEmpty else { return }
+        connection?.sendText(text)
+    }
+
+    func sendSpecialKey(_ key: VNCSpecialKey) {
+        guard controlEnabled, state == .connected else { return }
+        connection?.sendSpecialKey(key)
+    }
 
     /// Single pop-out slot, mirroring `TerminalSession.pipInvalidate`.
     @ObservationIgnored var pipInvalidate: (() -> Void)?
@@ -238,6 +312,17 @@ extension VNCMonitorSession: VNCConnectingDelegate {
         lastFrame = image
         framebufferSize = size
         pipInvalidate?()
+    }
+
+    func vncConnection(_ connection: VNCConnecting, didUpdateCursorShape shape: CGImage?, hotspot: CGPoint) {
+        guard connection === self.connection else { return }
+        cursorShape = shape
+        cursorHotspot = hotspot
+    }
+
+    func vncConnection(_ connection: VNCConnecting, didMovePointerTo position: CGPoint) {
+        guard connection === self.connection else { return }
+        cursorPosition = position
     }
 
     private func handleDisconnect(_ error: Error?) {

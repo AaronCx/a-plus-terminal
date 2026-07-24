@@ -115,6 +115,8 @@ public final class VNCConnection: NSObjectOrAnyObject {
 			VNCPseudoEncodingType.desktopSize.rawValue: VNCProtocol.DesktopSizeEncoding(),
 			VNCPseudoEncodingType.desktopName.rawValue: VNCProtocol.DesktopNameEncoding(),
 			VNCPseudoEncodingType.cursor.rawValue: VNCProtocol.CursorEncoding(),
+			// a+Terminal VENDOR PATCH: PointerPos pseudo-encoding support.
+			VNCPseudoEncodingType.pointerPos.rawValue: VNCProtocol.PointerPosEncoding(),
 			compressionLevelEncodingType: compressionLevelEncoding,
 			jpegQualityLevelEncodingType: jpegQualityLevelEncoding
 		]
@@ -168,16 +170,15 @@ public final class VNCConnection: NSObjectOrAnyObject {
 			VNCPseudoEncodingType.extendedDesktopSize.rawValue,
 			VNCPseudoEncodingType.desktopSize.rawValue,
 			VNCPseudoEncodingType.desktopName.rawValue,
-			// a+Terminal VENDOR PATCH (see Package.swift header): the Cursor
-			// pseudo-encoding is deliberately NOT advertised. Advertising it
-			// tells the server the client renders the cursor locally, so the
-			// server stops compositing it into the framebuffer — but no iOS
-			// consumer renders it (upstream's own iOS demo no-ops
-			// didUpdateCursor), and client-side rendering is impossible
-			// anyway: the server sends cursor SHAPE only, never position.
-			// Without the advertisement the server draws the cursor into the
-			// framebuffer per the RFB spec, so a view-only monitor shows it.
-//			VNCPseudoEncodingType.cursor.rawValue,
+			// a+Terminal VENDOR PATCH (see Package.swift header): Cursor is
+			// advertised for the SHAPE, and PointerPos (-232) for the
+			// POSITION, so the app renders the remote cursor client-side.
+			// (macOS Screen Sharing does not composite the cursor into the
+			// framebuffer even for clients that advertise no cursor support
+			// — verified in the field on build 33 — so client-side rendering
+			// is the only path to a visible cursor.)
+			VNCPseudoEncodingType.cursor.rawValue,
+			VNCPseudoEncodingType.pointerPos.rawValue,
 			// TODO: Implement
 //			VNCPseudoEncodingType.extendedClipboard.rawValue,
 

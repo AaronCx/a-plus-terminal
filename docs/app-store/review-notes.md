@@ -39,8 +39,10 @@ we've set up for review. The connection is the app's core function.
 Notes:
 - No account or signup is required. The app collects zero data; the only network
   traffic is your own connection to your own machines (the SSH host above, and —
-  if you try Monitor mode — a view-only VNC screen-sharing connection to a
-  computer you own; it sends no keyboard/pointer/clipboard input).
+  if you try Monitor mode — a VNC screen-sharing connection to a computer you
+  own). Monitors open view-only; an explicit in-monitor Control toggle lets the
+  user send their own taps/keystrokes to their own machine. Clipboard contents
+  are never sent.
 - The Tip Jar (Settings) is optional consumable IAP; nothing in the app is paywalled.
 
 This demo server is temporary and will be taken offline after review. Thank you!

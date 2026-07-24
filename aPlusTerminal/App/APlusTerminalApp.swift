@@ -74,6 +74,7 @@ struct APlusTerminalApp: App {
         AppDependencyManager.shared.add(dependency: servers)
         #if DEBUG
         TestSeed.applyIfRequested(servers: servers, keys: keys, router: router, settings: settings)
+        TestSeed.applyVNCIfRequested(servers: servers, passwords: passwords, vncManager: vncMonitors)
         #endif
     }
 
