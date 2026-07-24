@@ -14,7 +14,7 @@ title: a+Terminal Privacy Policy
 
 The only traffic a+Terminal sends off your network is the connections **you** initiate to **your own** machines: SSH sessions, and (if you use Monitor mode) a view-only VNC screen-sharing connection. Both go directly from your iPhone to your machine — never through us, because there is no "us" in the middle. SSH traffic is end-to-end encrypted with standard SSH.
 
-**Monitor (VNC)** connects only to the host you enter — typically your own computer's screen sharing. It is view-only: a+Terminal never sends keyboard, pointer, or clipboard data to the host. Classic VNC's own transport encryption is weak, so we recommend reaching the host over Tailscale (or another VPN) or an SSH tunnel. The VNC password is stored in this device's Keychain.
+**Monitor (VNC)** connects only to the host you enter — typically your own computer's screen sharing. It opens view-only: nothing you do is sent to the host until you switch on Control mode in that monitor, and then the only thing sent is the taps and keystrokes you make, directly to your host. Clipboard contents are never sent. Classic VNC's own transport encryption is weak, so we recommend reaching the host over Tailscale (or another VPN) or an SSH tunnel. The VNC password is stored in this device's Keychain.
 
 **On your local network**, a few convenience features talk only to your own machines and never to any third party: server status indicators (and the optional Home-screen widget) check reachability by briefly opening a TCP connection to a saved server's host and port — no data is sent in that probe; "Discover on Network" browses for advertised SSH services when you open it; and "Wake Server" sends a Wake-on-LAN packet when you tap it. All of this stays on your network.
 

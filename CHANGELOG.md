@@ -12,9 +12,15 @@ unreleased work accumulates at the top.
   Tap the window to jump back to the session; the system pause button freezes
   the view without touching the session. Off by default (Settings → Pop-Out),
   with an optional auto pop-out on app switch. Never interrupts your music.
-- Monitor (VNC): the remote mouse cursor is now visible — the server draws
-  it into the screen image (previously the connection claimed client-side
-  cursor rendering and then nothing rendered it).
+- **Monitor Control mode:** an opt-in toggle turns the view-only monitor
+  into a remote control — tap to click, drag to drag, long-press to
+  right-click, plus a keyboard sheet (secure text entry, Return/Esc/Tab/
+  Delete) that can type a password into a locked Mac's login screen.
+  View-only remains the default; nothing is ever sent until you enable it.
+- Monitor (VNC): the remote mouse cursor is now visible, drawn by the app
+  at the position your touches drive (macOS never draws a cursor into
+  screen-sharing streams — verified against a real host; servers that
+  report cursor position are also supported).
 - **Monitor (VNC, beta):** a view-only window onto your own computer's screen
   sharing. macOS (ARD) authentication lands straight on the desktop; classic
   VNC password and no-auth servers are supported too. Pinch-zoom and pan;

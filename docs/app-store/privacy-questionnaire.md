@@ -16,7 +16,7 @@ every category.
 | Accounts / identifiers | None. No sign-in, no device identifiers read. |
 | Server-side anything | We operate no servers. |
 | SSH traffic | Goes only to user-configured hosts, initiated by the user. Not "collection" — we never see it. |
-| VNC monitor traffic | Same posture as SSH: a direct, user-initiated, view-only connection to the user's own machine (no input sent). We never see it. |
+| VNC monitor traffic | Same posture as SSH: a direct, user-initiated connection to the user's own machine. View-only by default; opt-in Control mode sends only the user's own taps/keystrokes to their own host. We never see any of it. |
 | Dictation | `requiresOnDeviceRecognition = true`; never falls back to Apple's servers. |
 | Purchases | Processed by Apple. The app sees entitlements only, on-device. |
 | Private keys / server list | Keychain (ThisDeviceOnly) + local JSON. Never sync, never leave the device. |

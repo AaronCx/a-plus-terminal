@@ -856,6 +856,13 @@ extension VNCCAFramebufferView: VNCConnectionDelegate {
             self?.currentCursor = cursor.nsCursor
         }
     }
+
+    // a+Terminal VENDOR PATCH: PointerPos support — the macOS view tracks
+    // the local pointer itself; deliberate no-op.
+    public func connection(
+        _ connection: VNCConnection,
+        didMovePointerToX x: UInt16, y: UInt16
+    ) { }
     
     // Passthrough
     public func connection(

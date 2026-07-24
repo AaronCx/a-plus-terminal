@@ -34,6 +34,12 @@ extension VNCConnection {
 							 didUpdateCursor: cursor)
 	}
 
+	// a+Terminal VENDOR PATCH: PointerPos pseudo-encoding support.
+	func notifyDelegateAboutPointerPosition(_ position: VNCPoint) {
+		delegate?.connection(self,
+							 didMovePointerToX: position.x, y: position.y)
+	}
+
 	func askDelegateForPasswordCredential(authenticationType: VNCAuthenticationType) async throws -> VNCPasswordCredential {
 		guard let passwordCredential = try await askDelegateForCredential(authenticationType: authenticationType) as? VNCPasswordCredential else {
 			throw VNCError.authentication(.noAuthenticationDataProvided)

@@ -7,6 +7,8 @@ import Foundation
 public enum VNCPseudoEncodingType: VNCEncodingType {
 	case lastRect = -224
 	case cursor = -239
+	// a+Terminal VENDOR PATCH: PointerPos (UltraVNC extension).
+	case pointerPos = -232
 	case desktopName = -307
 	case continuousUpdates = -313
 	case desktopSize = -223
@@ -49,6 +51,8 @@ extension VNCPseudoEncodingType: CustomStringConvertible {
 				"Last Rectangle"
 			case .cursor:
 				"Cursor"
+			case .pointerPos:
+				"Pointer Position"
 			case .desktopName:
 				"Desktop Name"
 			case .continuousUpdates:

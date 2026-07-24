@@ -13,6 +13,48 @@ enum TestSeed {
         let username: String
     }
 
+    /// VNC live QA: seed a monitor server (credentials via env, Keychain-
+    /// backed like production), auto-open it, and optionally auto-enable
+    /// Control and inject one tap — the headless end-to-end loop that lets
+    /// the harness SEE the cursor overlay and verify input against a real
+    /// host before anything ships.
+    @MainActor
+    static func applyVNCIfRequested(servers: ServerStore, passwords: PasswordStore, vncManager: VNCMonitorManager) {
+        let env = ProcessInfo.processInfo.environment
+        guard let json = env["APLUSTERMINAL_TEST_VNC_SERVER"],
+              let seed = try? JSONDecoder().decode(SeedServer.self, from: Data(json.utf8)) else { return }
+        var server = servers.servers.first(where: { $0.name == seed.name && $0.kind == .vncMonitor })
+            ?? Server(name: seed.name, host: seed.host, port: seed.port, username: seed.username,
+                      kind: .vncMonitor, vncAuthMethod: .ard)
+        if let password = env["APLUSTERMINAL_TEST_VNC_PASSWORD"], !password.isEmpty {
+            let ref = server.passwordRef ?? UUID()
+            try? passwords.setPassword(password, for: ref)
+            server.passwordRef = ref
+        }
+        if servers.server(for: server.id) == nil {
+            servers.add(server)
+        } else {
+            servers.update(server)
+        }
+        print("TESTSEED: vnc monitor seeded")
+        guard let openMS = env["APLUSTERMINAL_TEST_VNC_AUTOOPEN_MS"].flatMap(UInt64.init) else { return }
+        let seededServer = server
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: openMS * 1_000_000)
+            let session = vncManager.open(server: seededServer)
+            print("TESTSEED: vnc monitor opened")
+            // "x,y,delayMs" — enable Control and tap once.
+            if let tap = env["APLUSTERMINAL_TEST_VNC_AUTOTAP"] {
+                let parts = tap.split(separator: ",").compactMap { Double($0) }
+                guard parts.count == 3 else { return }
+                try? await Task.sleep(nanoseconds: UInt64(parts[2]) * 1_000_000)
+                session.setControlEnabled(true)
+                session.sendTap(at: CGPoint(x: parts[0], y: parts[1]))
+                print("TESTSEED: vnc autotap sent at \(parts[0]),\(parts[1])")
+            }
+        }
+    }
+
     @MainActor
     static func applyIfRequested(servers: ServerStore, keys: KeyStore, router: DeepLinkRouter, settings: AppSettings? = nil) {
         let env = ProcessInfo.processInfo.environment

@@ -19,10 +19,16 @@
 //     test bundle compiles against it with `link: false`, the Citadel
 //     pattern.
 // Source patches (each marked "a+Terminal VENDOR PATCH" in place):
-//   * SDK/Connection/VNCConnection.swift orderedEncodingTypes(): the Cursor
-//     pseudo-encoding is no longer advertised, so the server composites the
-//     mouse cursor into the framebuffer (no iOS consumer renders cursors,
-//     and shape-only updates make client-side rendering impossible).
+//   * PointerPos pseudo-encoding (-232, UltraVNC extension) implemented and
+//     advertised alongside Cursor: new PointerPosEncoding.swift, plumbed
+//     through VNCFramebuffer(+Delegate) and VNCConnection(+Framebuffer,
+//     +Delegate, Delegate protocol + conformer stubs) as
+//     connection(_:didMovePointerToX:y:). Rationale: macOS Screen Sharing
+//     composites no cursor into the framebuffer regardless of what the
+//     client advertises (field-verified on build 33), so a visible remote
+//     cursor requires client-side rendering — Cursor gives the shape,
+//     PointerPos (when the server supports it) or locally injected input
+//     gives the position.
 // Non-manifest trims: Design/, Bindings/, android scripts (no code targets).
 
 import PackageDescription

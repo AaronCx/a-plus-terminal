@@ -134,7 +134,10 @@ final class RoyalVNCConnectionAdapter: NSObject, VNCConnecting {
             isShared: true,               // never kick the console session
             isScalingEnabled: false,
             useDisplayLink: false,
-            inputMode: .none,             // view-only: no input, ever (§1)
+            // Governs the SDK's macOS-client keyboard-shortcut capture, not
+            // the pointer/key APIs below — the app gates those on Control
+            // mode itself (VNCMonitorSession).
+            inputMode: .none,
             isClipboardRedirectionEnabled: false,
             colorDepth: .depth24Bit,
             frameEncodings: .default
@@ -152,6 +155,39 @@ final class RoyalVNCConnectionAdapter: NSObject, VNCConnecting {
 
     func disconnect() {
         connection.disconnect()
+    }
+
+    func sendPointer(_ action: VNCPointerAction, x: UInt16, y: UInt16) {
+        switch action {
+        case .move:
+            connection.mouseMove(x: x, y: y)
+        case .leftDown:
+            connection.mouseButtonDown(.left, x: x, y: y)
+        case .leftUp:
+            connection.mouseButtonUp(.left, x: x, y: y)
+        case .rightClick:
+            connection.mouseButtonDown(.right, x: x, y: y)
+            connection.mouseButtonUp(.right, x: x, y: y)
+        }
+    }
+
+    func sendText(_ text: String) {
+        for key in VNCKeyCode.keyCodesFrom(characters: text) {
+            connection.keyDown(key)
+            connection.keyUp(key)
+        }
+    }
+
+    func sendSpecialKey(_ key: VNCSpecialKey) {
+        let code: VNCKeyCode
+        switch key {
+        case .return: code = .return
+        case .escape: code = .escape
+        case .tab: code = .tab
+        case .delete: code = .delete
+        }
+        connection.keyDown(code)
+        connection.keyUp(code)
     }
 }
 
@@ -213,10 +249,22 @@ extension RoyalVNCConnectionAdapter: VNCConnectionDelegate {
     }
 
     nonisolated func connection(_ connection: VNCConnection, didUpdateCursor cursor: VNCCursor) {
-        // Never fires: the vendored SDK no longer advertises the Cursor
-        // pseudo-encoding (see Vendor/royalvnc Package.swift header), so the
-        // server composites the cursor into the framebuffer itself — which
-        // is how a view-only monitor shows the remote mouse at all.
+        let shape = cursor.isEmpty ? nil : cursor.cgImage
+        let hotspot = cursor.cgHotspot
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.delegate?.vncConnection(self, didUpdateCursorShape: shape, hotspot: hotspot)
+        }
+    }
+
+    nonisolated func connection(_ connection: VNCConnection, didMovePointerToX x: UInt16, y: UInt16) {
+        // PointerPos (vendored patch). macOS Screen Sharing never sends it
+        // (probe-verified 2026-07-24); other servers may.
+        let position = CGPoint(x: CGFloat(x), y: CGFloat(y))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.delegate?.vncConnection(self, didMovePointerTo: position)
+        }
     }
 
     private nonisolated func publishFrame(_ framebuffer: VNCFramebuffer, force: Bool) {
