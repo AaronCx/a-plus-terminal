@@ -53,7 +53,7 @@ struct APlusTerminalApp: App {
             router.selectedTab = .terminal
             router.targetSessionID = sessionID
         }
-        let vncMonitors = VNCMonitorManager(passwords: passwords)
+        let vncMonitors = VNCMonitorManager(passwords: passwords, keyStore: keys, serverStore: servers)
         _vncMonitors = State(initialValue: vncMonitors)
         // While a pop-out is live, the background wind-down must not kill
         // the sessions it is monitoring…

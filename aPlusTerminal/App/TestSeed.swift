@@ -31,6 +31,12 @@ enum TestSeed {
             try? passwords.setPassword(password, for: ref)
             server.passwordRef = ref
         }
+        // Link the seeded SSH server as the cursor bridge (harness verifies
+        // the physical-pointer overlay end to end).
+        if env["APLUSTERMINAL_TEST_VNC_LINK_SSH"] == "1",
+           let sshSeed = servers.servers.first(where: { $0.kind == .ssh }) {
+            server.cursorBridgeSSHServerID = sshSeed.id
+        }
         if servers.server(for: server.id) == nil {
             servers.add(server)
         } else {

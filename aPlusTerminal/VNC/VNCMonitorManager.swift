@@ -16,17 +16,31 @@ final class VNCMonitorManager {
 
     private let passwords: PasswordStore
     private let makeConnection: (Server) -> VNCConnecting
+    /// Resolves the linked SSH server + builds the cursor bridge; seams for
+    /// tests. Nil resolver disables bridging entirely.
+    private let resolveServer: (UUID) -> Server?
+    private let makeBridge: (Server) -> VNCCursorBridge
 
     /// Mirrors `SessionManager.pipKeepsProcessAlive` — wired at app init.
     @ObservationIgnored var pipKeepsProcessAlive: () -> Bool = { false }
 
     init(
         passwords: PasswordStore,
-        makeConnection: ((Server) -> VNCConnecting)? = nil
+        keyStore: KeyStore? = nil,
+        serverStore: ServerStore? = nil,
+        makeConnection: ((Server) -> VNCConnecting)? = nil,
+        makeBridge: ((Server) -> VNCCursorBridge)? = nil
     ) {
         self.passwords = passwords
         self.makeConnection = makeConnection ?? { server in
             RoyalVNCConnectionAdapter(server: server)
+        }
+        self.resolveServer = { [weak serverStore] id in serverStore?.server(for: id) }
+        self.makeBridge = makeBridge ?? { [weak keyStore] sshServer in
+            guard let keyStore else {
+                return VNCCursorBridge { AsyncThrowingStream { $0.finish() } }
+            }
+            return VNCCursorBridge.forLinkedServer(sshServer, keyStore: keyStore, passwords: passwords)
         }
     }
 
@@ -47,6 +61,12 @@ final class VNCMonitorManager {
             passwords: passwords,
             makeConnection: makeConnection
         )
+        // Cursor bridge: only when the monitor links a saved SSH server
+        // (same machine). The session starts/stops it with its state.
+        if let linkID = server.cursorBridgeSSHServerID,
+           let sshServer = resolveServer(linkID), sshServer.kind == .ssh {
+            session.cursorBridge = makeBridge(sshServer)
+        }
         sessions.append(session)
         session.connect()
         presented = session

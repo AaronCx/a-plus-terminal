@@ -69,6 +69,22 @@ struct VNCMonitorEditView: View {
                     Text(footerText)
                 }
 
+                Section {
+                    Picker("SSH server", selection: Binding(
+                        get: { server.cursorBridgeSSHServerID },
+                        set: { server.cursorBridgeSSHServerID = $0 }
+                    )) {
+                        Text("None").tag(UUID?.none)
+                        ForEach(sshServers) { ssh in
+                            Text(ssh.name).tag(UUID?.some(ssh.id))
+                        }
+                    }
+                } header: {
+                    Text("Cursor Bridge")
+                } footer: {
+                    Text("macOS screen sharing doesn't report where the mouse pointer is, so the monitor can only show a cursor for taps you make. Link this machine's saved SSH server and a+Terminal reads the real pointer position over SSH — the cursor then tracks the physical mouse and anything running on the Mac.")
+                }
+
                 if let errorMessage {
                     Section {
                         Text(errorMessage)
@@ -88,6 +104,10 @@ struct VNCMonitorEditView: View {
                 }
             }
         }
+    }
+
+    private var sshServers: [Server] {
+        serverStore.servers.filter { $0.kind == .ssh }
     }
 
     private var footerText: String {
