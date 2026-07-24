@@ -213,7 +213,10 @@ extension RoyalVNCConnectionAdapter: VNCConnectionDelegate {
     }
 
     nonisolated func connection(_ connection: VNCConnection, didUpdateCursor cursor: VNCCursor) {
-        // View-only monitor: the remote cursor is not rendered.
+        // Never fires: the vendored SDK no longer advertises the Cursor
+        // pseudo-encoding (see Vendor/royalvnc Package.swift header), so the
+        // server composites the cursor into the framebuffer itself — which
+        // is how a view-only monitor shows the remote mouse at all.
     }
 
     private nonisolated func publishFrame(_ framebuffer: VNCFramebuffer, force: Bool) {
