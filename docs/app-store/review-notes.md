@@ -36,6 +36,13 @@ we've set up for review. The connection is the app's core function.
    picture-in-picture button — PiP starts only from that user tap (or the
    system's app-switch auto-PiP if the user turns that sub-toggle on), never
    programmatically. It stays view-only until the user turns on Control.
+7. Optional — Pop-Out Sessions (beta, off by default): with the toggle on
+   (Settings → Pop-Out), a connected terminal session can be popped out into
+   a floating window that continuously shows the session name, a running
+   status indicator, a live elapsed-time clock, and the most recent lines of
+   output — an at-a-glance monitor of a long-running task. It is a monitoring
+   surface, not a remote-control surface: it forwards no input. Same
+   user-initiated PiP start rule as above.
 
 Notes:
 - No account or signup is required. The app collects zero data; the only network
