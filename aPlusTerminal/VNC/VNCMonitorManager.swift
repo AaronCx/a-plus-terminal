@@ -19,6 +19,8 @@ final class VNCMonitorManager {
     /// Resolves the linked SSH server + builds the cursor bridge; seams for
     /// tests. Nil resolver disables bridging entirely.
     private let resolveServer: (UUID) -> Server?
+    /// All saved SSH servers (for auto-matching a cursor bridge by host).
+    private let sshServers: () -> [Server]
     private let makeBridge: (Server) -> VNCCursorBridge
 
     /// Mirrors `SessionManager.pipKeepsProcessAlive` — wired at app init.
@@ -29,18 +31,39 @@ final class VNCMonitorManager {
         keyStore: KeyStore? = nil,
         serverStore: ServerStore? = nil,
         makeConnection: ((Server) -> VNCConnecting)? = nil,
-        makeBridge: ((Server) -> VNCCursorBridge)? = nil
+        makeBridge: ((Server) -> VNCCursorBridge)? = nil,
+        sshServers: (() -> [Server])? = nil
     ) {
         self.passwords = passwords
         self.makeConnection = makeConnection ?? { server in
             RoyalVNCConnectionAdapter(server: server)
         }
         self.resolveServer = { [weak serverStore] id in serverStore?.server(for: id) }
+        self.sshServers = sshServers ?? { [weak serverStore] in
+            (serverStore?.servers ?? []).filter { $0.kind == .ssh }
+        }
         self.makeBridge = makeBridge ?? { [weak keyStore] sshServer in
             guard let keyStore else {
                 return VNCCursorBridge { AsyncThrowingStream { $0.finish() } }
             }
             return VNCCursorBridge.forLinkedServer(sshServer, keyStore: keyStore, passwords: passwords)
+        }
+    }
+
+    /// The SSH server to drive the cursor bridge for this monitor: an
+    /// explicit link if set and still valid, otherwise a saved SSH server on
+    /// the SAME host (so the physical-mouse cursor "just works" for anyone
+    /// who already has the machine saved as an SSH server). `cursorBridge...`
+    /// resolving to a deleted/None entry disables the bridge deliberately.
+    func cursorBridgeServer(for monitor: Server) -> Server? {
+        if let linkID = monitor.cursorBridgeSSHServerID {
+            let linked = resolveServer(linkID)
+            return (linked?.kind == .ssh) ? linked : nil
+        }
+        let host = monitor.host.lowercased()
+        return sshServers().first { ssh in
+            ssh.connectionCandidates.contains { $0.lowercased() == host }
+                || monitor.connectionCandidates.contains { $0.lowercased() == ssh.host.lowercased() }
         }
     }
 
@@ -61,10 +84,10 @@ final class VNCMonitorManager {
             passwords: passwords,
             makeConnection: makeConnection
         )
-        // Cursor bridge: only when the monitor links a saved SSH server
-        // (same machine). The session starts/stops it with its state.
-        if let linkID = server.cursorBridgeSSHServerID,
-           let sshServer = resolveServer(linkID), sshServer.kind == .ssh {
+        // Cursor bridge: an explicitly linked OR host-matched saved SSH
+        // server streams the real pointer position (macOS reports none). The
+        // session starts/stops it with its state.
+        if let sshServer = cursorBridgeServer(for: server) {
             session.cursorBridge = makeBridge(sshServer)
         }
         sessions.append(session)

@@ -436,6 +436,51 @@ final class VNCMonitorManagerTests: XCTestCase {
         XCTAssertEqual(manager.sessions.count, 1)
     }
 
+    func testCursorBridgeAutoMatchesSSHServerByHost() {
+        let passwords = PasswordStore(secrets: InMemorySecretStore())
+        let ssh = Server(name: "Mini", host: "100.79.92.82", username: "acx")
+        let vnc = Server(name: "MiniVNC", host: "100.79.92.82", port: 5900, username: "",
+                         kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        var built: [String] = []
+        let manager = VNCMonitorManager(
+            passwords: passwords,
+            makeConnection: { _ in MockVNCConnection() },
+            makeBridge: { built.append($0.name); return VNCCursorBridge { AsyncThrowingStream { $0.finish() } } },
+            sshServers: { [ssh] }
+        )
+        XCTAssertEqual(manager.cursorBridgeServer(for: vnc)?.name, "Mini",
+                       "a monitor auto-matches a saved SSH server on the same host")
+        manager.open(server: vnc)
+        XCTAssertEqual(built, ["Mini"], "opening the monitor builds the auto-matched bridge — no manual link needed")
+    }
+
+    func testNoBridgeWhenNoHostMatch() {
+        let passwords = PasswordStore(secrets: InMemorySecretStore())
+        let ssh = Server(name: "Other", host: "192.168.1.5", username: "acx")
+        let vnc = Server(name: "MiniVNC", host: "100.79.92.82", port: 5900, username: "",
+                         kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        let manager = VNCMonitorManager(passwords: passwords,
+                                        makeConnection: { _ in MockVNCConnection() },
+                                        sshServers: { [ssh] })
+        XCTAssertNil(manager.cursorBridgeServer(for: vnc), "no SSH server on the host → no bridge")
+    }
+
+    func testExplicitNoneOverridesAutoMatch() {
+        // A monitor that WAS auto-linkable but whose user explicitly set a
+        // (now-deleted) link resolves to nil, not back to the host match.
+        let passwords = PasswordStore(secrets: InMemorySecretStore())
+        let ssh = Server(name: "Mini", host: "100.79.92.82", username: "acx")
+        var vnc = Server(name: "MiniVNC", host: "100.79.92.82", port: 5900, username: "",
+                         kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        vnc.cursorBridgeSSHServerID = UUID()  // points at nothing
+        let manager = VNCMonitorManager(passwords: passwords,
+                                        serverStore: nil,
+                                        makeConnection: { _ in MockVNCConnection() },
+                                        sshServers: { [ssh] })
+        XCTAssertNil(manager.cursorBridgeServer(for: vnc),
+                     "an explicit-but-unresolvable link disables the bridge, not silently re-match")
+    }
+
     func testCloseNotifiesThePopOutHook() {
         let passwords = PasswordStore(secrets: InMemorySecretStore())
         let manager = VNCMonitorManager(passwords: passwords, makeConnection: { _ in MockVNCConnection() })
