@@ -112,6 +112,47 @@ final class TerminalTailWindowTests: XCTestCase {
     }
 }
 
+/// A bigger PiP window reveals MORE terminal rows (field feedback: the
+/// terminal pop-out was too zoomed and resizing only magnified).
+@MainActor
+final class TerminalPiPRenderSizeTests: XCTestCase {
+    private func source(rows terminalRows: Int, base: Int) -> TerminalPiPFrameSource {
+        let view = TerminalEmulatorView(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        view.getTerminal().resize(cols: 40, rows: terminalRows)
+        var text = ""
+        for i in 0..<terminalRows { text += "line\(i)\r\n" }
+        view.feed(byteArray: ArraySlice(Array(text.utf8)))
+        return TerminalPiPFrameSource(
+            terminalView: view, sessionID: UUID(),
+            title: { "t" }, chip: { .running }, tailRows: base
+        )
+    }
+
+    func testLargerRenderSizeShowsMoreRows() {
+        let src = source(rows: 50, base: 14)
+        src.updateForRenderSize(CGSize(width: 300, height: 300))
+        let small = src.currentModel().rows.count
+        src.updateForRenderSize(CGSize(width: 600, height: 600))
+        let large = src.currentModel().rows.count
+        XCTAssertGreaterThan(large, small, "growing the PiP window reveals more rows")
+        XCTAssertEqual(small, 14, "at the reference size, the baseline count shows")
+    }
+
+    func testRowCountNeverExceedsTheTerminal() {
+        let src = source(rows: 12, base: 14)
+        src.updateForRenderSize(CGSize(width: 1200, height: 1200))
+        XCTAssertLessThanOrEqual(src.currentModel().rows.count, 12,
+                                 "can't show more rows than the terminal has")
+    }
+
+    func testNeverBelowBaseline() {
+        let src = source(rows: 50, base: 14)
+        src.updateForRenderSize(CGSize(width: 60, height: 60))
+        XCTAssertGreaterThanOrEqual(src.currentModel().rows.count, 14,
+                                    "a tiny window never drops below the baseline")
+    }
+}
+
 /// followSuspended semantics (brief §3.2/§3.5): pause freezes the visible row
 /// window; clearing it jumps back to the tail.
 @MainActor
@@ -212,8 +253,8 @@ final class TerminalPiPSurfaceSnapshotTests: XCTestCase {
         let pool = try XCTUnwrap(PiPPixelBufferPool.make(size: renderer.size))
         let first = try XCTUnwrap(renderer.draw(model, into: pool))
         let second = try XCTUnwrap(renderer.draw(model, into: pool))
-        XCTAssertEqual(CVPixelBufferGetWidth(first), 960)
-        XCTAssertEqual(CVPixelBufferGetHeight(first), 600)
+        XCTAssertEqual(CVPixelBufferGetWidth(first), 900)
+        XCTAssertEqual(CVPixelBufferGetHeight(first), 1200)
         XCTAssertEqual(pixelHash(first), pixelHash(second), "same model renders identical pixels")
 
         let changed = TerminalPiPSurfaceModel(
