@@ -29,12 +29,13 @@ we've set up for review. The connection is the app's core function.
    gesture-to-mouse bridge, the main reason this app exists.
 5. Optional: tap the microphone in the key bar to dictate a command; transcription
    is 100% on-device (no audio leaves the phone).
-6. Optional — Pop-Out Sessions (beta, off by default): enable Settings →
-   Pop-Out → "Pop-Out Sessions (beta)", open a session, then tap the
-   picture-in-picture button in the toolbar. A small view-only monitor window
-   appears so the user can watch a long-running task while using other apps.
-   PiP starts only from that user tap (or the system's app-switch auto-PiP if
-   the user turns that sub-toggle on) — never programmatically.
+6. Optional — Monitor (VNC, beta, off by default): the "+" menu → "Add
+   Monitor (VNC)" adds a view-only screen-sharing session to a computer the
+   user controls. Its screen can be popped out into a floating
+   Picture-in-Picture window (live video of the remote screen) via the
+   picture-in-picture button — PiP starts only from that user tap (or the
+   system's app-switch auto-PiP if the user turns that sub-toggle on), never
+   programmatically. It stays view-only until the user turns on Control.
 
 Notes:
 - No account or signup is required. The app collects zero data; the only network
