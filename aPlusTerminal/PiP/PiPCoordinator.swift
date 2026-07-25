@@ -136,7 +136,8 @@ final class PiPCoordinator {
                 chip: { [weak session] in
                     guard let session else { return .disconnected }
                     return .from(state: session.state, agentStatus: session.agentMonitor.status)
-                }
+                },
+                startedAt: { [weak session] in session?.startedAt }
             )
             // `pipInvalidate` is the session's single PiP slot (SessionManager
             // multicasts output/state/agent events into it) — hooked here,

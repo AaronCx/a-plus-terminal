@@ -112,6 +112,58 @@ final class TerminalTailWindowTests: XCTestCase {
     }
 }
 
+/// The live session timer in the terminal pop-out header.
+@MainActor
+final class TerminalPiPTimerTests: XCTestCase {
+    func testElapsedFormatting() {
+        XCTAssertEqual(PiPElapsedFormatter.string(0), "0:00")
+        XCTAssertEqual(PiPElapsedFormatter.string(5), "0:05")
+        XCTAssertEqual(PiPElapsedFormatter.string(65), "1:05")
+        XCTAssertEqual(PiPElapsedFormatter.string(3599), "59:59")
+        XCTAssertEqual(PiPElapsedFormatter.string(3600), "1:00:00")
+        XCTAssertEqual(PiPElapsedFormatter.string(3807), "1:03:27")
+        XCTAssertEqual(PiPElapsedFormatter.string(-10), "0:00", "negative clamps to zero")
+    }
+
+    func testModelCarriesElapsedFromSessionStart() {
+        let view = TerminalEmulatorView(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        view.getTerminal().resize(cols: 20, rows: 6)
+        view.feed(byteArray: ArraySlice(Array("hi".utf8)))
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let source = TerminalPiPFrameSource(
+            terminalView: view, sessionID: UUID(),
+            title: { "t" }, chip: { .running },
+            startedAt: { start },
+            now: { start.addingTimeInterval(125) }   // 2:05
+        )
+        XCTAssertEqual(source.currentModel().elapsed, "2:05")
+    }
+
+    func testNoStartDateMeansNoTimer() {
+        let view = TerminalEmulatorView(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        let source = TerminalPiPFrameSource(
+            terminalView: view, sessionID: UUID(), title: { "t" }, chip: { .running }
+        )
+        XCTAssertNil(source.currentModel().elapsed)
+    }
+
+    func testTickerFiresInvalidationsWhileAttached() async throws {
+        let view = TerminalEmulatorView(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        let source = TerminalPiPFrameSource(
+            terminalView: view, sessionID: UUID(), title: { "t" }, chip: { .running },
+            startedAt: { Date() }
+        )
+        var ticks = 0
+        source.onInvalidate = { ticks += 1 }   // assignment starts the ticker
+        try await Task.sleep(for: .milliseconds(2200))
+        XCTAssertGreaterThanOrEqual(ticks, 1, "the 1 Hz ticker advances the timer without output")
+        source.onInvalidate = nil               // stops the ticker
+        let after = ticks
+        try await Task.sleep(for: .milliseconds(1200))
+        XCTAssertEqual(ticks, after, "detaching stops the ticker")
+    }
+}
+
 /// A bigger PiP window reveals MORE terminal rows (field feedback: the
 /// terminal pop-out was too zoomed and resizing only magnified).
 @MainActor
@@ -243,6 +295,7 @@ final class TerminalPiPSurfaceSnapshotTests: XCTestCase {
         XCTAssertEqual(model, TerminalPiPSurfaceModel(
             title: "mac-mini",
             chip: .running,
+            elapsed: nil,
             rows: ["alpha", "beta", "gamma"],
             paused: false
         ))
@@ -258,16 +311,23 @@ final class TerminalPiPSurfaceSnapshotTests: XCTestCase {
         XCTAssertEqual(pixelHash(first), pixelHash(second), "same model renders identical pixels")
 
         let changed = TerminalPiPSurfaceModel(
-            title: "mac-mini", chip: .running, rows: ["alpha", "beta", "delta"], paused: false
+            title: "mac-mini", chip: .running, elapsed: nil, rows: ["alpha", "beta", "delta"], paused: false
         )
         let third = try XCTUnwrap(renderer.draw(changed, into: pool))
         XCTAssertNotEqual(pixelHash(first), pixelHash(third), "content changes reach the pixels")
+
+        // The elapsed timer reaches the pixels too (a live clock must render).
+        let ticked = TerminalPiPSurfaceModel(
+            title: "mac-mini", chip: .running, elapsed: "1:03:27", rows: ["alpha", "beta", "gamma"], paused: false
+        )
+        let withTimer = try XCTUnwrap(renderer.draw(ticked, into: pool))
+        XCTAssertNotEqual(pixelHash(first), pixelHash(withTimer), "the session timer is drawn")
     }
 
     func testSampleBufferCreationFromRenderedSurface() throws {
         let renderer = TerminalPiPSurfaceRenderer()
         let pool = try XCTUnwrap(PiPPixelBufferPool.make(size: renderer.size))
-        let model = TerminalPiPSurfaceModel(title: "t", chip: .running, rows: ["x"], paused: false)
+        let model = TerminalPiPSurfaceModel(title: "t", chip: .running, elapsed: "0:05", rows: ["x"], paused: false)
         let buffer = try XCTUnwrap(renderer.draw(model, into: pool))
         let sample = try XCTUnwrap(PiPEngine.makeSampleBuffer(for: buffer))
         XCTAssertTrue(CMSampleBufferIsValid(sample))

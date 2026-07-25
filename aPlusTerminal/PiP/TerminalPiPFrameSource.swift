@@ -36,8 +36,22 @@ enum PiPSessionChip: Equatable {
 struct TerminalPiPSurfaceModel: Equatable {
     var title: String
     var chip: PiPSessionChip
+    /// Elapsed session time, e.g. "12:04" or "1:03:27"; nil when unknown.
+    var elapsed: String?
     var rows: [String]
     var paused: Bool
+}
+
+/// Formats an elapsed duration for the pop-out header: MM:SS under an hour,
+/// H:MM:SS beyond. Pure so it's unit-testable.
+enum PiPElapsedFormatter {
+    static func string(_ interval: TimeInterval) -> String {
+        let total = Int(max(0, interval))
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, s)
+            : String(format: "%d:%02d", m, s)
+    }
 }
 
 /// Last-N-rows extraction from the emulator's visible grid.
@@ -88,6 +102,14 @@ final class TerminalPiPFrameSource: PiPFrameSource {
     private weak var terminalView: TerminalEmulatorView?
     private let title: () -> String
     private let chip: () -> PiPSessionChip
+    /// When the session started — drives the live elapsed timer in the
+    /// header. A continuously-updating clock is genuine at-a-glance
+    /// monitoring content (not just a static surface).
+    private let startedAt: () -> Date?
+    /// Injectable clock (tests).
+    private let now: () -> Date
+    /// 1 Hz self-invalidation so the timer advances even with no output.
+    private var ticker: Task<Void, Never>?
     /// Baseline rows shown at the default PiP window size; the effective
     /// count grows with the window (see updateForRenderSize).
     private let baseTailRows: Int
@@ -100,7 +122,13 @@ final class TerminalPiPFrameSource: PiPFrameSource {
     private var frozenRows: [String]?
 
     let restoreSessionID: UUID?
-    var onInvalidate: (() -> Void)?
+    /// Starting/stopping the 1 Hz timer ticker follows the engine attaching
+    /// (non-nil) and detaching (nil) this source.
+    var onInvalidate: (() -> Void)? {
+        didSet {
+            if onInvalidate != nil { startTicker() } else { stopTicker() }
+        }
+    }
     /// Unwires session plumbing when the engine drops this source.
     var onDetach: (() -> Void)?
 
@@ -116,19 +144,38 @@ final class TerminalPiPFrameSource: PiPFrameSource {
         sessionID: UUID?,
         title: @escaping () -> String,
         chip: @escaping () -> PiPSessionChip,
+        startedAt: @escaping () -> Date? = { nil },
         tailRows: Int = TerminalPiPFrameSource.defaultTailRows,
-        renderer: TerminalPiPSurfaceRenderer = TerminalPiPSurfaceRenderer()
+        renderer: TerminalPiPSurfaceRenderer = TerminalPiPSurfaceRenderer(),
+        now: @escaping () -> Date = Date.init
     ) {
         self.terminalView = terminalView
         self.restoreSessionID = sessionID
         self.title = title
         self.chip = chip
+        self.startedAt = startedAt
         self.baseTailRows = tailRows
         self.tailRows = tailRows
         self.renderer = renderer
+        self.now = now
     }
 
     var preferredBufferSize: CGSize { renderer.size }
+
+    private func startTicker() {
+        guard ticker == nil else { return }
+        ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                self?.onInvalidate?()
+            }
+        }
+    }
+
+    private func stopTicker() {
+        ticker?.cancel()
+        ticker = nil
+    }
 
     /// The PiP window's surface (buffer) aspect is fixed, so growing the
     /// window uniformly scales the buffer. To reveal MORE rows in a bigger
@@ -154,9 +201,11 @@ final class TerminalPiPFrameSource: PiPFrameSource {
         } else {
             rows = []
         }
+        let elapsed = startedAt().map { PiPElapsedFormatter.string(now().timeIntervalSince($0)) }
         return TerminalPiPSurfaceModel(
             title: title(),
             chip: terminalView == nil ? .disconnected : chip(),
+            elapsed: elapsed,
             rows: rows,
             paused: frozenRows != nil
         )
@@ -167,10 +216,12 @@ final class TerminalPiPFrameSource: PiPFrameSource {
     }
 
     func detach() {
-        onInvalidate = nil
+        onInvalidate = nil   // didSet stops the ticker
         onDetach?()
         onDetach = nil
     }
+
+    deinit { ticker?.cancel() }
 }
 
 /// Draws a surface model into a 32BGRA pixel buffer: a header row (title +
@@ -237,21 +288,36 @@ struct TerminalPiPSurfaceRenderer {
         let chipSize = (chipText as NSString).size(withAttributes: [.font: chipFont])
         let chipPadding: CGFloat = 12
         let chipWidth = chipSize.width + chipPadding * 2
-        let titleRect = CGRect(
-            x: margin,
-            y: (headerHeight - titleFont.lineHeight) / 2,
-            width: size.width - margin * 3 - chipWidth,
-            height: titleFont.lineHeight
-        )
-        (model.title as NSString).draw(in: titleRect, withAttributes: titleAttributes)
 
-        // State chip, right-aligned.
+        // Live session timer, right-aligned just left of the chip.
+        let timerFont = UIFont.monospacedDigitSystemFont(ofSize: 22, weight: .medium)
+        let timerText = model.elapsed.map { "⏱ \($0)" }
+        let timerSize = timerText.map { ($0 as NSString).size(withAttributes: [.font: timerFont]) } ?? .zero
+        let gap: CGFloat = timerText == nil ? 0 : 14
         let chipRect = CGRect(
             x: size.width - margin - chipWidth,
             y: (headerHeight - chipSize.height - 10) / 2,
             width: chipWidth,
             height: chipSize.height + 10
         )
+        if let timerText {
+            (timerText as NSString).draw(
+                at: CGPoint(x: chipRect.minX - gap - timerSize.width,
+                            y: (headerHeight - timerFont.lineHeight) / 2),
+                withAttributes: [.font: timerFont, .foregroundColor: UIColor(white: 0.75, alpha: 1)]
+            )
+        }
+
+        // Title fills the space left of the timer.
+        let titleRect = CGRect(
+            x: margin,
+            y: (headerHeight - titleFont.lineHeight) / 2,
+            width: chipRect.minX - gap - timerSize.width - margin - 12,
+            height: titleFont.lineHeight
+        )
+        (model.title as NSString).draw(in: titleRect, withAttributes: titleAttributes)
+
+        // State chip, right-aligned.
         let chipPath = UIBezierPath(roundedRect: chipRect, cornerRadius: chipRect.height / 2)
         chipColor.withAlphaComponent(0.25).setFill()
         chipPath.fill()
