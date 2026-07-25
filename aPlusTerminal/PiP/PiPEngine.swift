@@ -357,6 +357,11 @@ extension PiPEngine: AVPictureInPictureSampleBufferPlaybackDelegate {
 
     nonisolated func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
         MainActor.assumeIsolated {
+            // Let the source reveal more content in a bigger window (terminal
+            // rows) rather than only magnifying; then re-render at the new
+            // scale.
+            source?.updateForRenderSize(CGSize(width: CGFloat(newRenderSize.width),
+                                               height: CGFloat(newRenderSize.height)))
             coalescer.renderNow()
         }
     }

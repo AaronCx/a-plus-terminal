@@ -27,6 +27,16 @@ protocol PiPFrameSource: AnyObject {
     /// when no buffer could be leased — the engine keeps the previous frame.
     func renderFrame(into pool: CVPixelBufferPool) -> CVPixelBuffer?
 
+    /// The PiP window's pixel size changed (`didTransitionToRenderSize`).
+    /// Content sources that pack discrete units (the terminal's rows) use
+    /// this to show MORE when the window grows, rather than just magnifying.
+    /// Image sources (VNC) ignore it. Default: no-op.
+    func updateForRenderSize(_ size: CGSize)
+
     /// The engine stopped using this source: unhook invalidation plumbing.
     func detach()
+}
+
+extension PiPFrameSource {
+    func updateForRenderSize(_ size: CGSize) {}
 }

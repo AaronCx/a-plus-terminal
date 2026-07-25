@@ -482,7 +482,9 @@ final class VNCCanvasScrollView: UIScrollView, UIScrollViewDelegate, UIGestureRe
             size = CGSize(width: CGFloat(shape.width) * scale, height: CGFloat(shape.height) * scale)
             hotspotOffset = CGPoint(x: cursor.hotspot.x * scale, y: cursor.hotspot.y * scale)
         } else {
-            size = CGSize(width: 14, height: 22)
+            // Fixed, deliberately compact — a subtle pointer, not a big
+            // affordance (field feedback: the drawn cursor read too large).
+            size = CGSize(width: 11, height: 17)
             hotspotOffset = .zero
         }
         CATransaction.begin()

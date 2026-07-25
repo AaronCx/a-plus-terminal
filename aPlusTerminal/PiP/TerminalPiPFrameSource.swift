@@ -83,12 +83,18 @@ enum TerminalTailWindow {
 @MainActor
 final class TerminalPiPFrameSource: PiPFrameSource {
     /// Default tail row count (brief §3.2 assumption — Aaron may retune).
-    nonisolated static let defaultTailRows = 10
+    nonisolated static let defaultTailRows = 14
 
     private weak var terminalView: TerminalEmulatorView?
     private let title: () -> String
     private let chip: () -> PiPSessionChip
-    private let tailRows: Int
+    /// Baseline rows shown at the default PiP window size; the effective
+    /// count grows with the window (see updateForRenderSize).
+    private let baseTailRows: Int
+    /// Current tail row count — adapts to the PiP window height so a bigger
+    /// window reveals MORE of the terminal instead of magnifying the same
+    /// rows (field feedback).
+    private var tailRows: Int
     private let renderer: TerminalPiPSurfaceRenderer
     /// Rows captured at the moment the user hit pause; nil while following.
     private var frozenRows: [String]?
@@ -117,11 +123,27 @@ final class TerminalPiPFrameSource: PiPFrameSource {
         self.restoreSessionID = sessionID
         self.title = title
         self.chip = chip
+        self.baseTailRows = tailRows
         self.tailRows = tailRows
         self.renderer = renderer
     }
 
     var preferredBufferSize: CGSize { renderer.size }
+
+    /// The PiP window's surface (buffer) aspect is fixed, so growing the
+    /// window uniformly scales the buffer. To reveal MORE rows in a bigger
+    /// window we render MORE rows into that same buffer — they draw smaller
+    /// but the enlarged window keeps them legible. Rows scale with the
+    /// window's longer dimension, floored at the baseline and capped at what
+    /// the terminal actually has.
+    func updateForRenderSize(_ size: CGSize) {
+        let reference: CGFloat = 300   // ~default PiP long-edge in points
+        let longEdge = max(size.width, size.height)
+        guard longEdge > 0 else { return }
+        let scaled = Int((CGFloat(baseTailRows) * longEdge / reference).rounded())
+        let available = terminalView.map { $0.getTerminal().rows } ?? scaled
+        tailRows = min(max(scaled, baseTailRows), max(baseTailRows, available))
+    }
 
     func currentModel() -> TerminalPiPSurfaceModel {
         let rows: [String]
@@ -154,8 +176,11 @@ final class TerminalPiPFrameSource: PiPFrameSource {
 /// Draws a surface model into a 32BGRA pixel buffer: a header row (title +
 /// state chip, plus the paused badge) above the tail rows, monospaced.
 struct TerminalPiPSurfaceRenderer {
-    /// Purpose-built surface resolution (brief §3.2: around 960×600).
-    var size = CGSize(width: 960, height: 600)
+    /// Purpose-built surface resolution. Taller than wide (3:4) so the PiP
+    /// window is a tall strip that fits many terminal rows — the terminal
+    /// pop-out was previously a 960×600 landscape that showed only a handful
+    /// of magnified rows (field feedback).
+    var size = CGSize(width: 900, height: 1200)
 
     func draw(_ model: TerminalPiPSurfaceModel, into pool: CVPixelBufferPool) -> CVPixelBuffer? {
         var leased: CVPixelBuffer?
