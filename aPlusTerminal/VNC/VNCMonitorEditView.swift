@@ -74,7 +74,8 @@ struct VNCMonitorEditView: View {
                         get: { server.cursorBridgeSSHServerID },
                         set: { server.cursorBridgeSSHServerID = $0 }
                     )) {
-                        Text("None").tag(UUID?.none)
+                        Text(autoBridgeName.map { "Automatic (\($0))" } ?? "Automatic")
+                            .tag(UUID?.none)
                         ForEach(sshServers) { ssh in
                             Text(ssh.name).tag(UUID?.some(ssh.id))
                         }
@@ -82,7 +83,7 @@ struct VNCMonitorEditView: View {
                 } header: {
                     Text("Cursor Bridge")
                 } footer: {
-                    Text("macOS screen sharing doesn't report where the mouse pointer is, so the monitor can only show a cursor for taps you make. Link this machine's saved SSH server and a+Terminal reads the real pointer position over SSH — the cursor then tracks the physical mouse and anything running on the Mac.")
+                    Text("macOS screen sharing doesn't report where the mouse pointer is, so on its own the monitor can only show a cursor for taps you make. When you have this machine saved as an SSH server, a+Terminal reads the real pointer position over SSH automatically — the cursor then tracks the physical mouse and anything running on the Mac. Pick a specific SSH server here to override the automatic match.")
                 }
 
                 if let errorMessage {
@@ -108,6 +109,14 @@ struct VNCMonitorEditView: View {
 
     private var sshServers: [Server] {
         serverStore.servers.filter { $0.kind == .ssh }
+    }
+
+    /// The SSH server the automatic match would pick (host match), for the
+    /// "Automatic (name)" label — so the user can see it will just work.
+    private var autoBridgeName: String? {
+        guard server.cursorBridgeSSHServerID == nil else { return nil }
+        let host = server.host.lowercased()
+        return sshServers.first { $0.host.lowercased() == host }?.name
     }
 
     private var footerText: String {
