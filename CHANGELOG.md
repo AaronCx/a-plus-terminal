@@ -5,13 +5,13 @@ unreleased work accumulates at the top.
 
 ## Unreleased
 
-- **Pop-Out Sessions (beta):** monitor a session in a floating
-  Picture-in-Picture window while using other apps. View-only by design — a
-  header with the session name and a running / waiting-for-input /
-  disconnected chip above the last rows of terminal output, updating live.
-  Tap the window to jump back to the session; the system pause button freezes
-  the view without touching the session. Off by default (Settings → Pop-Out),
-  with an optional auto pop-out on app switch. Never interrupts your music.
+- **Floating pop-out (Picture-in-Picture):** pop a Monitor (VNC) screen out
+  into a small floating window to keep watching your Mac while you use other
+  apps — the window shows live video of the screen. Tap it to jump back in;
+  the system pause button freezes it. (A connected terminal session can also
+  be popped out as a view-only surface.) Off by default (Settings →
+  Pop-Out), with an optional auto pop-out on app switch. Never interrupts
+  your music.
 - **Monitor cursor bridge:** link a monitor to the same machine's saved SSH
   server and the remote pointer's real position streams over SSH — the
   cursor now tracks the physical mouse and anything running on the Mac, not

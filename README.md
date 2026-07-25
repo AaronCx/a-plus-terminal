@@ -23,8 +23,7 @@ Free, tip-supported. No features are paywalled, ever.
 - Attach an image or file from your phone over the existing SSH connection.
 - On-device voice dictation straight into the terminal (never sent to a server).
 - Live Activities + Dynamic Island session awareness with tap-to-reattach.
-- **Pop-Out Sessions (beta):** watch a session's tail in a small floating Picture-in-Picture window while you use other apps — view-only monitoring with a running/waiting state chip and tap-to-return.
-- **Monitor (VNC, beta):** a window onto your computer's screen sharing (macOS ARD auth) — pinch-zoom, pan, and the same pop-out monitoring. View-only by default; opt-in **Control mode** adds tap-to-click, drag, right-click, and a keyboard sheet that can unlock a locked Mac. When you have the same machine saved as an SSH server, a+Terminal streams its real mouse pointer position over SSH so the cursor tracks your physical mouse (macOS screen sharing doesn't report it) — automatically, no setup.
+- **Monitor (VNC, beta):** a window onto your computer's screen sharing (macOS ARD auth) — pinch-zoom and pan. Pop the screen out into a floating Picture-in-Picture window to keep an eye on it while you use other apps. View-only by default; opt-in **Control mode** adds tap-to-click, drag, right-click, and a keyboard sheet that can unlock a locked Mac. When you have the same machine saved as an SSH server, a+Terminal streams its real mouse pointer position over SSH so the cursor tracks your physical mouse (macOS screen sharing doesn't report it) — automatically, no setup.
 - Reconnect where you left off: background drops offer reattach, with a live session picker when several multiplexer sessions are running.
 
 ## Privacy
