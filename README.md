@@ -24,6 +24,7 @@ Free, tip-supported. No features are paywalled, ever.
 - On-device voice dictation straight into the terminal (never sent to a server).
 - Live Activities + Dynamic Island session awareness with tap-to-reattach.
 - **Monitor (VNC, beta):** a window onto your computer's screen sharing (macOS ARD auth) — pinch-zoom and pan. Pop the screen out into a floating Picture-in-Picture window to keep an eye on it while you use other apps. View-only by default; opt-in **Control mode** adds tap-to-click, drag, right-click, and a keyboard sheet that can unlock a locked Mac. When you have the same machine saved as an SSH server, a+Terminal streams its real mouse pointer position over SSH so the cursor tracks your physical mouse (macOS screen sharing doesn't report it) — automatically, no setup.
+- **Localhost preview:** when a dev server on the machine you're SSH'd into prints `http://localhost:5173`, tap it. a+Terminal forwards that port over the SSH connection you already have and renders the page in the app — hot reload and WebSockets included, because it's a raw byte tunnel rather than a rewriting proxy. Nothing touches a third party and no account is involved; the tunnel's listener is bound to the phone's loopback only, so nothing else on your Wi-Fi can reach it. It's a preview, not a browser: it will only ever load loopback addresses, and it lives only while the app is in the foreground.
 - Reconnect where you left off: background drops offer reattach, with a live session picker when several multiplexer sessions are running.
 
 ## Privacy
@@ -37,6 +38,7 @@ Full policy: [privacy policy](https://aaroncx.github.io/a-plus-terminal/privacy/
 - iOS 26.0 or later, iPhone only.
 - A machine you can reach over SSH (password or key auth; ed25519 and ECDSA keys supported).
 - For Monitor mode: a machine with screen sharing / VNC enabled (macOS Screen Sharing works out of the box; reach it over Tailscale or an SSH tunnel).
+- For Preview: a dev server running on the machine you're already SSH'd into — no extra setup, no agent to install. The forwarded port is bound to the phone's loopback only, so no other device on your network can reach it.
 
 ## Support
 

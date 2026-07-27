@@ -5,6 +5,18 @@ unreleased work accumulates at the top.
 
 ## Unreleased
 
+- **In-app localhost preview:** a dev server running on the machine you're
+  SSH'd into can now be viewed inside a+Terminal. Tap a `http://localhost:…`
+  link in the terminal, or pick a port from the preview sheet — a+Terminal
+  detects them from what your server printed and from what's actually
+  listening — and the port is forwarded over the SSH connection you already
+  have. Hot reload and WebSockets work, because the tunnel carries raw bytes
+  instead of rewriting the page. Previously such a link opened in Safari,
+  where `localhost` meant the phone and the load simply failed.
+  Loopback-only and foreground-only by design: the listener on the phone is
+  bound to `127.0.0.1` so nothing else on your network can reach it, the
+  preview refuses to navigate anywhere that isn't loopback, and it keeps no
+  cookies or site data.
 - **Floating pop-out (Picture-in-Picture):** pop a Monitor (VNC) screen out
   into a small floating window to keep watching your Mac while you use other
   apps — the window shows live video of the screen. Tap it to jump back in;

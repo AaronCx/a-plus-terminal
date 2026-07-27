@@ -44,6 +44,15 @@ we've set up for review. The connection is the app's core function.
    surface, not a remote-control surface: it forwards no input. Same
    user-initiated PiP start rule as above.
 
+8. Optional — Preview: if you start any web server on the demo box (for
+   example `python3 -m http.server 8000`), tap the "Preview" button in the
+   terminal toolbar. a+Terminal forwards that port over the SSH connection
+   you already opened and renders the page in-app. This is a development
+   preview of the user's own server, not a web browser: it can only ever
+   load loopback addresses (127.0.0.1 / localhost), it stores no cookies or
+   site data, and any attempt to navigate elsewhere is blocked and offered
+   to Safari instead.
+
 Notes:
 - No account or signup is required. The app collects zero data; the only network
   traffic is your own connection to your own machines (the SSH host above, and —
@@ -57,6 +66,40 @@ This demo server is temporary and will be taken offline after review. Thank you!
 ```
 
 ---
+
+## Localhost preview — why it is not a web browser (Guidelines 4.7, 2.5.6)
+
+The preview renders a development server running on the machine the user is
+already SSH'd into. Three properties keep it a developer tool rather than an
+embedded browser, and all three are enforced in code, not by convention:
+
+1. **Loopback only, on both ends.** The SSH channel always dials
+   `127.0.0.1:<port>` on the *remote* box — never a host the page names. On
+   the phone, the `WKNavigationDelegate` allows navigation only to loopback
+   hosts (`localhost`, `127.0.0.0/8`, `::1`); everything else is cancelled and
+   offered to Safari. Lookalikes such as `localhost.evil.com` are rejected by
+   the same check, which is unit-tested.
+2. **Nothing persists.** `websiteDataStore = .nonPersistent()`, so no cookies,
+   localStorage, or caches survive the sheet. There is no `WKUIDelegate`, so
+   `target=_blank` opens nothing. This is what keeps the app's "Data Not
+   Collected" declaration accurate.
+3. **The listener is not on the network.** The phone-side listener is pinned
+   with `NWParameters.requiredLocalEndpoint = 127.0.0.1`, so the user's dev
+   server is never republished to the Wi-Fi. This was verified empirically
+   against a wildcard-bound control (the control was reachable from another
+   address on the same host; the pinned listener was refused) and is covered
+   by a test that fails if the bind ever widens.
+
+**App Transport Security:** no ATS exception was required. Plain-HTTP loads to
+`http://127.0.0.1:<port>` inside `WKWebView` are permitted with the shipped
+Info.plist untouched, confirmed by an on-simulator spike before the feature was
+designed. The app therefore ships with **no** `NSAllowsArbitraryLoads`,
+`NSAllowsArbitraryLoadsInWebContent`, `NSAllowsLocalNetworking`, or
+`NSExceptionDomains` entries — if a future change appears to need one, that is a
+signal the loopback-only invariant has been broken somewhere.
+
+The feature is also foreground-only: iOS suspends the app, the listener dies
+with it. That is stated plainly in the UI rather than left for users to discover.
 
 ## Backup demo video
 
