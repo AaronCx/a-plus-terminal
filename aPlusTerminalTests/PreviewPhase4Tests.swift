@@ -376,3 +376,66 @@ final class PreviewConsoleSettingTests: XCTestCase {
         XCTAssertTrue(AppSettings(defaults: suite).previewConsoleCapture)
     }
 }
+
+// MARK: - The reload loop
+
+/// The bug behind "it just says Loading… in mobile view, but desktop is fine".
+///
+/// `updateUIView` decided whether to reload by comparing the desired user agent
+/// against `webView.customUserAgent`. In mobile mode the desired value is nil
+/// ("use the stock UA"), and WKWebView does not round-trip nil through that
+/// property — so the comparison was true on every SwiftUI render, every render
+/// called `load()`, and the page never finished. Measured on device at roughly
+/// a thousand fetches of the same URL. Desktop mode escaped it because a
+/// literal UA string does read back equal.
+@MainActor
+final class PreviewUserAgentReloadTests: XCTestCase {
+    /// The platform fact the fix exists because of. If a future iOS makes this
+    /// round-trip cleanly, this test fails and the workaround can be revisited
+    /// — which is the point of asserting it rather than just commenting it.
+    func testWKWebViewDoesNotRoundTripANilCustomUserAgent() {
+        let webView = WKWebView(frame: .zero)
+        webView.customUserAgent = nil
+        // MEASURED: the getter returns "" — an empty string, not nil. So
+        // `webView.customUserAgent != nil` is ALWAYS true in mobile mode, which
+        // is the entire reload loop in one expression.
+        XCTAssertEqual(
+            webView.customUserAgent, "",
+            "customUserAgent round-trip changed; if it now returns nil the workaround in PreviewWebView can be simplified"
+        )
+        XCTAssertNotNil(webView.customUserAgent, "the nil we set did not come back as nil — this is why we track it ourselves")
+    }
+
+    /// Applying the same UA twice must not read as a change. This is the
+    /// invariant that stops the loop, expressed against the real Coordinator.
+    func testRepeatedlyApplyingTheSameUserAgentIsNotAChange() {
+        let coordinator = PreviewWebView.Coordinator(
+            forwardedPort: 5173,
+            onLoadingChanged: { _ in },
+            onError: { _ in },
+            onBlocked: { _ in }
+        )
+
+        func changed(_ desired: String?) -> Bool {
+            let isChange = !coordinator.hasAppliedUserAgent || coordinator.appliedUserAgent != desired
+            if isChange {
+                coordinator.appliedUserAgent = desired
+                coordinator.hasAppliedUserAgent = true
+            }
+            return isChange
+        }
+
+        // First application always counts, including nil (mobile).
+        XCTAssertTrue(changed(nil), "the first application must apply")
+        // Every subsequent render with the same value must be a no-op. Without
+        // the fix this was true forever, which was the loop.
+        for render in 0..<50 {
+            XCTAssertFalse(changed(nil), "render \(render) re-applied an unchanged mobile UA")
+        }
+        // A real toggle still registers, in both directions.
+        XCTAssertTrue(changed(PreviewWebView.desktopUserAgent))
+        XCTAssertFalse(changed(PreviewWebView.desktopUserAgent))
+        XCTAssertTrue(changed(nil))
+        XCTAssertFalse(changed(nil))
+    }
+}

@@ -789,6 +789,7 @@ struct PreviewWebView: UIViewRepresentable {
             PreviewConsoleBridge.install(in: configuration.userContentController, console: console)
         }
 
+        previewTrace("UI makeUIView -> NEW WKWebView (coordinator recreated)")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         // No `uiDelegate` — ON PURPOSE, and it must stay that way. Without a
@@ -820,9 +821,24 @@ struct PreviewWebView: UIViewRepresentable {
         context.coordinator.onError = onError
         context.coordinator.onBlocked = onBlocked
 
-        let userAgentChanged = webView.customUserAgent != customUserAgent
+        // Compare against what WE last applied, never against
+        // `webView.customUserAgent`.
+        //
+        // WKWebView does not round-trip nil through that property: in mobile
+        // mode `customUserAgent` is nil (meaning "use the stock UA"), and
+        // reading it back does not return nil, so `webView.customUserAgent !=
+        // customUserAgent` was true on EVERY SwiftUI render. Every render
+        // therefore called `load()`, which re-rendered, which loaded… a reload
+        // loop that never let the page finish, measured on device at ~1000
+        // fetches of the same URL. Desktop mode was unaffected because a
+        // literal UA string does read back equal — which is exactly why the
+        // field report was "desktop view works, mobile doesn't".
+        let userAgentChanged = !context.coordinator.hasAppliedUserAgent
+            || context.coordinator.appliedUserAgent != customUserAgent
         if userAgentChanged {
             webView.customUserAgent = customUserAgent
+            context.coordinator.appliedUserAgent = customUserAgent
+            context.coordinator.hasAppliedUserAgent = true
             // A UA swap only takes effect on the next request — the loaded DOM
             // was built for the old one — so the toggle has to reload, and the
             // reload is driven from here rather than from a token bump in the
@@ -833,6 +849,7 @@ struct PreviewWebView: UIViewRepresentable {
             || context.coordinator.loadedURL != url
             || context.coordinator.loadedToken != reloadToken
         guard needsLoad else { return }
+        previewTrace("UI load(): uaChanged=\(userAgentChanged) urlChanged=\(context.coordinator.loadedURL != url) tokenChanged=\(context.coordinator.loadedToken != reloadToken)")
         context.coordinator.loadedURL = url
         context.coordinator.loadedToken = reloadToken
         // Cache-defeating by default: a dev server rebuilds its bundle under
@@ -855,6 +872,11 @@ struct PreviewWebView: UIViewRepresentable {
         /// render needs a real `load()`.
         var loadedURL: URL?
         var loadedToken: Int?
+        /// The user agent we last applied, and whether we have applied one at
+        /// all. Tracked here because WKWebView's own property cannot be
+        /// compared against — see `updateUIView`.
+        var appliedUserAgent: String?
+        var hasAppliedUserAgent = false
 
         init(
             forwardedPort: Int,
