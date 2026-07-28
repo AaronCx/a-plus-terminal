@@ -39,6 +39,11 @@ struct PreviewScreen: View {
     /// connection (see `PortDetector.listenerCommand`), and that channel
     /// competes with the user's own typing on the same transport.
     static let listenerRefreshInterval: TimeInterval = 10
+    /// Retry cadence before the first snapshot lands. Short on purpose: the
+    /// steady-state interval exists to keep exec channels off a link the user
+    /// is typing on, but there is nothing to protect yet when the picker is
+    /// empty and the user is staring at it.
+    static let firstListenerRetryInterval: TimeInterval = 2
 
     /// Path of the selected `DetectedPort`, so a scraped "http://localhost:5173/admin"
     /// lands on /admin instead of the app root.
@@ -51,6 +56,11 @@ struct PreviewScreen: View {
     @State private var reloadToken = 0
     @State private var isStarting = false
     @State private var isRefreshing = false
+    /// Whether a listener snapshot has ever landed for this sheet. Until one
+    /// has, an empty list means "still looking", not "nothing there".
+    @State private var hasLoadedPorts = false
+    /// The last snapshot attempt timed out or errored.
+    @State private var listenerCheckFailed = false
     @State private var isLoading = false
     @State private var loadError: String?
     /// Most recent navigation the guard refused, surfaced as a dismissible
@@ -205,8 +215,16 @@ struct PreviewScreen: View {
                             path: session.portDetector.ports.first { $0.port == initialPort }?.path)
             }
             while !Task.isCancelled {
-                await session.refreshListenerSnapshot()
-                try? await Task.sleep(for: .seconds(Self.listenerRefreshInterval))
+                let ok = await session.refreshListenerSnapshot()
+                listenerCheckFailed = !ok
+                if ok { hasLoadedPorts = true }
+                // Until the first snapshot lands, retry quickly: a stalled or
+                // slow first check is exactly the case the user sees as "it
+                // just never loads". Once one has landed, settle to the slow
+                // cadence — the note above explains why that must stay slow.
+                try? await Task.sleep(for: hasLoadedPorts
+                    ? .seconds(Self.listenerRefreshInterval)
+                    : .seconds(Self.firstListenerRetryInterval))
             }
         }
         .onDisappear {
@@ -291,9 +309,26 @@ struct PreviewScreen: View {
 
             Section {
                 if session.portDetector.ports.isEmpty {
-                    Text("Nothing detected yet. Start a dev server in this session, or type its port below.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    if !hasLoadedPorts && !listenerCheckFailed {
+                        // The first check runs over an exec channel on a link
+                        // the user is also typing on, so it is not instant.
+                        // Saying "nothing detected" while it is still in
+                        // flight reads as a broken feature.
+                        HStack(spacing: 9) {
+                            ProgressView().controlSize(.small)
+                            Text("Looking for servers on \(session.server.name)…")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if listenerCheckFailed {
+                        Text("Couldn't check for listeners — the connection may be busy. Retrying, or tap refresh above.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Nothing detected yet. Start a dev server in this session, or type its port below.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
                 } else {
                     ForEach(session.portDetector.ports) { port in
                         PortPickerRow(port: port) {
@@ -310,7 +345,9 @@ struct PreviewScreen: View {
                     Button {
                         Task {
                             isRefreshing = true
-                            await session.refreshListenerSnapshot()
+                            let ok = await session.refreshListenerSnapshot()
+                            listenerCheckFailed = !ok
+                            if ok { hasLoadedPorts = true }
                             isRefreshing = false
                         }
                     } label: {

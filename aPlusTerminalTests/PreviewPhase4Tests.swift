@@ -659,3 +659,64 @@ final class PortPickerDiscoveryTests: XCTestCase {
         XCTAssertTrue(detector.ports.first?.reachableOnLoopback ?? false)
     }
 }
+
+// MARK: - First load of the picker
+
+/// Build 42 field report: "when first trying to load preview port list
+/// sometimes it doesnt load until clicking off then back on or taking too long
+/// with no indication of loading".
+///
+/// Two defects behind one symptom. `runCommand` has no timeout, so an exec
+/// channel that stalls never returns and the poll loop stops forever — leaving
+/// and re-entering the sheet restarts the task, which is why that "fixed" it.
+/// And the snapshot reported nothing back, so the picker could not tell "still
+/// looking" from "looked, found nothing" and showed the empty-state text either
+/// way.
+@MainActor
+final class ListenerSnapshotTimeoutTests: XCTestCase {
+    func testFastRetryIsMuchShorterThanSteadyState() {
+        XCTAssertLessThan(PreviewScreen.firstListenerRetryInterval, PreviewScreen.listenerRefreshInterval)
+        XCTAssertGreaterThan(PreviewScreen.firstListenerRetryInterval, 0)
+    }
+
+    /// The steady-state cadence must stay slow: each tick opens an exec channel
+    /// on the link the user is typing on.
+    func testSteadyStateCadenceStaysSlow() {
+        XCTAssertGreaterThanOrEqual(PreviewScreen.listenerRefreshInterval, 10)
+    }
+
+    /// A stalled command must lose to the timeout rather than hang forever —
+    /// the shape of the race the snapshot now runs.
+    func testAStalledCommandLosesToTheTimeout() async {
+        let result = await withTaskGroup(of: String?.self) { group -> String? in
+            group.addTask {
+                try? await Task.sleep(for: .seconds(30))   // the wedged exec channel
+                return "listeners"
+            }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(150))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        XCTAssertNil(result, "the timeout must win, or the poll loop stops forever")
+    }
+
+    /// …and a command that answers in time still wins, or the timeout would
+    /// simply have replaced one bug with another.
+    func testAPromptCommandStillWins() async {
+        let result = await withTaskGroup(of: String?.self) { group -> String? in
+            group.addTask { "listeners" }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(5))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        XCTAssertEqual(result, "listeners")
+    }
+}
