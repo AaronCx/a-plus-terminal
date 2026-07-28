@@ -57,6 +57,16 @@ final class AppSettings {
         didSet { defaults.set(autoPopOutOnAppSwitch, forKey: Keys.autoPopOutOnAppSwitch) }
     }
 
+    /// Preview console capture (preview brief §Phase 4): mirrors the previewed
+    /// page's `console` output into a pane inside the preview sheet, because a
+    /// phone has no devtools. OFF by default and deliberately a setting rather
+    /// than always-on: this is the only part of the preview that injects
+    /// JavaScript into the user's own page. While off, no `WKUserScript` is
+    /// installed and no script-message handler is registered at all.
+    var previewConsoleCapture: Bool {
+        didSet { defaults.set(previewConsoleCapture, forKey: Keys.previewConsoleCapture) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -80,6 +90,8 @@ final class AppSettings {
         // Both default OFF for v1 (brief §3.3).
         self.popOutSessions = defaults.bool(forKey: Keys.popOutSessions)
         self.autoPopOutOnAppSwitch = defaults.bool(forKey: Keys.autoPopOutOnAppSwitch)
+        // OFF by default — JS injection into the user's page is opt-in.
+        self.previewConsoleCapture = defaults.bool(forKey: Keys.previewConsoleCapture)
     }
 
     private enum Keys {
@@ -92,6 +104,7 @@ final class AppSettings {
         static let keyBarItems = "keyBarItems"
         static let popOutSessions = "popOutSessions"
         static let autoPopOutOnAppSwitch = "autoPopOutOnAppSwitch"
+        static let previewConsoleCapture = "previewConsoleCapture"
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"

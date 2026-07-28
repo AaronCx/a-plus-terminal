@@ -1,0 +1,378 @@
+import CoreVideo
+import UIKit
+import WebKit
+import XCTest
+@testable import aPlusTerminal
+
+// MARK: - Console: parsing a payload the page fully controls
+
+final class PreviewConsoleParsingTests: XCTestCase {
+    private func entry(_ body: Any) -> PreviewConsoleEntry? {
+        PreviewConsole.entry(from: body, id: 1, at: Date(timeIntervalSince1970: 0))
+    }
+
+    func testParsesAWellFormedMessage() {
+        let parsed = entry(["level": "warn", "text": "deprecated API"])
+        XCTAssertEqual(parsed?.level, .warn)
+        XCTAssertEqual(parsed?.text, "deprecated API")
+    }
+
+    func testEveryLevelRoundTrips() {
+        for level in ["log", "warn", "error", "info", "debug"] {
+            XCTAssertEqual(entry(["level": level, "text": "x"])?.level.rawValue, level)
+        }
+    }
+
+    /// The text is the part carrying information — an unrecognised level must
+    /// degrade, not drop the line.
+    func testUnknownOrMissingLevelDegradesToLog() {
+        XCTAssertEqual(entry(["level": "catastrophe", "text": "x"])?.level, .log)
+        XCTAssertEqual(entry(["text": "x"])?.level, .log)
+        XCTAssertEqual(entry(["level": 42, "text": "x"])?.level, .log)
+    }
+
+    func testLevelIsCaseInsensitive() {
+        XCTAssertEqual(entry(["level": "ERROR", "text": "x"])?.level, .error)
+    }
+
+    /// `postMessage` is reachable from any script in the document, so none of
+    /// this is hypothetical — the page can post whatever it likes.
+    func testRejectsBodiesWithNothingDisplayableInThem() {
+        XCTAssertNil(entry("just a string"))
+        XCTAssertNil(entry(42))
+        XCTAssertNil(entry([1, 2, 3]))
+        XCTAssertNil(entry([String: Any]()))
+        XCTAssertNil(entry(["level": "log"]))              // no text
+        XCTAssertNil(entry(["level": "log", "text": 99]))  // text not a String
+        XCTAssertNil(entry(NSNull()))
+    }
+
+    /// A page can post far more than our own script would ever send.
+    func testEnormousTextIsClipped() {
+        let huge = String(repeating: "A", count: 5_000_000)
+        let parsed = entry(["level": "log", "text": huge])
+        let text = try? XCTUnwrap(parsed?.text)
+        XCTAssertNotNil(text)
+        XCTAssertLessThanOrEqual(
+            text?.count ?? .max,
+            PreviewConsole.maxMessageLength + 1,   // +1 for the ellipsis
+            "a multi-megabyte log line was not clipped"
+        )
+        XCTAssertEqual(text?.last, "…")
+    }
+
+    /// A level string can be enormous too — it must not be lowercased in full.
+    func testEnormousLevelDoesNotExplode() {
+        let parsed = entry(["level": String(repeating: "z", count: 1_000_000), "text": "x"])
+        XCTAssertEqual(parsed?.level, .log)
+    }
+
+    /// Dev servers log the same strings they would write to a TTY, escapes and
+    /// all. The pane is a SwiftUI text view, not a terminal.
+    func testControlCharactersAreStrippedButNewlinesSurvive() {
+        let parsed = entry(["level": "log", "text": "a\u{1B}[31mred\u{07}\nsecond\tline"])
+        let text = parsed?.text ?? ""
+        XCTAssertFalse(text.contains("\u{1B}"), "escape byte survived")
+        XCTAssertFalse(text.contains("\u{07}"), "BEL survived")
+        XCTAssertTrue(text.contains("\n"), "newline was stripped")
+        XCTAssertTrue(text.contains("\t"), "tab was stripped")
+    }
+
+    /// THE blocker this suite exists to prevent regressing. Control characters
+    /// used to be dropped WITHOUT counting against the cap, so a page logging
+    /// megabytes of ANSI escapes — which dev servers do constantly, since it's
+    /// the same bytes they'd write to a TTY — walked the entire string on the
+    /// main thread. `record` runs main-actor, so that was a hang, and a page
+    /// can fire it in a loop: a watchdog kill taking the user's SSH sessions
+    /// with it. This must complete in milliseconds, not seconds.
+    func testAMegabyteOfControlCharactersDoesNotHangTheMainThread() {
+        let hostile = String(repeating: "\u{1B}", count: 5_000_000)
+        let started = Date()
+        let parsed = entry(["level": "log", "text": hostile])
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started), 1.0,
+            "clip() walked the whole control-character string — this is the main-thread hang"
+        )
+        // Everything was a control character, so nothing displayable survives.
+        XCTAssertTrue((parsed?.text ?? "").count <= 1)
+    }
+
+    /// A Character is an unbounded grapheme cluster, so a cap counted in
+    /// Characters bounds neither memory nor work: one "a" plus 5M combining
+    /// marks is a single Character.
+    func testACombiningMarkBombIsBounded() {
+        let bomb = "a" + String(repeating: "\u{301}", count: 5_000_000)
+        let started = Date()
+        let parsed = entry(["level": "log", "text": bomb])
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0, "grapheme-cluster bomb was not bounded")
+        XCTAssertLessThan((parsed?.text ?? "").unicodeScalars.count, 100_000)
+    }
+
+    func testUnicodeSurvivesIntact() {
+        let parsed = entry(["level": "log", "text": "héllo 🌍 ünïcode"])
+        XCTAssertEqual(parsed?.text, "héllo 🌍 ünïcode")
+    }
+}
+
+@MainActor
+final class PreviewConsoleTests: XCTestCase {
+    func testAppendEvictsOldestBeyondTheCap() {
+        let console = PreviewConsole()
+        for index in 0..<(PreviewConsole.maxEntries + 40) {
+            console.record(["level": "log", "text": "line \(index)"])
+        }
+        XCTAssertEqual(console.entries.count, PreviewConsole.maxEntries)
+        XCTAssertEqual(console.entries.first?.text, "line 40", "wrong end evicted")
+        XCTAssertEqual(console.entries.last?.text, "line \(PreviewConsole.maxEntries + 39)")
+    }
+
+    /// Ids must never be reused, or SwiftUI's ForEach diffing animates the
+    /// wrong row after a clear.
+    func testIDsAreNeverReusedAcrossClear() {
+        let console = PreviewConsole()
+        console.record(["level": "log", "text": "a"])
+        let first = console.entries.first?.id
+        console.clear()
+        console.record(["level": "log", "text": "b"])
+        XCTAssertNotEqual(console.entries.first?.id, first)
+        XCTAssertTrue(console.entries.count == 1)
+    }
+
+    func testJunkBodiesDoNotConsumeIDsOrAppear() {
+        let console = PreviewConsole()
+        console.record("nonsense")
+        console.record(42)
+        XCTAssertTrue(console.entries.isEmpty)
+    }
+
+    func testClearEmptiesTheLog() {
+        let console = PreviewConsole()
+        console.record(["level": "log", "text": "a"])
+        console.clear()
+        XCTAssertTrue(console.entries.isEmpty)
+    }
+}
+
+/// The injected source is the code that runs inside a user's own page, so the
+/// properties that make it safe are asserted rather than assumed.
+final class PreviewConsoleScriptTests: XCTestCase {
+    private let source = PreviewConsole.userScriptSource()
+
+    func testWrapsEveryConsoleLevel() {
+        for level in ["log", "warn", "error", "info", "debug"] {
+            XCTAssertTrue(source.contains("'\(level)'"), "level \(level) is not wrapped")
+        }
+    }
+
+    /// If the wrapper ever stops calling through, this panel and Web Inspector
+    /// disagree — the worst possible property for a debugging tool.
+    func testCallsThroughToTheOriginalConsole() {
+        XCTAssertTrue(source.contains("original.apply(target, arguments)"))
+    }
+
+    /// A getter on a logged object can call console.log again; without the
+    /// latch that recurses inside the user's page.
+    func testHasAReentrancyLatch() {
+        XCTAssertTrue(source.contains("capturing"))
+    }
+
+    func testGuardsAgainstAMissingMessageHandler() {
+        XCTAssertTrue(source.contains("w.webkit && w.webkit.messageHandlers"))
+    }
+
+    func testHandlesCircularStructures() {
+        XCTAssertTrue(source.contains("[Circular]"))
+    }
+
+    func testIsWrappedInATopLevelTryCatch() {
+        XCTAssertTrue(source.hasPrefix("(function () {\n  try {"))
+    }
+
+    func testCapsMessageLength() {
+        XCTAssertTrue(source.contains("var LIMIT = \(PreviewConsole.maxMessageLength);"))
+    }
+}
+
+// MARK: - The pop-out surface
+
+@MainActor
+final class PreviewPiPFrameSourceTests: XCTestCase {
+    private func pool(for size: CGSize) throws -> CVPixelBufferPool {
+        try XCTUnwrap(PiPPixelBufferPool.make(size: size))
+    }
+
+    /// The pop-out window appears the instant the user taps, long before the
+    /// first async capture lands. A nil frame there reads as a crash.
+    func testRendersAPlaceholderFrameBeforeAnyCaptureLands() throws {
+        let source = PreviewPiPFrameSource(
+            webView: nil,
+            sessionID: UUID(),
+            title: { "Dev box" },
+            subtitle: { "localhost:5173" }
+        )
+        let buffer = source.renderFrame(into: try pool(for: source.preferredBufferSize))
+        XCTAssertNotNil(buffer, "no frame produced before the first capture")
+        XCTAssertFalse(Self.isUniform(try XCTUnwrap(buffer)), "placeholder frame was blank")
+    }
+
+    func testModelReflectsTitleSubtitleAndPause() {
+        let source = PreviewPiPFrameSource(
+            webView: nil,
+            sessionID: nil,
+            title: { "Dev box" },
+            subtitle: { "localhost:5173" }
+        )
+        XCTAssertEqual(source.currentModel().title, "Dev box")
+        XCTAssertEqual(source.currentModel().subtitle, "localhost:5173")
+        XCTAssertFalse(source.currentModel().paused)
+        XCTAssertFalse(source.currentModel().hasImage)
+
+        source.followSuspended = true
+        XCTAssertTrue(source.currentModel().paused)
+    }
+
+    func testRestoreSessionIDIsCarried() {
+        let id = UUID()
+        let source = PreviewPiPFrameSource(webView: nil, sessionID: id, title: { "" }, subtitle: { nil })
+        XCTAssertEqual(source.restoreSessionID, id)
+    }
+
+    /// A web page has no discrete unit to reveal more of, unlike terminal rows.
+    func testUpdateForRenderSizeIsANoOp() {
+        let source = PreviewPiPFrameSource(webView: nil, sessionID: nil, title: { "t" }, subtitle: { nil })
+        let before = source.preferredBufferSize
+        source.updateForRenderSize(CGSize(width: 900, height: 600))
+        XCTAssertEqual(source.preferredBufferSize, before)
+    }
+
+    /// detach() must stop the capture loop; a source still snapshotting for a
+    /// window that is gone burns ~25 ms of main thread every interval.
+    func testDetachStopsTheCaptureLoopAndFiresOnDetach() async throws {
+        let source = PreviewPiPFrameSource(webView: nil, sessionID: nil, title: { "t" }, subtitle: { nil })
+        var detached = false
+        source.onDetach = { detached = true }
+        source.onInvalidate = {}          // engine attaches → loop starts
+        source.detach()
+        XCTAssertTrue(detached)
+        XCTAssertNil(source.onInvalidate, "invalidation hook survived detach")
+    }
+
+    /// The blankness check is what decides the capture strategy, so it has to
+    /// actually distinguish a flat rectangle from real content.
+    func testIsBlankDistinguishesFlatFromContent() {
+        XCTAssertTrue(PreviewPiPFrameSource.isBlank(Self.solid(.white)))
+        XCTAssertTrue(PreviewPiPFrameSource.isBlank(Self.solid(.black)))
+        XCTAssertFalse(PreviewPiPFrameSource.isBlank(Self.halves()))
+    }
+
+    func testSurfaceRendererProducesDistinctBytesForPausedAndRunning() throws {
+        let renderer = PreviewPiPSurfaceRenderer()
+        let pool = try self.pool(for: renderer.size)
+        let running = PreviewPiPSurfaceModel(title: "Dev", subtitle: "localhost:5173", paused: false, hasImage: false)
+        let paused = PreviewPiPSurfaceModel(title: "Dev", subtitle: "localhost:5173", paused: true, hasImage: false)
+        let a = try XCTUnwrap(renderer.draw(running, image: nil, into: pool))
+        let b = try XCTUnwrap(renderer.draw(paused, image: nil, into: pool))
+        XCTAssertNotEqual(Self.bytes(a), Self.bytes(b), "the paused badge never reached the pixels")
+    }
+
+    /// A dead web view must read as dead. Presenting the last captured frame
+    /// beside a live-looking "localhost:5173" is how a user ends up watching a
+    /// tunnel that no longer exists and believing it.
+    func testAVanishedWebViewReadsAsStale() {
+        let source = PreviewPiPFrameSource(webView: nil, sessionID: nil, title: { "Dev" }, subtitle: { "localhost:5173" })
+        XCTAssertTrue(source.currentModel().isStale)
+    }
+
+    /// Paused is user-initiated and already explained; it must not be
+    /// overwritten by the staleness badge.
+    func testPausedOutranksStale() {
+        let source = PreviewPiPFrameSource(webView: nil, sessionID: nil, title: { "Dev" }, subtitle: { nil })
+        source.followSuspended = true
+        let model = source.currentModel()
+        XCTAssertTrue(model.paused)
+        XCTAssertFalse(model.isStale, "a paused surface must not also claim to be stale")
+    }
+
+    func testStaleSurfaceRendersDifferentlyFromLive() throws {
+        let renderer = PreviewPiPSurfaceRenderer()
+        let pool = try self.pool(for: renderer.size)
+        let live = PreviewPiPSurfaceModel(title: "Dev", subtitle: "localhost:5173", paused: false, isStale: false, hasImage: false)
+        let stale = PreviewPiPSurfaceModel(title: "Dev", subtitle: "localhost:5173", paused: false, isStale: true, hasImage: false)
+        let a = try XCTUnwrap(renderer.draw(live, image: nil, into: pool))
+        let b = try XCTUnwrap(renderer.draw(stale, image: nil, into: pool))
+        XCTAssertNotEqual(Self.bytes(a), Self.bytes(b), "the staleness badge never reached the pixels")
+    }
+
+    /// The blank check drives the capture-strategy decision, so a coloured
+    /// page must never read as blank. Sampling only the red channel made a
+    /// blue gradient look uniform.
+    func testIsBlankUsesAllChannelsNotJustRed() {
+        let blueGradient = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { ctx in
+            for row in 0..<40 {
+                UIColor(red: 0, green: 0, blue: CGFloat(row) / 39.0, alpha: 1).setFill()
+                ctx.fill(CGRect(x: 0, y: row, width: 40, height: 1))
+            }
+        }
+        XCTAssertFalse(
+            PreviewPiPFrameSource.isBlank(blueGradient),
+            "a page with a constant red channel but obvious blue variation read as blank"
+        )
+    }
+
+    // MARK: helpers
+
+    private static func solid(_ color: UIColor) -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { ctx in
+            color.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 40, height: 40))
+        }
+    }
+
+    private static func halves() -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { ctx in
+            UIColor.black.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 40, height: 40))
+            UIColor.white.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 40, height: 20))
+        }
+    }
+
+    private static func bytes(_ buffer: CVPixelBuffer) -> Data {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return Data() }
+        return Data(bytes: base, count: CVPixelBufferGetDataSize(buffer))
+    }
+
+    private static func isUniform(_ buffer: CVPixelBuffer) -> Bool {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return true }
+        let count = CVPixelBufferGetDataSize(buffer)
+        let raw = base.assumingMemoryBound(to: UInt8.self)
+        var minV: UInt8 = 255, maxV: UInt8 = 0
+        for index in stride(from: 0, to: count, by: 97) {
+            minV = min(minV, raw[index]); maxV = max(maxV, raw[index])
+        }
+        return Int(maxV) - Int(minV) < 8
+    }
+}
+
+// MARK: - The setting that gates all of it
+
+final class PreviewConsoleSettingTests: XCTestCase {
+    func testConsoleCaptureIsOffByDefault() throws {
+        let suite = try XCTUnwrap(UserDefaults(suiteName: "preview.console.default.\(UUID().uuidString)"))
+        XCTAssertFalse(
+            AppSettings(defaults: suite).previewConsoleCapture,
+            "JS injection into the user's page must be opt-in"
+        )
+    }
+
+    func testConsoleCapturePersists() throws {
+        let name = "preview.console.persist.\(UUID().uuidString)"
+        let suite = try XCTUnwrap(UserDefaults(suiteName: name))
+        AppSettings(defaults: suite).previewConsoleCapture = true
+        XCTAssertTrue(AppSettings(defaults: suite).previewConsoleCapture)
+    }
+}

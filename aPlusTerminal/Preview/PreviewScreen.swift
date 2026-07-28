@@ -20,6 +20,8 @@ import WebKit
 /// opposite case: that URL is a real remote address Safari can actually reach.)
 struct PreviewScreen: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppSettings.self) private var settings
+    @Environment(PiPCoordinator.self) private var pip
 
     let session: TerminalSession
 
@@ -61,6 +63,13 @@ struct PreviewScreen: View {
     /// Set in `.onDisappear`. `start()` re-reads it after its awaits — see the
     /// note there about the forward that outlives its sheet.
     @State private var isDismissed = false
+    /// Weak handle to the live web view — see `PreviewWebViewHandle`. Held so
+    /// the pop-out button can hand the view to the PiP engine.
+    @State private var webViewHandle = PreviewWebViewHandle()
+    /// Captured page console. Lives with the sheet — closing it discards
+    /// every line, same as the non-persistent website data store.
+    @State private var console = PreviewConsole()
+    @State private var showConsole = false
 
     private var forward: SSHPortForward? { session.previewForward }
 
@@ -92,6 +101,10 @@ struct PreviewScreen: View {
 
                 content
 
+                if showConsole, settings.previewConsoleCapture {
+                    consolePane
+                }
+
                 foregroundOnlyNote
             }
             .navigationTitle(navigationTitle)
@@ -113,6 +126,32 @@ struct PreviewScreen: View {
                             Image(systemName: "arrow.clockwise")
                         }
                         .accessibilityLabel("Reload Preview")
+                    }
+                    // Pop-out: the only way to keep the tunnel alive while
+                    // using another app (see PreviewPiPFrameSource).
+                    if pip.isAvailable {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                pip.popOut(
+                                    preview: webViewHandle,
+                                    session: session,
+                                    subtitle: { forward.map { "localhost:\($0.remotePort)" } }
+                                )
+                            } label: {
+                                Image(systemName: "pip.enter")
+                            }
+                            .accessibilityLabel("Pop Out Preview")
+                        }
+                    }
+                    if settings.previewConsoleCapture {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                showConsole.toggle()
+                            } label: {
+                                Image(systemName: showConsole ? "terminal.fill" : "terminal")
+                            }
+                            .accessibilityLabel(showConsole ? "Hide Console" : "Show Console")
+                        }
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
@@ -169,7 +208,10 @@ struct PreviewScreen: View {
                 try? await Task.sleep(for: .seconds(Self.listenerRefreshInterval))
             }
         }
-        .onDisappear { isDismissed = true }
+        .onDisappear {
+            isDismissed = true
+            pip.previewScreenDisappeared(webViewHandle)
+        }
     }
 
     private var navigationTitle: String {
@@ -195,11 +237,18 @@ struct PreviewScreen: View {
                     forwardedPort: port,
                     contentRules: contentRules,
                     customUserAgent: wantsDesktopLayout ? PreviewWebView.desktopUserAgent : nil,
+                    handle: webViewHandle,
+                    console: settings.previewConsoleCapture ? console : nil,
                     onLoadingChanged: { isLoading = $0 },
                     onError: { loadError = $0 },
                     onBlocked: { blockedURL = $0 }
                 )
                 .accessibilityLabel("Preview of port \(forward?.remotePort ?? 0)")
+                // A WKUserScript can only be installed when the web view is
+                // built, so flipping the console setting has to rebuild it.
+                // Without this the toggle would appear to do nothing until the
+                // sheet was reopened.
+                .id(settings.previewConsoleCapture)
 
                 if isLoading {
                     VStack {
@@ -429,6 +478,76 @@ struct PreviewScreen: View {
         .padding(24)
     }
 
+    /// The captured-console pane. Deliberately says out loud what it is doing
+    /// — the setting's footer explains it once, but the person reading log
+    /// lines should not have to remember that a script is running in their page
+    /// to produce them.
+    private var consolePane: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("Console")
+                    .font(.subheadline.weight(.semibold))
+                Text("script injected into the page")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Clear") { console.clear() }
+                    .font(.caption.weight(.semibold))
+                    .accessibilityLabel("Clear Console")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if console.entries.isEmpty {
+                Text("Nothing logged yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 3) {
+                            ForEach(console.entries) { entry in
+                                Text(entry.text)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(Self.color(for: entry.level))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .textSelection(.enabled)
+                                    .id(entry.id)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                    }
+                    // Follow the tail: on a phone the newest line is the one
+                    // you are waiting for.
+                    .onChange(of: console.entries.last?.id) { _, last in
+                        guard let last else { return }
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo(last, anchor: .bottom)
+                        }
+                    }
+                }
+                .frame(height: 170)
+            }
+        }
+        .background(.bar)
+        .accessibilityLabel("Page console output")
+    }
+
+    private static func color(for level: PreviewConsoleEntry.Level) -> Color {
+        switch level {
+        case .error: return .red
+        case .warn: return .orange
+        case .debug, .info: return .secondary
+        case .log: return .primary
+        }
+    }
+
     private var foregroundOnlyNote: some View {
         Text("Preview only works while a+Terminal is on screen. If you switch to another app, iOS suspends this one — the local listener closes and the tunnel closes with it. Come back and tap Reload.")
             .font(.caption)
@@ -596,6 +715,20 @@ enum PreviewNavigationPolicy {
 // Internal rather than `private` so `PreviewNavigationPolicyTests` can drive the
 // real Coordinator through a real WKWebView. The guard that keeps this from
 // being a browser is worth more as a test than as a comment.
+/// Weak handle to the live web view, so the pop-out button can hand it to
+/// `PiPCoordinator` without the sheet owning it.
+///
+/// A reference box rather than `@State`: `makeUIView` runs *during* a SwiftUI
+/// view update, and assigning to `@State` there trips "Modifying state during
+/// view update". Writing through a class the view merely holds is invisible to
+/// SwiftUI's invalidation, which is exactly what's wanted — nothing about the
+/// pop-out should re-render the sheet. Weak so the sheet closing really does
+/// release the web view.
+@MainActor
+final class PreviewWebViewHandle {
+    weak var webView: WKWebView?
+}
+
 struct PreviewWebView: UIViewRepresentable {
     /// Frozen macOS Safari UA for the desktop toggle. It has to be a literal:
     /// WKWebView exposes no synchronous read of its default UA (only an async
@@ -617,6 +750,12 @@ struct PreviewWebView: UIViewRepresentable {
     let contentRules: WKContentRuleList
     /// nil restores WKWebView's stock (mobile) UA.
     let customUserAgent: String?
+    /// Populated in `makeUIView` so the pop-out can reach the live view.
+    let handle: PreviewWebViewHandle
+    /// nil when console capture is off — and nil means the script and the
+    /// message handler are never installed at all, which is the contract
+    /// documented at the top of PreviewConsole.swift.
+    let console: PreviewConsole?
     var onLoadingChanged: (Bool) -> Void
     var onError: (String?) -> Void
     var onBlocked: (URL) -> Void
@@ -643,6 +782,12 @@ struct PreviewWebView: UIViewRepresentable {
         // <script src>, a fetch() or a WebSocket could reach any host on the
         // internet from a page we claim is loopback-only.
         configuration.userContentController.add(contentRules)
+        // Opt-in only. While the setting is off this branch never runs, so no
+        // user script exists and `webkit.messageHandlers` stays empty — the
+        // page cannot even tell the feature is there.
+        if let console {
+            PreviewConsoleBridge.install(in: configuration.userContentController, console: console)
+        }
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -657,6 +802,7 @@ struct PreviewWebView: UIViewRepresentable {
         // exist: this is a viewer for one server, not a browsing surface.
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsLinkPreview = false
+        handle.webView = webView
         #if DEBUG
         // Safari Web Inspector attach, debug builds only. Never in a shipped
         // build: `isInspectable` on a release binary lets anything with a USB

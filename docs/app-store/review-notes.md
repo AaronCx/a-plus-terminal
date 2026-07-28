@@ -90,6 +90,33 @@ embedded browser, and all three are enforced in code, not by convention:
    address on the same host; the pinned listener was refused) and is covered
    by a test that fails if the bind ever widens.
 
+### Console capture (off by default)
+
+Settings → Preview → "Capture console output" mirrors the previewed page's
+`console.log` into a pane inside the preview sheet, because a phone has no
+developer tools. It is the one part of Preview that injects JavaScript, and it
+is therefore opt-in rather than automatic:
+
+- While the setting is off, **no `WKUserScript` is installed and no
+  script-message handler is registered** — the injection path does not exist.
+- The injected wrapper always calls through to the page's original `console`
+  methods, so it changes nothing about how the page behaves.
+- Captured lines are held in memory, capped, shown only inside the sheet, and
+  discarded when it closes. Nothing is written to disk and nothing is
+  transmitted, so the "Data Not Collected" declaration is unaffected.
+- The page being instrumented is the user's own development server, reached
+  through their own SSH connection.
+
+### Pop-out (Picture-in-Picture)
+
+A preview can be popped out into the same floating window the VNC monitor and
+terminal use, and only when the user has turned on Pop-Out Sessions (beta,
+off by default) and taps the button. It is view-only and forwards no input.
+There is a concrete reason it exists: the forwarded port lives on a listener
+that dies when iOS suspends the app, and a live pop-out is what keeps the
+process — and therefore the tunnel — alive, so it is the only way to keep
+watching a dev server while using another app.
+
 **App Transport Security:** no ATS exception was required. Plain-HTTP loads to
 `http://127.0.0.1:<port>` inside `WKWebView` are permitted with the shipped
 Info.plist untouched, confirmed by an on-simulator spike before the feature was

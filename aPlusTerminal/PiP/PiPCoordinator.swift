@@ -66,7 +66,14 @@ final class PiPCoordinator {
     /// pop-out — a dead session must not leave a frozen (terminal) or
     /// "Connecting…" (VNC) PiP window on screen.
     func sessionClosed(_ owner: AnyObject) {
-        guard boundOwner === owner else { return }
+        // Object identity catches the terminal/VNC cases. A *preview* pop-out
+        // is owned by its PreviewWebViewHandle, so a closing session would not
+        // match — fall back to the source's restore id, or closing a session
+        // would leave its preview popped out over a tunnel that no longer
+        // exists.
+        let ownsIt = boundOwner === owner
+            || ((owner as? TerminalSession).map { engine?.source?.restoreSessionID == $0.id } ?? false)
+        guard ownsIt else { return }
         if isActive {
             engine?.stop()
             // didStop → onActiveChanged(false) → the visibility check below
@@ -109,6 +116,44 @@ final class PiPCoordinator {
         } else {
             engine.arm(source: engine.source!, autoStartOnAppSwitch: settings.autoPopOutOnAppSwitch)
         }
+    }
+
+    // MARK: - Localhost preview (same engine, same rules)
+
+    /// Pop a preview out. Deliberately tap-only — there is no auto-pop-out for
+    /// previews the way there is for sessions: auto-arming would mean silently
+    /// snapshotting a web page every time the user opened the sheet, and the
+    /// whole justification for this surface (keeping the tunnel alive) only
+    /// applies when the user has explicitly asked to keep watching.
+    ///
+    /// The owner is the `PreviewWebViewHandle`, not the session: a session can
+    /// have both a terminal pop-out and a preview pop-out available, and using
+    /// the session as the key would make the second bind mistake itself for the
+    /// first and reuse the wrong source.
+    func popOut(preview handle: PreviewWebViewHandle, session: TerminalSession, subtitle: @escaping () -> String?) {
+        guard isAvailable else { return }
+        let engine = ensureEngine()
+        if boundOwner !== handle || engine.source == nil {
+            let source = PreviewPiPFrameSource(
+                // Resolved per capture: the sheet rebuilds its web view when
+                // console capture is toggled, and a source pinned to the old
+                // instance would render a dead page for the rest of the pop-out.
+                resolveWebView: { [weak handle] in handle?.webView },
+                sessionID: session.id,
+                title: { [weak session] in session?.server.name ?? "Preview" },
+                subtitle: subtitle
+            )
+            boundOwner = handle
+            engine.arm(source: source, autoStartOnAppSwitch: false)
+        }
+        engine.start()
+    }
+
+    /// The preview sheet went away. Same rule as a session screen leaving:
+    /// disarm unless the pop-out is live, because leaving via the app switcher
+    /// with the window up is exactly the case this feature exists for.
+    func previewScreenDisappeared(_ handle: PreviewWebViewHandle) {
+        disarm(ifBoundTo: handle)
     }
 
     private func disarm(ifBoundTo owner: AnyObject) {
