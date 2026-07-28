@@ -82,6 +82,37 @@ final class MeshyyTransport {
         "aplus-" + serverID.uuidString.lowercased().filter { $0.isHexDigit || $0 == "-" }
     }
 
+    /// Where `meshyyd` might be, in probe order.
+    ///
+    /// An SSH **exec** channel is not a login shell: it gets a bare PATH, which on
+    /// macOS is `/usr/bin:/bin:/usr/sbin:/sbin` plus whatever `/etc/paths` adds.
+    /// Neither includes `~/bin`, which is exactly where a self-built daemon lands. So
+    /// a bare `meshyyd` would report "not installed" on a host where it plainly is,
+    /// and the feature would appear broken while behaving correctly — verified on this
+    /// Mac before it could waste a TestFlight cycle.
+    ///
+    /// `$HOME` is expanded by the remote shell, deliberately: only the daemon's own
+    /// user knows where their `~` is.
+    static let daemonCandidates = [
+        "meshyyd",                    // on PATH, if the user put it there
+        "$HOME/bin/meshyyd",          // self-built, the common case
+        "/usr/local/bin/meshyyd",
+        "/opt/homebrew/bin/meshyyd",
+        "/usr/bin/meshyyd",
+    ]
+
+    /// The exact command run on the exec channel.
+    ///
+    /// `session` is the ONLY value this side interpolates, and `sessionName(for:)`
+    /// filters it to `[a-z0-9-]` — the command crosses a shell, so anything else would
+    /// be an injection hole of the same class meshyy's own daemon rules forbid.
+    static func bootstrapCommand(session: String) -> String {
+        let probes = daemonCandidates.map { "\"\($0)\"" }.joined(separator: " ")
+        return "for c in \(probes); do "
+            + "if command -v \"$c\" >/dev/null 2>&1; then "
+            + "exec \"$c\" attach --session \(session) --json; fi; done; exit 127"
+    }
+
     /// Runs the §5.1 bootstrap over SSH and, if it succeeds, opens the meshyy session.
     ///
     /// Returns `nil` reasons rather than throwing for the expected cases, because
@@ -100,7 +131,7 @@ final class MeshyyTransport {
         // CommandFailed. That is the common case, not a fault.
         let json: String
         do {
-            json = try await ssh.runCommand("meshyyd attach --session \(name) --json")
+            json = try await ssh.runCommand(bootstrapCommand(session: name))
         } catch {
             return .failure(.daemonAbsent)
         }

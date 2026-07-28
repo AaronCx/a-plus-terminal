@@ -157,3 +157,49 @@ final class MeshyyTransportTests: XCTestCase {
         )
     }
 }
+
+// MARK: - Finding the daemon over an exec channel
+
+extension MeshyyTransportTests {
+    /// An SSH **exec** channel is not a login shell: it gets a bare PATH, and neither
+    /// that nor `/etc/paths` includes `~/bin` — which is exactly where a self-built
+    /// `meshyyd` lands. A bare `meshyyd` would report "not installed" on a host where
+    /// it plainly is, and the feature would look broken while behaving correctly.
+    ///
+    /// Verified on the Mac this ships from before it could waste a TestFlight cycle.
+    func testBootstrapProbesLocationsABareExecChannelCannotSee() {
+        let command = MeshyyTransport.bootstrapCommand(session: "aplus-test")
+
+        XCTAssertTrue(
+            command.contains("$HOME/bin/meshyyd"),
+            "a self-built daemon in ~/bin is the common case and would not be found"
+        )
+        XCTAssertTrue(command.contains("/opt/homebrew/bin/meshyyd"), "Homebrew on Apple silicon")
+        XCTAssertTrue(command.contains("/usr/local/bin/meshyyd"), "Homebrew on Intel, and manual installs")
+        XCTAssertTrue(
+            command.hasPrefix("for c in \"meshyyd\""),
+            "PATH must be tried FIRST, so a user who placed it deliberately wins"
+        )
+    }
+
+    /// A host with no daemon must exit non-zero, so Citadel throws and the caller
+    /// falls back. Exiting 0 with empty output would be parsed as a malformed
+    /// bootstrap and reported as a fault on a host that simply has no daemon.
+    func testCommandFailsCleanlyWhenNoDaemonExists() {
+        let command = MeshyyTransport.bootstrapCommand(session: "aplus-test")
+        XCTAssertTrue(command.hasSuffix("exit 127"), "a missing daemon must exit non-zero: \(command)")
+    }
+
+    /// The session name is the only thing this side interpolates into a string a
+    /// remote shell will interpret.
+    func testOnlyTheFilteredSessionNameIsInterpolated() {
+        let name = MeshyyTransport.sessionName(for: UUID())
+        let command = MeshyyTransport.bootstrapCommand(session: name)
+        XCTAssertTrue(command.contains("--session \(name) --json"))
+
+        // Everything else in the command is a fixed literal from `daemonCandidates`.
+        for candidate in MeshyyTransport.daemonCandidates {
+            XCTAssertTrue(command.contains(candidate), "lost probe location \(candidate)")
+        }
+    }
+}
