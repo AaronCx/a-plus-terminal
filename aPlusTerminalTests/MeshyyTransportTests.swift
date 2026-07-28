@@ -203,3 +203,46 @@ extension MeshyyTransportTests {
         }
     }
 }
+
+// MARK: - M6 tier 1: the palette in the app
+
+@MainActor
+final class QuickActionBarTests: XCTestCase {
+    /// The property that matters: no stray sends. A one-tap send goes straight into a
+    /// live PTY, so offering one while the agent is mid-work injects a keystroke into
+    /// whatever it is doing.
+    func testActionsAreOfferedOnlyWhileWaiting() {
+        XCTAssertEqual(
+            QuickActionAvailability.actions(forAgentStatus: .waiting).count,
+            QuickActionPalette.tier1.count,
+            "the palette must be offered when an agent is waiting — that is the feature"
+        )
+        // Module-qualified: MeshyyCore ALSO exports an `AgentActivityMonitor` (the
+        // daemon-side detector), so the bare name is ambiguous in a file that imports
+        // both. The app's own detector is the one driving this UI.
+        let idle = aPlusTerminal.AgentActivityMonitor.Status.none
+        let busy = aPlusTerminal.AgentActivityMonitor.Status.working
+        for status in [idle, busy] {
+            XCTAssertTrue(
+                QuickActionAvailability.actions(forAgentStatus: status).isEmpty,
+                "actions offered while \(status.rawValue) — a tap would land mid-work"
+            )
+        }
+    }
+
+    /// The palette is the same data meshyy defines, not a second copy that can drift.
+    func testPaletteComesFromMeshyyRatherThanBeingRestatedHere() {
+        let offered = QuickActionAvailability.actions(forAgentStatus: .waiting)
+        XCTAssertEqual(offered.map(\.id), QuickActionPalette.tier1.map(\.id))
+        XCTAssertEqual(offered.map(\.sends), QuickActionPalette.tier1.map(\.sends))
+    }
+
+    /// Tapping sends exactly one keystroke — the bytes the key itself would produce.
+    /// A multi-byte send would be a canned phrase, which is a prompt string by another
+    /// name and would break the "no agent knowledge" rule.
+    func testEveryActionSendsExactlyOneKeystroke() {
+        for action in QuickActionAvailability.actions(forAgentStatus: .waiting) {
+            XCTAssertEqual(action.sends.count, 1, "\(action.id) sends \(action.sends.count) bytes")
+        }
+    }
+}
