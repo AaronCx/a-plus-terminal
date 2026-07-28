@@ -141,7 +141,8 @@ final class PiPCoordinator {
                 resolveWebView: { [weak handle] in handle?.webView },
                 sessionID: session.id,
                 title: { [weak session] in session?.server.name ?? "Preview" },
-                subtitle: subtitle
+                subtitle: subtitle,
+                startedAt: { [weak session] in session?.startedAt }
             )
             boundOwner = handle
             engine.arm(source: source, autoStartOnAppSwitch: false)

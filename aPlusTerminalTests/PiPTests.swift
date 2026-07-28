@@ -334,3 +334,74 @@ final class TerminalPiPSurfaceSnapshotTests: XCTestCase {
         XCTAssertEqual(CMSampleBufferGetNumSamples(sample), 1)
     }
 }
+
+// MARK: - Session timer on every pop-out surface
+
+/// Aaron asked for the session timer on *all* pop-out windows, not just the
+/// terminal one. These pin it on the two that were missing it, at both levels
+/// the terminal timer is pinned at: the model carries it, and it reaches the
+/// pixels.
+@MainActor
+final class PiPElapsedOnAllSurfacesTests: XCTestCase {
+    private let start = Date(timeIntervalSince1970: 1_000_000)
+
+    private func pixelHash(_ buffer: CVPixelBuffer) -> String {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return "" }
+        let data = Data(bytes: base, count: CVPixelBufferGetDataSize(buffer))
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: Preview pop-out
+
+    func testPreviewModelCarriesElapsedFromSessionStart() {
+        let source = PreviewPiPFrameSource(
+            webView: nil,
+            sessionID: UUID(),
+            title: { "mac-mini" },
+            subtitle: { "localhost:5173" },
+            startedAt: { self.start },
+            now: { self.start.addingTimeInterval(125) }   // 2:05
+        )
+        XCTAssertEqual(source.currentModel().elapsed, "2:05")
+    }
+
+    func testPreviewWithoutAStartDateShowsNoTimer() {
+        let source = PreviewPiPFrameSource(
+            webView: nil, sessionID: UUID(), title: { "t" }, subtitle: { nil }
+        )
+        XCTAssertNil(source.currentModel().elapsed)
+    }
+
+    func testPreviewTimerReachesThePixels() throws {
+        let renderer = PreviewPiPSurfaceRenderer()
+        let pool = try XCTUnwrap(PiPPixelBufferPool.make(size: renderer.size))
+        let base = PreviewPiPSurfaceModel(
+            title: "mac-mini", subtitle: "localhost:5173", elapsed: nil, paused: false, hasImage: false
+        )
+        var ticked = base
+        ticked.elapsed = "1:03:27"
+
+        let without = try XCTUnwrap(renderer.draw(base, image: nil, into: pool))
+        let with = try XCTUnwrap(renderer.draw(ticked, image: nil, into: pool))
+        XCTAssertEqual(pixelHash(without), pixelHash(try XCTUnwrap(renderer.draw(base, image: nil, into: pool))),
+                       "same model renders identical pixels")
+        XCTAssertNotEqual(pixelHash(without), pixelHash(with), "the session timer is drawn")
+    }
+
+    /// The timer has to advance while the user has *paused* following, which
+    /// is exactly when the capture loop stops driving invalidations.
+    func testPreviewTickerRunsWhilePaused() async throws {
+        let source = PreviewPiPFrameSource(
+            webView: nil, sessionID: UUID(), title: { "t" }, subtitle: { nil },
+            startedAt: { self.start }
+        )
+        source.followSuspended = true
+        var ticks = 0
+        source.onInvalidate = { ticks += 1 }
+        try await Task.sleep(for: .seconds(2.2))
+        source.onInvalidate = nil
+        XCTAssertGreaterThanOrEqual(ticks, 1, "no 1 Hz tick while paused — the clock would freeze")
+    }
+}

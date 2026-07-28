@@ -105,8 +105,17 @@ final class PreviewPiPFrameSource: PiPFrameSource {
     private let title: () -> String
     private let subtitle: () -> String?
     private let renderer: PreviewPiPSurfaceRenderer
+    /// When the SSH session behind this tunnel started — drives the live
+    /// elapsed timer in the header, same as the terminal pop-out. A clock that
+    /// keeps moving is also what makes this genuine at-a-glance monitoring
+    /// content rather than a static surface.
+    private let startedAt: () -> Date?
     /// Injectable clock (tests).
     private let now: () -> Date
+    /// 1 Hz self-invalidation so the timer advances even when the page is
+    /// still, or the user has paused following (the capture loop returns
+    /// early while paused, so it cannot drive this).
+    private var ticker: Task<Void, Never>?
 
     /// The async capture loop. Started when the engine attaches (sets
     /// `onInvalidate`) and cancelled when it detaches — same didSet idiom as
@@ -129,7 +138,13 @@ final class PreviewPiPFrameSource: PiPFrameSource {
     /// (non-nil) and detaching (nil) this source.
     var onInvalidate: (() -> Void)? {
         didSet {
-            if onInvalidate != nil { startCapturing() } else { stopCapturing() }
+            if onInvalidate != nil {
+                startCapturing()
+                startTicking()
+            } else {
+                stopCapturing()
+                stopTicking()
+            }
         }
     }
 
@@ -147,6 +162,7 @@ final class PreviewPiPFrameSource: PiPFrameSource {
         sessionID: UUID?,
         title: @escaping () -> String,
         subtitle: @escaping () -> String?,
+        startedAt: @escaping () -> Date? = { nil },
         renderer: PreviewPiPSurfaceRenderer = PreviewPiPSurfaceRenderer(),
         now: @escaping () -> Date = Date.init
     ) {
@@ -155,6 +171,7 @@ final class PreviewPiPFrameSource: PiPFrameSource {
             sessionID: sessionID,
             title: title,
             subtitle: subtitle,
+            startedAt: startedAt,
             renderer: renderer,
             now: now
         )
@@ -165,6 +182,7 @@ final class PreviewPiPFrameSource: PiPFrameSource {
         sessionID: UUID?,
         title: @escaping () -> String,
         subtitle: @escaping () -> String?,
+        startedAt: @escaping () -> Date? = { nil },
         renderer: PreviewPiPSurfaceRenderer = PreviewPiPSurfaceRenderer(),
         now: @escaping () -> Date = Date.init
     ) {
@@ -172,6 +190,7 @@ final class PreviewPiPFrameSource: PiPFrameSource {
         self.restoreSessionID = sessionID
         self.title = title
         self.subtitle = subtitle
+        self.startedAt = startedAt
         self.renderer = renderer
         self.now = now
     }
@@ -228,6 +247,22 @@ final class PreviewPiPFrameSource: PiPFrameSource {
     private func stopCapturing() {
         captureTask?.cancel()
         captureTask = nil
+    }
+
+    private func startTicking() {
+        guard ticker == nil, startedAt() != nil else { return }
+        ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                self.onInvalidate?()
+            }
+        }
+    }
+
+    private func stopTicking() {
+        ticker?.cancel()
+        ticker = nil
     }
 
     private func captureTick(generation mine: Int) async {
@@ -457,6 +492,7 @@ final class PreviewPiPFrameSource: PiPFrameSource {
         PreviewPiPSurfaceModel(
             title: title(),
             subtitle: subtitle(),
+            elapsed: startedAt().map { PiPElapsedFormatter.string(now().timeIntervalSince($0)) },
             paused: followSuspended,
             // Not tracking any more, and say so. The web view can vanish under
             // us — `PreviewScreen` rebuilds it when the console setting flips,
@@ -483,7 +519,10 @@ final class PreviewPiPFrameSource: PiPFrameSource {
         onDetach = nil
     }
 
-    deinit { captureTask?.cancel() }
+    deinit {
+        captureTask?.cancel()
+        ticker?.cancel()
+    }
 }
 
 /// What the preview pop-out shows — pure data, unit-testable without AVKit or
@@ -495,6 +534,8 @@ struct PreviewPiPSurfaceModel: Equatable {
     var title: String
     /// The tunnel this is a view of, e.g. "localhost:5173". nil until bound.
     var subtitle: String?
+    /// Session uptime, pre-formatted ("4:07"). nil when unknown.
+    var elapsed: String?
     var paused: Bool
     /// Capture has stopped landing — the web view went away, or several
     /// consecutive attempts failed. Distinct from `paused`, which the user
@@ -586,6 +627,20 @@ struct PreviewPiPSurfaceRenderer {
                 withAttributes: [.font: badgeFont, .foregroundColor: badgeColor]
             )
             titleLimit = badge.minX - 12
+        }
+
+        // Live session timer, right-aligned just left of the badge — same
+        // placement and glyph as the terminal pop-out, so the two windows read
+        // the same way.
+        if let elapsed = model.elapsed {
+            let timerFont = UIFont.monospacedDigitSystemFont(ofSize: 22, weight: .medium)
+            let timerText = "\u{23F1} \(elapsed)" as NSString
+            let timerSize = timerText.size(withAttributes: [.font: timerFont])
+            timerText.draw(
+                at: CGPoint(x: titleLimit - timerSize.width, y: (headerHeight - timerSize.height) / 2),
+                withAttributes: [.font: timerFont, .foregroundColor: UIColor(white: 0.72, alpha: 1)]
+            )
+            titleLimit -= timerSize.width + 14
         }
 
         // Title over tunnel: two stacked lines, because the tunnel ("the port
