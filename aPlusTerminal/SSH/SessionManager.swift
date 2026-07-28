@@ -79,15 +79,6 @@ final class TerminalSession: Identifiable, Hashable {
     var showMultiplexerHint = false
 
     private(set) var connection = SSHConnection()
-    /// The meshyy transport, when the host runs a daemon and the toggle is on.
-    ///
-    /// The SSH connection above stays live regardless — this replaces only the PTY
-    /// byte stream. See MeshyyTransport for why that is the whole of the change.
-    private(set) var meshyy: MeshyyTransport?
-    /// Why meshyy is not in use, when the user asked for it. Shown once per connect
-    /// rather than swallowed: a silent fallback is indistinguishable from a broken
-    /// feature, and the toggle exists to find out whether it works.
-    private(set) var meshyyUnavailable: String?
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore
@@ -96,9 +87,6 @@ final class TerminalSession: Identifiable, Hashable {
     private var io: SessionIO?
     private var scrollBridge: ScrollBridge?
     private var pumpTask: Task<Void, Never>?
-    private var meshyyPumpTask: Task<Void, Never>?
-    /// False while meshyy is drawing: the SSH pump keeps draining but stops feeding.
-    private var sshPumpFeedsTerminal = true
     private var reconnectLoop: Task<Void, Never>?
     private var keepaliveTask: Task<Void, Never>?
     /// Idle keepalive cadence. A foreground PTY with no typing produces no
@@ -761,76 +749,7 @@ final class TerminalSession: Identifiable, Hashable {
         // reattach to a different window — must not inherit the previous
         // shell's working/waiting reading.
         agentMonitor.reset()
-
-        // meshyy, if the user asked for it and the host can do it. Everything below
-        // is best-effort by construction: any failure leaves `meshyy` nil and the SSH
-        // PTY carrying the session exactly as it does today.
-        await stopMeshyy()
-        meshyyUnavailable = nil
-        if settings.meshyyTransport {
-            let size = currentWindowSize()
-            let result = await MeshyyTransport.bootstrap(
-                over: fresh,
-                serverID: server.id,
-                sshHost: server.host,
-                cols: size.cols,
-                rows: size.rows
-            )
-            switch result {
-            case .success(let transport):
-                meshyy = transport
-                startMeshyyPump(reading: transport, sshConnection: fresh)
-                // The SSH PTY is still open underneath. That is deliberate: it is the
-                // fallback if meshyy drops mid-session, and it costs one idle channel.
-                startPump(reading: fresh, feedsTerminal: false)
-                return
-            case .failure(let reason):
-                meshyyUnavailable = reason.errorDescription
-            }
-        }
         startPump(reading: fresh)
-    }
-
-    /// Tears down the meshyy transport without touching the SSH connection.
-    private func stopMeshyy() async {
-        guard let transport = meshyy else { return }
-        meshyy = nil
-        meshyyPumpTask?.cancel()
-        meshyyPumpTask = nil
-        await transport.disconnect()
-    }
-
-    /// Reads PTY bytes from meshyy into the emulator.
-    ///
-    /// Deliberately a copy of `startPump`'s body rather than a shared generic: the two
-    /// differ in what ending means. An SSH channel ending is the shell exiting or the
-    /// transport dying, and drives reconnect. meshyy ending while SSH is still up means
-    /// only that the resumable transport gave up — the session is still alive, so the
-    /// right response is to fall back to the SSH PTY that was left open underneath, not
-    /// to tear the session down.
-    private func startMeshyyPump(reading transport: MeshyyTransport, sshConnection: SSHConnection) {
-        meshyyPumpTask = Task { [weak self] in
-            for await chunk in transport.output {
-                guard let self, !Task.isCancelled else { return }
-                let bytes = [UInt8](chunk)
-                self.terminalView.feed(byteArray: ArraySlice(bytes))
-                self.agentMonitor.observe(bytes)
-                self.portDetector.observe(bytes)
-                self.pipInvalidate?()
-            }
-            guard let self, !Task.isCancelled, self.meshyy === transport else { return }
-            await self.fallBackToSSH(sshConnection)
-        }
-    }
-
-    /// meshyy stopped while the SSH connection is still good. Carry on over SSH.
-    private func fallBackToSSH(_ connection: SSHConnection) async {
-        guard state == .connected, meshyy != nil else { return }
-        meshyy = nil
-        meshyyUnavailable = "The meshyy connection dropped — back on SSH."
-        // Re-point the existing SSH pump at the terminal. It has been draining the
-        // channel all along so the PTY never blocked; it just was not drawing.
-        sshPumpFeedsTerminal = true
     }
 
     /// Walks the server's candidate hosts in order (last winner first within
@@ -919,43 +838,22 @@ final class TerminalSession: Identifiable, Hashable {
             guard let self else { return }
             for await item in self.outboxStream {
                 guard !Task.isCancelled else { return }
-                // Whichever transport is carrying the PTY. meshyy when it attached,
-                // SSH otherwise — the outbox does not need to know which.
-                let meshyy = self.meshyy
                 let connection = self.connection
                 switch item {
                 case .data(let data):
-                    if let meshyy {
-                        try? await meshyy.send(data)
-                    } else {
-                        try? await connection.send(data)
-                    }
+                    try? await connection.send(data)
                 case .resize(let cols, let rows):
-                    if let meshyy {
-                        try? await meshyy.resize(cols: cols, rows: rows)
-                    }
-                    // The SSH PTY is resized either way: it is still the fallback if
-                    // meshyy drops, and a stale size there would repaint at the wrong
-                    // geometry the moment it does.
                     try? await connection.resize(cols: cols, rows: rows)
                 }
             }
         }
     }
 
-    /// `feedsTerminal: false` keeps the SSH channel drained while meshyy is drawing.
-    ///
-    /// Draining matters even when the bytes are not shown: an SSH PTY nobody reads
-    /// fills its window, the remote shell blocks on its own stdout, and the session
-    /// hangs for real — the same failure meshyy's own daemon has a ring buffer to
-    /// avoid. So the pump keeps running and simply does not draw.
-    private func startPump(reading connection: SSHConnection, feedsTerminal: Bool = true) {
-        sshPumpFeedsTerminal = feedsTerminal
+    private func startPump(reading connection: SSHConnection) {
         pumpTask = Task { [weak self] in
             for await chunk in await connection.output {
                 guard let self, !Task.isCancelled else { return }
                 let bytes = [UInt8](chunk)
-                guard self.sshPumpFeedsTerminal else { continue }
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
                 // Source A of the preview's port detection. Cheap by

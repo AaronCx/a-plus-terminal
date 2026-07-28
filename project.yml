@@ -11,7 +11,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # One source of truth for both targets — the app and widget MUST ship with
     # identical versions or App Store Connect rejects the upload.
-    CURRENT_PROJECT_VERSION: 44
+    CURRENT_PROJECT_VERSION: 43
     MARKETING_VERSION: "1.0.3"
 packages:
   # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
@@ -33,17 +33,6 @@ packages:
   # demo. MIT licensed (transitives: CryptoSwift fork, system zlib, d3des).
   RoyalVNCKit:
     path: Vendor/royalvnc
-  # Resumable terminal transport (opt-in, Settings toggle). Aaron's own MIT,
-  # clean-room, zero-dependency package. Only the CLIENT half is linked here —
-  # MeshyyCore (wire format) and MeshyyKit (session/transport); the daemon
-  # targets are macOS-only and never reach the phone.
-  #
-  # Exact-pinned for the same reason as SwiftTerm: this carries the PTY byte
-  # stream when enabled, and a floating version could change resume arithmetic
-  # under a shipped build.
-  Meshyy:
-    url: https://github.com/AaronCx/meshyy.git
-    exactVersion: "0.1.0"
 targets:
   aPlusTerminal:
     type: application
@@ -62,10 +51,6 @@ targets:
       - package: Citadel
       - package: SwiftTerm
       - package: RoyalVNCKit
-      - package: Meshyy
-        product: MeshyyKit
-      - package: Meshyy
-        product: MeshyyCore
     settings:
       base:
         # Locks into App Store Connect at first upload — do not rename after that.
