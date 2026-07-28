@@ -519,6 +519,19 @@ final class TerminalSession: Identifiable, Hashable {
         // a listener bound on the phone with nothing behind it, so every
         // teardown path has to take it down (preview brief §Phase 1).
         await stopPreview()
+        // DETACH, do not shut down. The distinction is the entire feature: detaching
+        // leaves the daemon holding the pty with its ring buffer filling, so what the
+        // shell says while the phone is asleep is still there to be replayed. A
+        // shutdown would send `bye` and end the session, which is precisely the
+        // behaviour meshyy exists to replace.
+        //
+        // Previously suspend ignored meshyy altogether, so the transport was left
+        // running against a connection iOS was about to freeze.
+        meshyyNegotiationTask?.cancel()
+        meshyyNegotiationTask = nil
+        meshyyPumpTask?.cancel()
+        meshyyPumpTask = nil
+        await meshyy?.detach()
         await connection.disconnect()
         agentMonitor.reset()
         state = .suspended
@@ -634,6 +647,14 @@ final class TerminalSession: Identifiable, Hashable {
         outboxTask?.cancel()
         outboxContinuation.finish()
         await stopPreview()
+        // SHUT DOWN, do not detach. The user closed the tab, so the session should end
+        // — a detach would leave the daemon holding a shell nobody will ever reattach
+        // to, and they would accumulate one per closed tab, forever, invisible until
+        // the host ran out of processes.
+        //
+        // Previously close() ignored meshyy entirely, leaking the QUIC connection, the
+        // pump task, and the remote shell on every single tab close.
+        await stopMeshyy()
         agentMonitor.reset()
         portDetector.reset()
         state = .closed
