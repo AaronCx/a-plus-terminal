@@ -160,7 +160,15 @@ struct TerminalScreen: View {
             if newState == .connected {
                 session.bridge.focus()
             } else if newState == .closed {
-                // The remote shell exited (`exit`) — leave the screen too.
+                // The remote shell exited (`exit`) — leave the screen too, and
+                // take the keyboard with it. `focus()` made the terminal view
+                // first responder; dismissing the screen without resigning
+                // leaves UIKit holding a first responder whose view is gone,
+                // and it restores the keyboard for it on the next activation —
+                // over the session list, with nothing to type into and no way
+                // to dismiss it. TerminalTabView backstops the routes that
+                // never run this.
+                session.bridge.dismissKeyboard()
                 dismiss()
             }
         }
