@@ -225,6 +225,36 @@ actor SSHConnection {
         return lines
     }
 
+    /// Opens a direct-tcpip channel to `127.0.0.1:remotePort` **on the SSH
+    /// server**, for the in-app localhost preview.
+    ///
+    /// The target is always the remote box's loopback, never the literal
+    /// `0.0.0.0` a dev server may have printed: the server dials on our
+    /// behalf, so loopback there is correct whether the dev server bound
+    /// `127.0.0.1` or a wildcard.
+    ///
+    /// This deliberately hands back only the NIO `Channel`. `client` stays
+    /// private, so PTY / exec / SFTP / forwards remain the complete list of
+    /// ways out of this actor — widening `client` to internal for one feature
+    /// would dissolve the isolation the whole file is built around.
+    ///
+    /// `originatorPort` is the phone-side ephemeral port the accepted
+    /// connection came from; it travels in the channel-open message as
+    /// provenance and is not used for routing.
+    func openForward(
+        toRemotePort remotePort: Int,
+        originatorPort: Int,
+        initialize: @escaping @Sendable (Channel) -> EventLoopFuture<Void>
+    ) async throws -> Channel {
+        guard let client else { throw SSHConnectionError.notConnected }
+        let settings = SSHChannelType.DirectTCPIP(
+            targetHost: "127.0.0.1",
+            targetPort: remotePort,
+            originatorAddress: try SocketAddress(ipAddress: "127.0.0.1", port: originatorPort)
+        )
+        return try await client.createDirectTCPIPChannel(using: settings, initialize: initialize)
+    }
+
     /// Uploads `data` to the per-user inbox under `filename` over SFTP — a
     /// separate channel on the same authenticated session, so it overlaps the
     /// PTY without disturbing it. Returns the absolute remote path (agents read

@@ -30,6 +30,14 @@ device.
 active sessions at a glance. Tap to jump back in — a+Terminal reconnects and
 re-attaches your session multiplexer (tmux, zellij, and more) automatically.
 
+**See what you're building.** Your dev server prints `http://localhost:5173`
+— on a phone that means nothing, because localhost is the phone. a+Terminal
+forwards that port over the SSH connection you already have and renders the
+page in the app, live reload and all. Nothing is proxied through anyone's
+servers, because there are no servers: it's your machine, your connection,
+your page. It works only while the app is open, and it only ever loads your
+own dev server — it's a preview, not a browser.
+
 **Zero data collection.** No analytics, no accounts, no crash SDKs, no
 servers of ours. The App Privacy label says "Data Not Collected" because
 there is nothing to collect it with. The only network traffic is your own
@@ -43,6 +51,8 @@ tip jar. Nothing is paywalled, ever.
 - Trust-on-first-use host key pinning with hard mismatch failures
 - Sticky Ctrl key, Esc/Tab/arrows accessory bar
 - Attach an image or file from your phone over the existing SSH connection
+- Preview a dev server running on the remote machine, forwarded over the SSH
+  connection you already have — loopback-only, foreground-only, never proxied
 - Plug-and-play agent & multiplexer profiles — any CLI agent, tmux, zellij,
   screen — or define your own, no update required
 - Multiple simultaneous sessions
@@ -50,7 +60,7 @@ tip jar. Nothing is paywalled, ever.
 
 ## Keywords
 
-`ssh,terminal,tmux,ssh client,shell,console,server,sysadmin,developer,vim,remote,cli,ai agent`
+`ssh,terminal,tmux,ssh client,shell,console,server,sysadmin,developer,vim,remote,cli,ai agent,preview,localhost,port forward`
 
 ## URLs
 

@@ -16,6 +16,11 @@ struct TerminalScreen: View {
     @State private var showPhotoPicker = false
     @State private var showFileImporter = false
     @State private var pickedPhoto: PhotosPickerItem?
+    @State private var showPreview = false
+    /// Port the preview should open on presentation — set when the user taps a
+    /// loopback OSC 8 link, nil when they opened the sheet from the toolbar
+    /// (which presents the picker instead).
+    @State private var previewPort: Int?
 
     var body: some View {
         ZStack {
@@ -89,20 +94,7 @@ struct TerminalScreen: View {
         }
         .navigationTitle(session.server.name)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            // Pop-out (beta): user-initiated only — this tap (or the system's
-            // auto-inline path) is the sole way a PiP window appears (§5).
-            if pip.isAvailable && session.state == .connected {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        pip.popOut(session)
-                    } label: {
-                        Image(systemName: "pip.enter")
-                    }
-                    .accessibilityLabel("Pop Out Session")
-                }
-            }
-        }
+        .toolbar { toolbarContent }
         // Tab-bar visibility is owned solely by TerminalTabView's
         // `path.isEmpty` modifier — a second unconditional `.hidden` here
         // raced it during pop/tab transitions (see the tab-bar-vanishes PR).
@@ -125,6 +117,23 @@ struct TerminalScreen: View {
             DictationSheet { text, appendReturn in
                 session.sendInput(Data((appendReturn ? text + "\n" : text).utf8))
             }
+        }
+        .sheet(isPresented: $showPreview, onDismiss: {
+            // Swipe-to-dismiss has to tear the tunnel down too, not just the
+            // "Done" button — otherwise a listener stays bound on the phone
+            // with no UI attached to it. (stopPreview is idempotent, so the
+            // Done path calling it first is harmless.)
+            Task { await session.stopPreview() }
+        }) {
+            PreviewScreen(session: session, initialPort: previewPort)
+        }
+        .onChange(of: session.pendingPreviewPort) { _, port in
+            // A loopback OSC 8 link was tapped in the terminal. Consume the
+            // request so re-tapping the same link presents again.
+            guard let port else { return }
+            previewPort = port
+            session.pendingPreviewPort = nil
+            showPreview = true
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $pickedPhoto, matching: .images)
         .onChange(of: pickedPhoto) { _, item in
@@ -173,6 +182,41 @@ struct TerminalScreen: View {
         }
         .onDisappear {
             pip.sessionScreenDisappeared(session)
+        }
+    }
+
+    /// Extracted from the `.toolbar` call site deliberately: with the Preview
+    /// item added, the inline builder pushed the whole `body` past the Swift
+    /// type-checker's budget ("unable to type-check this expression in
+    /// reasonable time"). Annotating the return type is what fixes it — keep
+    /// this separate rather than inlining it back.
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        // Preview a dev server running on the far end. Only while connected:
+        // the tunnel rides this session's SSH connection, so there is nothing
+        // to forward over a paused one.
+        if session.state == .connected {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    previewPort = nil
+                    showPreview = true
+                } label: {
+                    Image(systemName: "macwindow")
+                }
+                .accessibilityLabel("Preview Local Server")
+            }
+        }
+        // Pop-out (beta): user-initiated only — this tap (or the system's
+        // auto-inline path) is the sole way a PiP window appears (§5).
+        if pip.isAvailable && session.state == .connected {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    pip.popOut(session)
+                } label: {
+                    Image(systemName: "pip.enter")
+                }
+                .accessibilityLabel("Pop Out Session")
+            }
         }
     }
 

@@ -71,6 +71,10 @@ final class TerminalSession: Identifiable, Hashable {
     /// Agent working/waiting heuristic for the Live Activity (§4.5). Built from
     /// the resolved agent candidates — never names an agent in code.
     let agentMonitor: AgentActivityMonitor
+    /// Candidate dev-server ports for this session — the output scrape, OSC 8
+    /// hyperlinks, and `lsof`/`ss` ground truth, fused. Feeds the preview
+    /// sheet's port picker.
+    let portDetector = PortDetector()
     /// One-time "enable mouse" hint banner trigger (§4.3).
     var showMultiplexerHint = false
 
@@ -268,6 +272,66 @@ final class TerminalSession: Identifiable, Hashable {
         String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
     }
 
+    // MARK: - Localhost preview
+
+    /// The one live port forward, or nil. Deliberately single: the sheet shows
+    /// one preview at a time, and making a second forward require tearing the
+    /// first down means a listener can never stay bound on the phone behind
+    /// the user's back.
+    private(set) var previewForward: SSHPortForward?
+    /// Surfaced in the preview sheet; nil when the last attempt succeeded.
+    var previewError: String?
+    /// Set when the terminal reports an OSC 8 hyperlink on a loopback host.
+    /// The terminal screen observes this and presents the preview sheet — the
+    /// replacement for handing `http://localhost:5173` to Safari, where it
+    /// resolves to the *phone* and fails.
+    var pendingPreviewPort: Int?
+
+    /// Forward `remotePort` to a loopback listener on this device. Any
+    /// existing forward is torn down first (see `previewForward`).
+    func startPreview(remotePort: Int) async {
+        await stopPreview()
+        guard state == .connected else {
+            previewError = "Reconnect this session before opening a preview."
+            return
+        }
+        let forward = SSHPortForward(remotePort: remotePort, connection: connection)
+        do {
+            try await forward.start()
+            previewForward = forward
+            previewError = nil
+        } catch {
+            // Leave no half-open listener behind on a failed start.
+            await forward.stop()
+            previewError = error.localizedDescription
+        }
+    }
+
+    func stopPreview() async {
+        guard let forward = previewForward else { return }
+        previewForward = nil
+        await forward.stop()
+    }
+
+    /// Synchronous teardown for the paths that must not await — the
+    /// background-task expiration handler in particular, where any network
+    /// I/O is itself the 0x8badf00d kill (see `suspendAbruptly`). Cancelling
+    /// a listener and its connections is non-blocking, so this is safe there.
+    private func stopPreviewImmediately() {
+        guard let forward = previewForward else { return }
+        previewForward = nil
+        forward.stopImmediately()
+    }
+
+    /// Ground truth for the port picker. Runs over the existing exec-channel
+    /// helper, on demand only — the preview sheet drives the cadence while it
+    /// is visible, and nothing polls in the background.
+    func refreshListenerSnapshot() async {
+        guard state == .connected else { return }
+        guard let output = try? await connection.runCommand(PortDetector.listenerCommand) else { return }
+        portDetector.applyListenerSnapshot(output)
+    }
+
     // MARK: - Profile resolution (per-server override → global default)
 
     /// Agent candidates fed to the monitor. "auto" → every profile (generic
@@ -415,6 +479,10 @@ final class TerminalSession: Identifiable, Hashable {
         guard state == .connected else { return }
         pumpTask?.cancel()
         pumpTask = nil
+        // Before the socket goes: a forward that outlives its SSHClient leaves
+        // a listener bound on the phone with nothing behind it, so every
+        // teardown path has to take it down (preview brief §Phase 1).
+        await stopPreview()
         await connection.disconnect()
         agentMonitor.reset()
         state = .suspended
@@ -434,6 +502,10 @@ final class TerminalSession: Identifiable, Hashable {
         guard state == .connected else { return }
         pumpTask?.cancel()
         pumpTask = nil
+        // Synchronous variant only — cancelling a listener and its connections
+        // never blocks, so this respects the handler's no-I/O contract while
+        // still not leaking the bind across a suspend.
+        stopPreviewImmediately()
         agentMonitor.reset()
         state = .suspended
     }
@@ -525,7 +597,9 @@ final class TerminalSession: Identifiable, Hashable {
         pumpTask = nil
         outboxTask?.cancel()
         outboxContinuation.finish()
+        await stopPreview()
         agentMonitor.reset()
+        portDetector.reset()
         state = .closed
         await connection.disconnect()
     }
@@ -633,6 +707,8 @@ final class TerminalSession: Identifiable, Hashable {
             throw SessionError.noCredentials
         }
         pumpTask?.cancel()
+        // The forward is bound to the connection we are about to replace.
+        await stopPreview()
         await connection.disconnect()
 
         let fresh = try await connectBestCandidate(auth: auth)
@@ -757,6 +833,10 @@ final class TerminalSession: Identifiable, Hashable {
                 let bytes = [UInt8](chunk)
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
+                // Source A of the preview's port detection. Cheap by
+                // construction: it byte-scans for "://" and only then does
+                // any String work, so a firehose costs a memchr per chunk.
+                self.portDetector.observe(bytes)
                 self.pipInvalidate?()
             }
             guard let self, !Task.isCancelled else { return }
@@ -770,6 +850,11 @@ final class TerminalSession: Identifiable, Hashable {
     /// like a terminal should, instead of resurrecting the connection.
     private func channelEnded(_ endedConnection: SSHConnection) {
         guard state == .connected else { return }
+        // The transport under the forward is gone either way (drop or clean
+        // `exit`), so drop the listener now rather than after the reconnect
+        // decision below — a bound port with a dead tunnel behind it just
+        // hangs the browser.
+        stopPreviewImmediately()
         Task {
             var transportError: Error?
             if case .disconnected(let error) = await endedConnection.state {
@@ -833,9 +918,22 @@ private final class SessionIO: TerminalViewDelegate {
         }
     }
 
+    /// SwiftTerm parses OSC 8 hyperlinks, which Vite and friends emit. A
+    /// loopback host is the one case where handing the URL to Safari is
+    /// actively wrong: `localhost` on the phone is the phone, not the server
+    /// the user is looking at, so the tap has always just failed. Route those
+    /// into the preview instead; every other host keeps today's behavior.
     func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
         guard let url = URL(string: link), ["http", "https"].contains(url.scheme) else { return }
-        MainActor.assumeIsolated { UIApplication.shared.open(url) }
+        MainActor.assumeIsolated {
+            guard let host = url.host, PortDetector.isLoopbackHost(host) else {
+                UIApplication.shared.open(url)
+                return
+            }
+            guard let session else { return }
+            session.portDetector.note(url: url)
+            session.pendingPreviewPort = url.port ?? (url.scheme == "https" ? 443 : 80)
+        }
     }
 
     func setTerminalTitle(source: TerminalView, title: String) {}
