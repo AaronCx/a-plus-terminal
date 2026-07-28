@@ -138,7 +138,7 @@ final class PreviewLiveTests: XCTestCase {
     /// stop behaving like a request/response pipe. This does the handshake on a
     /// raw socket rather than through WKWebView, which isolates "can the
     /// channel carry an upgrade" from anything the web view layers on top.
-    func testWebSocketUpgradeTraversesTheTunnelRaw() async throws {
+    func testWebSocketUpgradeTraversesTheTunnelRaw() async throws { // lastgate-ignore (test name, not a credential)
         let (connection, forward, _) = try await openForward()
         defer { forward.stopImmediately() }
         defer { Task { await connection.disconnect() } }
@@ -245,7 +245,7 @@ final class PreviewLiveTests: XCTestCase {
           fetch('/@vite/client').then(function (r) { return r.text(); }).then(function (src) {
             var m = src.match(/wsToken\\s*=\\s*"([^"]+)"/);
             if (!m) { window.__ws = 'no-token'; return; }
-            var s = new WebSocket('ws://127.0.0.1:\(port)/?token=' + m[1], 'vite-hmr');
+            var s = new WebSocket('ws://127.0.0.1:\(port)/?token=' + m[1], 'vite-hmr'); // lastgate-ignore (reads Vite's own dev-server token out of the page)
             s.onopen = function () { window.__ws = 'open'; };
             s.onerror = function () { if (window.__ws === 'pending') { window.__ws = 'error'; } };
             s.onclose = function (e) {
@@ -261,7 +261,7 @@ final class PreviewLiveTests: XCTestCase {
 
     /// The same upgrade, but through WKWebView the way a page's own HMR client
     /// would do it.
-    func testWebSocketUpgradeTraversesTheTunnel() async throws {
+    func testWebSocketUpgradeTraversesTheTunnel() async throws { // lastgate-ignore (test name, not a credential)
         let (connection, forward, _) = try await openForward()
         defer { forward.stopImmediately() }
         defer { Task { await connection.disconnect() } }
@@ -278,7 +278,7 @@ final class PreviewLiveTests: XCTestCase {
 
     /// The other half of Source C, against a real machine: the command really
     /// does name the dev server, on whatever OS answered.
-    func testListenerSnapshotFindsTheDevServerOnARealHost() async throws {
+    func testListenerSnapshotFindsTheDevServerOnARealHost() async throws { // lastgate-ignore (test name, not a credential)
         let (connection, forward, fixture) = try await openForward()
         defer { forward.stopImmediately() }
         defer { Task { await connection.disconnect() } }

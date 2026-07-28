@@ -46,8 +46,9 @@ npm init -y >/dev/null && npm i -D vite >/dev/null
 printf '<!doctype html><html><head><title>preview-live</title></head><body><h1 id="marker">MARKER_V1</h1><script type="module" src="/main.js"></script></body></html>' > index.html
 printf "import { label } from './label.js'\ndocument.getElementById('marker').textContent = label\n" > main.js
 printf "export const label = 'MARKER_V1'\n" > label.js
-# 4 MiB, for the truncation regression test
-python3 -c "open('public/big.txt','w').write((('abcdefghijklmnopqrstuvwxyz0123456789'*32+chr(10))*4000)[:4*1024*1024])"
+# Exactly 4 MiB, for the truncation regression test (the assertion is on the
+# exact byte count, so do not round this).
+python3 -c "f=open('public/big.txt','w'); f.write(('0123456789'*419431)[:4194304]); f.close()"
 node_modules/.bin/vite --port 5173 --strictPort --host 127.0.0.1 &
 ```
 
@@ -66,6 +67,7 @@ silently skips.
 python3 - <<PY
 import json
 json.dump({"host":"127.0.0.1","port":2222,"user":"$USER",
+           # lastgate-ignore (reads the throwaway QA key generated in step 1)
            "keyPEM":open("/tmp/aplus-preview-qa/client_ed25519").read(),
            "devPort":5173},
           open("/private/tmp/aplusterminal-preview-live.json","w"))
@@ -77,7 +79,8 @@ chmod 644 /private/tmp/aplusterminal-preview-live.json
 
 ```sh
 make generate
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+xcodebuild \
   -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   -only-testing:aPlusTerminalTests/PreviewLiveTests test
