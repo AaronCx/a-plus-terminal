@@ -326,10 +326,33 @@ final class TerminalSession: Identifiable, Hashable {
     /// Ground truth for the port picker. Runs over the existing exec-channel
     /// helper, on demand only — the preview sheet drives the cadence while it
     /// is visible, and nothing polls in the background.
-    func refreshListenerSnapshot() async {
-        guard state == .connected else { return }
-        guard let output = try? await connection.runCommand(PortDetector.listenerCommand) else { return }
+    /// One listener snapshot. Returns whether a snapshot actually landed, so
+    /// the picker can tell "still looking" from "looked, found nothing" —
+    /// which it previously could not, and so showed the empty-state text while
+    /// the very first check was still in flight.
+    ///
+    /// The timeout is the other half of that report: `runCommand` has none of
+    /// its own, and an exec channel that stalls (a busy transport, a half-dead
+    /// link) never returns, so the poll loop simply stopped. Backgrounding the
+    /// sheet and coming back appeared to "fix" it because that tears down the
+    /// task and starts a fresh one.
+    @discardableResult
+    func refreshListenerSnapshot(timeout: Duration = .seconds(6)) async -> Bool {
+        guard state == .connected else { return false }
+        let connection = self.connection
+        let output = await withTaskGroup(of: String?.self) { group in
+            group.addTask { try? await connection.runCommand(PortDetector.listenerCommand) }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        guard let output else { return false }
         portDetector.applyListenerSnapshot(output)
+        return true
     }
 
     // MARK: - Profile resolution (per-server override → global default)

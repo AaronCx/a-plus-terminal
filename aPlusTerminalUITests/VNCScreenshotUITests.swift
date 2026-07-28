@@ -17,9 +17,11 @@ import XCTest
 ///     APLUSTERMINAL_LIVE_QA=1 APLUSTERMINAL_SCREENSHOTS=1 \
 ///     APLUSTERMINAL_TEST_VNC_SERVER='{"name":"Mac mini","host":"127.0.0.1","port":5900,"username":"<user>"}'
 ///
-/// The Screen Sharing credential goes in APLUSTERMINAL_TEST_VNC_PASSWORD, read
-/// out of the chmod-600 file ~/.vncqa-pass rather than typed inline, so it
-/// never lands in shell history or a process listing.
+/// The Screen Sharing credential never travels through xcodebuild: every build
+/// setting it is handed is echoed into the build log, command line and xcconfig
+/// alike. The host copies the credential file into the app's own container
+/// (`simctl get_app_container <udid> <bundle id> data` + /Documents) and only
+/// the file NAME is passed here.
 final class VNCScreenshotUITests: XCTestCase {
     private var app: XCUIApplication!
 
@@ -33,7 +35,10 @@ final class VNCScreenshotUITests: XCTestCase {
 
         app = XCUIApplication()
         app.launchEnvironment["APLUSTERMINAL_TEST_VNC_SERVER"] = seed
-        app.launchEnvironment["APLUSTERMINAL_TEST_VNC_PASSWORD"] = env["APLUSTERMINAL_TEST_VNC_PASSWORD"]
+        // A file NAME, never the credential itself — see TestSeed. The host
+        // writes that file into the app's container before this runs.
+        app.launchEnvironment["APLUSTERMINAL_TEST_VNC_PASSWORD_FILE"] =
+            env["APLUSTERMINAL_TEST_VNC_PASSWORD_FILE"] ?? "vncqa-pass"
         // Open the monitor by itself once the app has settled.
         app.launchEnvironment["APLUSTERMINAL_TEST_VNC_AUTOOPEN_MS"] = "2500"
         app.launch()

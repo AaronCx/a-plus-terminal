@@ -26,7 +26,16 @@ enum TestSeed {
         var server = servers.servers.first(where: { $0.name == seed.name && $0.kind == .vncMonitor })
             ?? Server(name: seed.name, host: seed.host, port: seed.port, username: seed.username,
                       kind: .vncMonitor, vncAuthMethod: .ard)
-        if let password = env["APLUSTERMINAL_TEST_VNC_PASSWORD"], !password.isEmpty {
+        // The credential is read from a file inside this app's own container,
+        // not from the environment. `xcodebuild` echoes every build setting it
+        // is given into the build log — command-line AND xcconfig alike
+        // (verified with a canary, 2026-07-28) — and the scheme forwards those
+        // settings as environment variables, so a real Screen Sharing password
+        // handed over that way ends up in logs and transcripts. Only the file
+        // NAME crosses that boundary; the host writes the file straight into
+        // the container with `simctl get_app_container`.
+        if let password = vncPasswordFromContainer(env: env) ?? env["APLUSTERMINAL_TEST_VNC_PASSWORD"],
+           !password.isEmpty {
             let ref = server.passwordRef ?? UUID()
             try? passwords.setPassword(password, for: ref)
             server.passwordRef = ref
@@ -59,6 +68,19 @@ enum TestSeed {
                 print("TESTSEED: vnc autotap sent at \(parts[0]),\(parts[1])")
             }
         }
+    }
+
+    /// Reads the seeded VNC password out of a file in the app's Documents
+    /// directory. Returns nil when the harness did not ask for one, which is
+    /// every normal run.
+    private static func vncPasswordFromContainer(env: [String: String]) -> String? {
+        guard let name = env["APLUSTERMINAL_TEST_VNC_PASSWORD_FILE"], !name.isEmpty else { return nil }
+        // A bare file name only — never a caller-supplied absolute path.
+        guard !name.contains("/") else { return nil }
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let contents = try? String(contentsOf: documents.appendingPathComponent(name), encoding: .utf8)
+        else { return nil }
+        return contents.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     @MainActor
