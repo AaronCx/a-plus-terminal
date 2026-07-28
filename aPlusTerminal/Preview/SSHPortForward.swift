@@ -15,6 +15,16 @@ import os
 /// nonisolated `errorDescription` below can read it without an actor hop.
 private let forwardChannelLimit = 32
 
+/// DEBUG-only stdout trace of the byte path, so `devicectl process launch
+/// --console` can show where a forward stalls on a real device. os_log does
+/// not reach that console; print does. Compiled out of release builds.
+@inline(__always)
+func previewTrace(_ message: @autoclosure () -> String) {
+    #if DEBUG
+    print("PFWD \(message())")
+    #endif
+}
+
 enum SSHPortForwardError: LocalizedError {
     /// Neither the preferred port nor an ephemeral loopback port could be
     /// bound. Carries a human-readable reason for the preview sheet.
@@ -131,6 +141,7 @@ final class SSHPortForward {
             }
         }
 
+        previewTrace("bound local=\(bound) remote=\(remotePort) matched=\(bound == remotePort)")
         self.listener = listener
         localPort = bound
         matchesRemotePort = bound == remotePort
@@ -294,6 +305,8 @@ final class SSHPortForward {
 
         let key = UUID()
         activeChannels += 1
+        let connectionNumber = activeChannels
+        previewTrace("accept #\(connectionNumber) (active=\(activeChannels))")
         let pump = ForwardPump(
             local: local,
             remotePort: remotePort,
@@ -342,6 +355,11 @@ private final class ForwardPump: @unchecked Sendable {
     private let lock = NSLock()
     private var channel: Channel?
     private var isFinished = false
+    /// Whether the local send stream has already been finalised. A second
+    /// `.finalMessage` is rejected ~synchronously, and its completion then runs
+    /// `local.cancel()` immediately — disarming the very drain the graceful
+    /// path exists to provide.
+    private var didFinalizeLocal = false
 
     init(
         local: NWConnection,
@@ -396,6 +414,7 @@ private final class ForwardPump: @unchecked Sendable {
             }
         }
 
+        previewTrace("channel open, active=\(channel.isActive)")
         guard adopt(channel) else { return }
         receiveFromLocal()
     }
@@ -460,20 +479,66 @@ private final class ForwardPump: @unchecked Sendable {
                 return
             }
             if let data, !data.isEmpty {
+                previewTrace("local->remote \(data.count)B isComplete=\(isComplete) req=\(Self.firstLine(of: data))")
                 channel.writeAndFlush(ByteBuffer(bytes: data)).whenComplete { result in
                     switch result {
-                    case .success where !isComplete:
+                    case .success where isComplete:
+                        // The browser finished its request and closed ITS send
+                        // side. This is ordinary HTTP — CFNetwork does exactly
+                        // this — and it emphatically does NOT mean the exchange
+                        // is over: the response has not arrived yet.
+                        //
+                        // An earlier version called shutDown() here, on the
+                        // stated assumption that "no HTTP client half-closes
+                        // its request and then waits for a response". That
+                        // assumption is false, and it cost a shipped build:
+                        // on device every load after the first tore its own
+                        // channel down before the server answered, the browser
+                        // retried forever ("Loading…"), and a reload surfaced
+                        // as NSURLErrorCannotParseResponse. It survived the
+                        // Simulator because loopback delivered the request
+                        // without the FIN in the same read, so isComplete was
+                        // false. Covered now by
+                        // `testHalfClosedRequestStillReceivesAResponse`.
+                        //
+                        // The correct response is to do NOTHING but stop
+                        // reading. An HTTP request is self-delimiting (the
+                        // blank line ends the head; Content-Length or chunking
+                        // ends the body), so the server needs no EOF to answer.
+                        // Forwarding one is not just unnecessary, it is
+                        // destructive HERE: measured while fixing this, sending
+                        // the EOF on via `channel.close(mode: .output)` got the
+                        // remote's own EOF back before a single response byte
+                        // arrived, and the response was lost. (To be precise
+                        // about the mechanism rather than guess at it:
+                        // NIOSSH's `.output` close does emit CHANNEL_EOF and
+                        // does leave the channel open, so the loss is in what
+                        // the far side does with that EOF, not in NIO. Either
+                        // way the measurement stands and we simply do not
+                        // forward it.)
+                        self.awaitRemoteResponse(framing: "coalesced")
+                    case .success:
                         self.receiveFromLocal()
                     default:
-                        // Either the write failed (the channel is gone) or the
-                        // browser closed after this chunk. Local EOF maps to a
-                        // full channel close: no HTTP client half-closes its
-                        // request and then waits for a response, so there is
-                        // nothing left to protect by keeping the channel open.
+                        // The write itself failed — the channel is gone.
                         self.shutDown()
                     }
                 }
-            } else if isComplete || data == nil {
+            } else if isComplete {
+                // The SAME half-close as the branch above, only split across
+                // two receives: the browser wrote its request before this read
+                // was armed, or is closing its send side on a socket it had
+                // been keeping alive. Identical rule — stop reading, tear
+                // NOTHING down.
+                //
+                // This site is the more damaging of the two. The coalesced one
+                // kills the exchange before the response starts (a hang); this
+                // one can fire while a response is ALREADY STREAMING, cutting
+                // it off mid-headers — which is exactly what surfaced on device
+                // as NSURLErrorCannotParseResponse rather than a spinner.
+                self.awaitRemoteResponse(framing: "split")
+            } else if data == nil {
+                // No data, no EOF, no error: the socket is genuinely gone.
                 self.shutDown()
             } else {
                 self.receiveFromLocal()
@@ -488,10 +553,23 @@ private final class ForwardPump: @unchecked Sendable {
     /// reflects TCP backpressure); the caller hops back to the channel's
     /// event loop before touching its own state.
     func sendToLocal(_ buffer: ByteBuffer, completion: @escaping @Sendable (Bool) -> Void) {
+        previewTrace("remote->local \(buffer.readableBytes)B resp=\(Self.firstLine(of: Data(buffer.readableBytesView)))")
         local.send(
             content: Data(buffer.readableBytesView),
             completion: .contentProcessed { error in completion(error == nil) }
         )
+    }
+
+    /// The browser has finished sending. Stop reading from it and leave
+    /// everything else exactly as it is, so the remote→local pump can deliver
+    /// the response. Deliberately not a channel close of any kind — see the
+    /// call site.
+    /// Two call sites: the FIN can arrive coalesced with the request bytes
+    /// (what a real network does — 54,029 of 54,896 requests in the device
+    /// log) or in a receive completion of its own (loopback, and keep-alive
+    /// reuse). Both must behave identically.
+    func awaitRemoteResponse(framing: StaticString) {
+        previewTrace("local EOF (\(framing)) -> awaiting response (no teardown)")
     }
 
     /// The remote end sent SSH EOF — Citadel's `allowRemoteHalfClosure` turned
@@ -500,6 +578,11 @@ private final class ForwardPump: @unchecked Sendable {
     /// instead of hanging until the browser's own timeout, and leave the
     /// channel open: the browser may still be writing.
     func halfCloseLocal() {
+        previewTrace("remote EOF -> half-closing local")
+        lock.lock()
+        guard !didFinalizeLocal else { lock.unlock(); return }
+        didFinalizeLocal = true
+        lock.unlock()
         local.send(
             content: nil,
             contentContext: .finalMessage,
@@ -514,6 +597,13 @@ private final class ForwardPump: @unchecked Sendable {
     /// giving up and cancelling anyway, so one wedged socket can't hold a
     /// channel slot forever.
     private static let drainTimeout: TimeInterval = 5
+
+    /// First line of an HTTP message, for the trace only.
+    static func firstLine(of data: Data) -> String {
+        let head = data.prefix(120)
+        guard let text = String(data: head, encoding: .utf8) else { return "<binary>" }
+        return String(text.prefix(while: { $0 != "\r" && $0 != "\n" }))
+    }
 
     /// Idempotent teardown of one pair. Safe to call from any queue, any
     /// number of times: the channel close and the socket cancel both happen
@@ -538,6 +628,7 @@ private final class ForwardPump: @unchecked Sendable {
     /// queued. Only the user-initiated teardown (`stopImmediately`) cancels
     /// abruptly, where dropping bytes is exactly what's wanted.
     func shutDown(graceful: Bool = true) {
+        previewTrace("shutDown(graceful: \(graceful))")
         lock.lock()
         guard !isFinished else {
             lock.unlock()
@@ -551,7 +642,12 @@ private final class ForwardPump: @unchecked Sendable {
         // A nil promise swallows the `alreadyClosed` this throws when the
         // remote closed first — the overwhelmingly common ordering.
         channel?.close(promise: nil)
-        if graceful {
+        let alreadyFinalized = lock.withLock { () -> Bool in
+            let was = didFinalizeLocal
+            didFinalizeLocal = true
+            return was
+        }
+        if graceful && !alreadyFinalized {
             local.send(
                 content: nil,
                 contentContext: .finalMessage,
@@ -561,6 +657,12 @@ private final class ForwardPump: @unchecked Sendable {
             // Watchdog: a socket the browser has stopped reading never
             // completes that send. `cancel()` is idempotent, so this is safe
             // alongside the completion above.
+            queue.asyncAfter(deadline: .now() + Self.drainTimeout) { [local] in
+                local.cancel()
+            }
+        } else if graceful {
+            // Already half-closed by `halfCloseLocal`; the transport is draining
+            // on that send's completion. Only arm the watchdog.
             queue.asyncAfter(deadline: .now() + Self.drainTimeout) { [local] in
                 local.cancel()
             }
@@ -599,6 +701,7 @@ private final class ForwardChannelHandler: ChannelInboundHandler {
     }
 
     func channelActive(context: ChannelHandlerContext) {
+        previewTrace("channelActive -> first read()")
         context.fireChannelActive()
         // autoRead is off, so nothing arrives until we ask. This is the only
         // unsolicited read; every later one comes from `resume(on:)`.
@@ -632,6 +735,7 @@ private final class ForwardChannelHandler: ChannelInboundHandler {
     }
 
     func channelReadComplete(context: ChannelHandlerContext) {
+        previewTrace("readComplete pendingSends=\(pendingSends)")
         readPending = true
         resume(on: context.channel)
     }
@@ -645,11 +749,13 @@ private final class ForwardChannelHandler: ChannelInboundHandler {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        previewTrace("channelInactive")
         pump?.shutDown()
         context.fireChannelInactive()
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
+        previewTrace("errorCaught: \(error)")
         pump?.shutDown()
         context.close(promise: nil)
     }
@@ -659,6 +765,7 @@ private final class ForwardChannelHandler: ChannelInboundHandler {
     /// socket has actually taken everything we handed it.
     private func resume(on channel: Channel) {
         guard pendingSends == 0 else { return }
+        previewTrace("resume: eof=\(sawRemoteEOF) readPending=\(readPending)")
         if sawRemoteEOF {
             // Cleared first so a later `resume` can't emit a second FIN.
             sawRemoteEOF = false

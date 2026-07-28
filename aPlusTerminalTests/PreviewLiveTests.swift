@@ -88,18 +88,25 @@ final class PreviewLiveTests: XCTestCase {
         defer { forward.stopImmediately() }
         defer { Task { await connection.disconnect() } }
 
+        try await installRules(forwardedPort: forward.localPort)
         let webView = try makeGuardedWebView(forwardedPort: forward.localPort)
         try await load(webView, port: forward.localPort, path: "/")
 
         // Vite rewrites index.html and serves main.js as a real ES module; if
         // the module graph did not come through the tunnel intact this stays
         // at the static placeholder.
-        let marker = try await pollJavaScript(
+        // The label element starts empty and is filled by the ES module graph,
+        // so a non-empty value proves modules were fetched and executed through
+        // the tunnel — not merely that index.html arrived.
+        let label = try await pollJavaScript(
             webView,
-            script: "document.getElementById('marker') ? document.getElementById('marker').textContent : ''",
-            until: { $0 == "MARKER_V1" }
+            script: "document.getElementById('label') ? document.getElementById('label').textContent : ''",
+            until: { $0.contains("BUILD") }
         )
-        XCTAssertEqual(marker, "MARKER_V1", "the Vite module graph did not execute through the tunnel")
+        XCTAssertTrue(
+            label.contains("BUILD"),
+            "the Vite module graph did not execute through the tunnel — label was \(label)"
+        )
     }
 
     /// The regression guard for the teardown bug: `NWConnection.cancel()`
@@ -152,6 +159,130 @@ final class PreviewLiveTests: XCTestCase {
             response.lowercased().contains("upgrade: websocket"),
             "upgrade header missing from the tunnelled response:\n\(response)"
         )
+    }
+
+    /// THE device bug, reproduced without a device.
+    ///
+    /// WKWebView/CFNetwork sends its request and then closes its *send* side,
+    /// waiting for the response — ordinary HTTP, and what every load after the
+    /// first one did on the phone. The forward read that local EOF
+    /// (`isComplete == true`) and treated it as "the exchange is over", tearing
+    /// the channel and the socket down before the server had answered. The
+    /// browser saw a connection closed with no response, retried, and did the
+    /// same thing forever: the preview hung on "Loading…", and a reload landed
+    /// as NSURLErrorCannotParseResponse.
+    ///
+    /// The device trace that found it:
+    ///     local->remote 447B isComplete=false   <- first request, answered
+    ///     local->remote 447B isComplete=true    <- every one after
+    ///     shutDown(graceful: true)              <- killed before the response
+    ///     accept #4, #5, #6 ...                 <- the retry storm
+    func testHalfClosedRequestStillReceivesAResponse() async throws {
+        let (connection, forward, _) = try await openForward()
+        defer { forward.stopImmediately() }
+        defer { Task { await connection.disconnect() } }
+
+        let response = try await requestThenHalfClose(port: forward.localPort)
+        XCTAssertTrue(
+            response.contains("HTTP/1."),
+            "no response after the client half-closed its request — the forward tore the exchange down early. Got \(response.count) bytes: \(response.prefix(200))"
+        )
+    }
+
+    /// The OTHER half of the same bug. The FIN can reach the forward either
+    /// coalesced with the request bytes (what a real network does — 54,029 of
+    /// 54,896 requests in the device log) or in a receive completion of its
+    /// own, and there are two separate code paths for those. Only the first was
+    /// fixed initially; this pins the second, which is the more damaging one
+    /// because it can fire while the response is already streaming and cut it
+    /// off mid-headers.
+    func testRequestThenSeparateHalfCloseStillReceivesAResponse() async throws {
+        let (connection, forward, _) = try await openForward()
+        defer { forward.stopImmediately() }
+        defer { Task { await connection.disconnect() } }
+
+        let response = try await requestThenHalfClose(port: forward.localPort, separateFIN: true)
+        XCTAssertTrue(
+            response.contains("HTTP/1."),
+            "no response when the FIN arrived separately from the request. Got \(response.count) bytes: \(response.prefix(200))"
+        )
+    }
+
+    /// Sends a GET, closes the send side (exactly what CFNetwork does), and
+    /// waits for the response. `separateFIN` sends the bytes and the FIN as two
+    /// distinct operations, which is the loopback/keep-alive framing.
+    private func requestThenHalfClose(port: Int, separateFIN: Bool = false) async throws -> String {
+        let connection = NWConnection(
+            host: .ipv4(.loopback),
+            port: NWEndpoint.Port(rawValue: UInt16(port))!,
+            using: .tcp
+        )
+        defer { connection.cancel() }
+        let queue = DispatchQueue(label: "preview.live.halfclose")
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let once = OnceFlag()
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready: if once.trySet() { continuation.resume() }
+                case .failed(let error): if once.trySet() { continuation.resume(throwing: error) }
+                case .cancelled: if once.trySet() { continuation.resume(throwing: SSHPortForwardError.notConnected) }
+                default: break
+                }
+            }
+            connection.start(queue: queue)
+        }
+
+        let request = """
+        GET / HTTP/1.1\r
+        Host: 127.0.0.1:\(port)\r
+        Connection: close\r
+        \r
+
+        """
+        // isComplete: true == FIN after the request. This single flag is the
+        // whole bug: it is what the browser does and what the forward mishandled.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(
+                content: Data(request.utf8),
+                contentContext: separateFIN ? .defaultMessage : .finalMessage,
+                isComplete: !separateFIN,
+                completion: .contentProcessed { error in
+                    if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                }
+            )
+        }
+        if separateFIN {
+            // Let the request land as its own receive, then close the send side
+            // separately — the framing the coalesced fix does NOT cover.
+            try await Task.sleep(for: .milliseconds(120))
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                connection.send(
+                    content: nil,
+                    contentContext: .finalMessage,
+                    isComplete: true,
+                    completion: .contentProcessed { error in
+                        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                    }
+                )
+            }
+        }
+
+        // Read until the server closes or we time out; the bug shows up as zero
+        // bytes and an immediate close.
+        var received = Data()
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            let chunk: Data? = await withCheckedContinuation { continuation in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, _ in
+                    continuation.resume(returning: isComplete && (data?.isEmpty ?? true) ? nil : data)
+                }
+            }
+            guard let chunk, !chunk.isEmpty else { break }
+            received.append(chunk)
+            if received.count > 512 { break }
+        }
+        return String(decoding: received, as: UTF8.self)
     }
 
     /// Opens a TCP connection through the forward and performs an RFC 6455
@@ -299,9 +430,36 @@ final class PreviewLiveTests: XCTestCase {
     private func makeGuardedWebView(forwardedPort: Int) throws -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        // The content rule list is part of the shipping configuration, so it
+        // has to be part of the harness: an earlier version of this file left
+        // it out, which meant the live tests were exercising a *laxer* web view
+        // than any user ever gets.
+        if let rules = compiledRules { configuration.userContentController.add(rules) }
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 700), configuration: configuration)
         webView.navigationDelegate = navigationProbe
+        // A real window: WKWebView does not lay out or paint off-window, and
+        // the shipping sheet is always on screen.
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        window.addSubview(webView)
+        window.makeKeyAndVisible()
+        self.window = window
         return webView
+    }
+
+    private var window: UIWindow?
+    private var compiledRules: WKContentRuleList?
+
+    /// Compiles the production rules for `port` so the harness matches the sheet.
+    private func installRules(forwardedPort port: Int) async throws {
+        let json = PreviewNavigationPolicy.contentRuleListJSON(forwardedPort: port)
+        let identifier = PreviewNavigationPolicy.contentRuleListIdentifier(forwardedPort: port)
+        let store = try XCTUnwrap(WKContentRuleListStore.default())
+        compiledRules = try await withCheckedThrowingContinuation { continuation in
+            store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: json) { list, error in
+                if let list { continuation.resume(returning: list) }
+                else { continuation.resume(throwing: error ?? PreviewRulesError.unavailable) }
+            }
+        }
     }
 
     private let navigationProbe = NavigationProbe()
