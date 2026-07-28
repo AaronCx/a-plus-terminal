@@ -107,3 +107,29 @@ struct QuickActionBar: View {
         }
     }
 }
+
+#Preview("Palette above the key bar") {
+    // Reproduces the build 45 layout bug if the VStack in TerminalScreen is ever
+    // removed: without it the two bars overlay and the caption is clipped in half.
+    VStack(spacing: 0) {
+        Color.black.frame(height: 120)
+        VStack(spacing: 0) {
+            QuickActionBar(
+                actions: QuickActionPalette.tier1,
+                agentName: "Claude Code"
+            ) { _ in }
+            HStack(spacing: 6) {
+                ForEach(["esc", "ctrl", "C-b"], id: \.self) { key in
+                    Text(key)
+                        .font(.system(.callout, design: .monospaced))
+                        .frame(minWidth: 54, minHeight: 38)
+                        .background(.quaternary, in: .rect(cornerRadius: 8))
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(.bar)
+        }
+    }
+}

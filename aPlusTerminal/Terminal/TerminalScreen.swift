@@ -104,27 +104,54 @@ struct TerminalScreen: View {
                 uploadingIndicator
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            // Why meshyy is not carrying this session, when it was asked to. Shown at
+            // the top so it is impossible to miss: the whole point of the toggle is to
+            // find out whether meshyy works, and a fallback nobody can see answers
+            // nothing.
+            if let reason = session.meshyyUnavailable, session.state == .connected {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(reason)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.bar)
+            }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if session.state == .connected {
-                // M6 tier 1. Above the key bar rather than replacing it: the palette
-                // comes and goes with the agent's status, and a row that displaced the
-                // user's own keys would move the buttons they were reaching for.
-                let quickActions = QuickActionAvailability
-                    .actions(forAgentStatus: session.agentMonitor.status)
-                if !quickActions.isEmpty {
-                    QuickActionBar(
-                        actions: quickActions,
-                        agentName: session.agentMonitor.detected?.displayName
-                    ) { action in
-                        session.sendInput(Data(action.sends))
+                // VStack, and it is load-bearing. `safeAreaInset` takes ONE view: two
+                // siblings in the builder become a TupleView that SwiftUI overlays
+                // rather than stacks, so the palette rendered UNDERNEATH the key bar
+                // with its label clipped in half. Shipped in build 45 and reported
+                // immediately, because it looks exactly like a rendering fault.
+                VStack(spacing: 0) {
+                    // M6 tier 1, above the key bar rather than replacing it: the palette
+                    // comes and goes with the agent's status, and a row that displaced
+                    // the user's own keys would move the buttons they were reaching for.
+                    let quickActions = QuickActionAvailability
+                        .actions(forAgentStatus: session.agentMonitor.status)
+                    if !quickActions.isEmpty {
+                        QuickActionBar(
+                            actions: quickActions,
+                            agentName: session.agentMonitor.detected?.displayName
+                        ) { action in
+                            session.sendInput(Data(action.sends))
+                        }
                     }
+                    KeyAccessoryBar(
+                        bridge: session.bridge,
+                        onMic: { showDictation = true },
+                        onAttachPhoto: { showPhotoPicker = true },
+                        onAttachFile: { showFileImporter = true }
+                    )
                 }
-                KeyAccessoryBar(
-                    bridge: session.bridge,
-                    onMic: { showDictation = true },
-                    onAttachPhoto: { showPhotoPicker = true },
-                    onAttachFile: { showFileImporter = true }
-                )
             }
         }
         .sheet(isPresented: $showDictation) {

@@ -137,6 +137,70 @@ final class MeshyyLiveTests: XCTestCase {
     }
 }
 
+extension MeshyyLiveTests {
+    /// THE REPORTED SCENARIO: close the app, open it again, and find your shell.
+    ///
+    /// This differs from the detach/reattach test above in the way that matters. That
+    /// one keeps ONE `MeshyySession` alive across the gap, so `consumedOffset` survives
+    /// and the daemon replays precisely what was missed. This one builds a COMPLETELY
+    /// NEW session, which is what an app relaunch does: offset 0, no history, exactly
+    /// the state a user gets when they kill the app and reopen it.
+    ///
+    /// Written because the feature was reported as "not staying in shell, it's just
+    /// booting a new shell". The daemon side checks out — the pty survives, the pid is
+    /// stable across attaches — so the question is what a fresh client actually SEES,
+    /// and that is a different code path (`freshAttach`, which replays from the
+    /// clear-screen anchor) than the one the other test covers.
+    func testAFreshClientSeesTheExistingSessionRatherThanANewShell() async throws {
+        let first = try liveBootstrap("relaunch-a")
+        let sessionA = MeshyySession(size: TerminalSize(cols: 80, rows: 24))
+        let receivedA = Received()
+        let collectorA = Task {
+            for await event in await sessionA.events {
+                if case .output(let bytes) = event { await receivedA.append(bytes) }
+            }
+        }
+        defer { collectorA.cancel() }
+
+        try await sessionA.attach(bootstrap: first, sshHost: "127.0.0.1")
+        try await sessionA.send(Array("printf '%s%s\\n' 'BEFORE' '-RELAUNCH-77'\n".utf8))
+        let printed = await receivedA.waitForText("BEFORE-RELAUNCH-77", timeout: 20)
+        XCTAssertTrue(printed, "the marker never printed, so there is nothing to come back to")
+
+        // The app goes away WITHOUT ending the session — a detach, which is what
+        // suspend does now.
+        await sessionA.detach(reason: "app relaunching")
+        collectorA.cancel()
+        try await Task.sleep(for: .seconds(1))
+
+        // A brand-new client. No offset, no history — an app that was just launched.
+        let second = try liveBootstrap("relaunch-b")
+        let sessionB = MeshyySession(size: TerminalSize(cols: 80, rows: 24))
+        let receivedB = Received()
+        let collectorB = Task {
+            for await event in await sessionB.events {
+                if case .output(let bytes) = event { await receivedB.append(bytes) }
+            }
+        }
+        defer { collectorB.cancel() }
+        try await sessionB.attach(bootstrap: second, sshHost: "127.0.0.1")
+
+        let sawIt = await receivedB.waitForText("BEFORE-RELAUNCH-77", timeout: 20)
+        let text = await receivedB.text
+        XCTAssertTrue(sawIt, """
+            a freshly-launched client did NOT see what the session had already printed — \
+            it looks like a new shell even though the daemon still holds the old one. \
+            Got: \(text.suffix(300).debugDescription)
+            """)
+
+        // And it must be usable, not just a replayed picture.
+        try await sessionB.send(Array("printf '%s%s\\n' 'AFTER' '-RELAUNCH-88'\n".utf8))
+        let live = await receivedB.waitForText("AFTER-RELAUNCH-88", timeout: 20)
+        XCTAssertTrue(live, "the reattached session does not accept input — it is a picture, not a shell")
+        await sessionB.shutdown(reason: "test finished")
+    }
+}
+
 /// Accumulates delivered bytes off the session's event stream.
 private actor Received {
     private var bytes: [UInt8] = []

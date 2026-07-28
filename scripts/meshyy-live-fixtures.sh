@@ -23,4 +23,6 @@ mint() { "$MESHYYD" attach --session "$2" --json > "/tmp/meshyy-live-$1.json"; c
 mint drive     meshyy-live-drive
 mint replay-a  meshyy-live-replay
 mint replay-b  meshyy-live-replay
-echo "fixtures written: /tmp/meshyy-live-{drive,replay-a,replay-b}.json"
+mint relaunch-a meshyy-live-relaunch
+mint relaunch-b meshyy-live-relaunch
+echo "fixtures written: /tmp/meshyy-live-{drive,replay-a,replay-b,relaunch-a,relaunch-b}.json"

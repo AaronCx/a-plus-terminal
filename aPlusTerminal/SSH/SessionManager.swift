@@ -84,10 +84,19 @@ final class TerminalSession: Identifiable, Hashable {
     /// The SSH connection above stays live regardless — this replaces only the PTY
     /// byte stream. See MeshyyTransport for why that is the whole of the change.
     private(set) var meshyy: MeshyyTransport?
-    /// Why meshyy is not in use, when the user asked for it. Shown once per connect
-    /// rather than swallowed: a silent fallback is indistinguishable from a broken
-    /// feature, and the toggle exists to find out whether it works.
+    /// Why meshyy is not in use, when the user asked for it.
+    ///
+    /// SHOWN, not merely recorded. The first version set this and displayed it nowhere,
+    /// so a user with the toggle on and a daemon that could not be reached got a normal
+    /// SSH session and no explanation — reported as "it's just booting a new shell",
+    /// "I don't think it's surviving anything". The information existed the whole time
+    /// and never reached a screen, which cost a full round trip to diagnose something
+    /// the app already knew.
+    ///
+    /// §3.5: fail VISIBLE. A silent fallback is indistinguishable from a broken feature.
     private(set) var meshyyUnavailable: String?
+    /// True while meshyy is carrying this session, for the status line.
+    var isUsingMeshyy: Bool { meshyy != nil }
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore

@@ -158,7 +158,11 @@ final class MeshyyTransport {
         let transport = MeshyyTransport(session: session, sessionID: response.sessionID, name: name)
         transport.startPump()
         do {
-            try await session.attach(bootstrap: response, sshHost: sshHost)
+            // A SHORT budget on purpose. This sits between the user tapping a server and
+            // seeing a prompt, so a path that cannot work must fail fast and hand over
+            // to SSH — the default 10s was most of the "slow to connect" report, spent
+            // waiting for a connection that was never going to arrive.
+            try await session.attach(bootstrap: response, sshHost: sshHost, timeout: .seconds(4))
         } catch {
             await transport.disconnect()
             return .failure(.connectFailed(error.localizedDescription))
