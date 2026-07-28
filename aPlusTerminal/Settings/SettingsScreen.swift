@@ -112,6 +112,14 @@ struct SettingsScreen: View {
                 }
 
                 Section {
+                    Toggle("Use meshyy when available (beta)", isOn: $settings.meshyyTransport)
+                } header: {
+                    Text("Connection")
+                } footer: {
+                    Text("Keeps a session alive on the server, so it survives the app being suspended, a network switch, or a dropped connection — and replays whatever you missed when you come back. Needs meshyyd running on the host; without it, nothing changes. Your SSH connection stays exactly as it is either way, and so do attachments, Preview, and tmux. Off = today's behaviour.")
+                }
+
+                Section {
                     NavigationLink("Customize key bar") {
                         KeyBarSettingsView()
                     }
