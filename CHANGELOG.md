@@ -5,6 +5,14 @@ unreleased work accumulates at the top.
 
 ## Unreleased
 
+- **Preview pop-out and console:** a preview can now be popped out into the
+  same floating window the Monitor uses — which is also the only way to keep
+  it running while you're in another app, since the tunnel lives only as long
+  as a+Terminal does. And because a phone has no developer tools, Settings →
+  Preview can mirror the page's `console.log` into a pane inside the sheet.
+  That one is off by default: it's the only part of Preview that injects
+  anything into your page. Captured lines stay in memory and are discarded
+  when the sheet closes.
 - **In-app localhost preview:** a dev server running on the machine you're
   SSH'd into can now be viewed inside a+Terminal. Tap a `http://localhost:…`
   link in the terminal, or pick a port from the preview sheet — a+Terminal
