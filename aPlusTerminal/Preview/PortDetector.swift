@@ -176,21 +176,42 @@ final class PortDetector {
         let rows = Self.parseListeners(output)
         let live = Set(rows.map(\.port))
 
+        // Build the entire new list locally and publish it in ONE mutation.
+        //
+        // This used to call `upsert` straight against `ports` once per row. On
+        // a developer Mac that is 20-40 listeners, i.e. 20-40 separate
+        // @Observable invalidations in a burst every poll — SwiftUI rebuilt the
+        // picker's List each time, and a tap that landed mid-burst was simply
+        // lost. Reported from the field as "it takes multiple clicks before I
+        // can actually open a port".
+        var updated = ports
+        var scraped = scrapedPorts
+        var missed = missedSnapshots
+
         // In snapshot order: a first sighting from here is *appended*, never
         // promoted, so the list keeps the snapshot's own ordering and stays
         // stable across polls.
         for row in rows {
-            upsert(port: row.port, path: nil, process: row.process, vouched: false)
+            Self.upsert(
+                &updated, scraped: &scraped, missed: &missed,
+                port: row.port, path: nil, process: row.process, vouched: false
+            )
         }
 
-        for index in ports.indices where !live.contains(ports[index].port) {
-            let port = ports[index].port
-            let misses = (missedSnapshots[port] ?? 0) + 1
-            missedSnapshots[port] = misses
-            if misses >= Self.staleAfterMissedSnapshots {
-                ports[index].isStale = true
+        for index in updated.indices where !live.contains(updated[index].port) {
+            let port = updated[index].port
+            let count = (missed[port] ?? 0) + 1
+            missed[port] = count
+            if count >= Self.staleAfterMissedSnapshots {
+                updated[index].isStale = true
             }
         }
+
+        scrapedPorts = scraped
+        missedSnapshots = missed
+        // The single publish. Skip it entirely when nothing changed, so a
+        // steady-state poll does not invalidate the view at all.
+        if updated != ports { ports = updated }
     }
 
     func reset() {
@@ -209,9 +230,40 @@ final class PortDetector {
     /// (Spotlight, sharing daemons, Docker, databases), and promoting each one
     /// would push the dev server the user just started — and its path — off an
     /// 8-entry list before they could tap it.
+    /// Instance entry point for the single-item sources (scrape, OSC 8 link),
+    /// where one mutation per call is exactly right.
     private func upsert(port: Int, path: String?, process: String?, vouched: Bool) {
+        var updated = ports
+        var scraped = scrapedPorts
+        var missed = missedSnapshots
+        Self.upsert(&updated, scraped: &scraped, missed: &missed,
+                    port: port, path: path, process: process, vouched: vouched)
+        scrapedPorts = scraped
+        missedSnapshots = missed
+        if updated != ports { ports = updated }
+    }
+
+    /// `vouched` marks the human-visible sources — a URL the server printed or
+    /// a link the user tapped. Those are intent signals and take the head of
+    /// the list; a bare listener sighting is appended instead. The distinction
+    /// is not cosmetic: a developer Mac routinely has 20–40 TCP listeners
+    /// (Spotlight, sharing daemons, Docker, databases), and promoting each one
+    /// would push the dev server the user just started — and its path — off an
+    /// 8-entry list before they could tap it.
+    ///
+    /// Static and operating on locals so a caller with many rows can apply them
+    /// all and publish once (see `applyListenerSnapshot`).
+    private nonisolated static func upsert(
+        _ ports: inout [DetectedPort],
+        scraped: inout Set<Int>,
+        missed: inout [Int: Int],
+        port: Int,
+        path: String?,
+        process: String?,
+        vouched: Bool
+    ) {
         guard (1...65535).contains(port) else { return }
-        if vouched { scrapedPorts.insert(port) }
+        if vouched { scraped.insert(port) }
 
         if let index = ports.firstIndex(where: { $0.port == port }) {
             var entry = ports[index]
@@ -236,20 +288,24 @@ final class PortDetector {
         } else {
             ports.append(DetectedPort(port: port, path: path, process: process, isStale: false))
         }
-        missedSnapshots[port] = 0
-        trimToCap()
+        missed[port] = 0
+        trimToCap(&ports, scraped: &scraped, missed: &missed)
     }
 
     /// Evicts the last entry nothing vouched for, falling back to the plain
     /// oldest only when every entry is vouched. Evicting blindly from the tail
     /// is what let a busy host delete the scraped dev-server entry the whole
     /// feature exists to offer.
-    private func trimToCap() {
-        while ports.count > Self.maxEntries {
-            let victim = ports.lastIndex { !scrapedPorts.contains($0.port) } ?? (ports.count - 1)
+    private nonisolated static func trimToCap(
+        _ ports: inout [DetectedPort],
+        scraped: inout Set<Int>,
+        missed: inout [Int: Int]
+    ) {
+        while ports.count > maxEntries {
+            let victim = ports.lastIndex { !scraped.contains($0.port) } ?? (ports.count - 1)
             let port = ports[victim].port
-            missedSnapshots[port] = nil
-            scrapedPorts.remove(port)
+            missed[port] = nil
+            scraped.remove(port)
             ports.remove(at: victim)
         }
     }
