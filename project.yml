@@ -166,6 +166,17 @@ schemes:
     test:
       config: Debug
       storeKitConfiguration: aPlusTerminal.storekit
+      # Live QA suites read these from the process hosting the tests. The
+      # `TEST_RUNNER_`-prefixed recipe still quoted in their headers does NOT
+      # reach a UI test runner on Xcode 26 (verified 2026-07-28: the runner's
+      # environment holds only TESTMANAGERD_*), so the scheme forwards build
+      # settings instead. Pass them unprefixed to xcodebuild:
+      #   xcodebuild test ... APLUSTERMINAL_LIVE_QA=1 APLUSTERMINAL_TEST_SERVER=...
+      # Unset by default, which is what keeps every live suite skipped on CI.
+      environmentVariables:
+        APLUSTERMINAL_LIVE_QA: $(APLUSTERMINAL_LIVE_QA)
+        APLUSTERMINAL_TEST_SERVER: $(APLUSTERMINAL_TEST_SERVER)
+        APLUSTERMINAL_TEST_PRIVATE_KEY: $(APLUSTERMINAL_TEST_PRIVATE_KEY)
       targets:
         - aPlusTerminalTests
         - aPlusTerminalUITests

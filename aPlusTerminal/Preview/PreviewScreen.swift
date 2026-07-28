@@ -295,13 +295,9 @@ struct PreviewScreen: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(session.portDetector.ports) { port in
-                        Button {
+                        PortPickerRow(port: port) {
                             Task { await start(remotePort: port.port, path: port.path) }
-                        } label: {
-                            portRow(port)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(accessibilityLabel(for: port))
                     }
                 }
             }
@@ -328,44 +324,6 @@ struct PreviewScreen: View {
             }
         }
         .listStyle(.insetGrouped)
-    }
-
-    private func portRow(_ port: DetectedPort) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
-                Text(String(port.port))
-                    .font(.body.weight(.semibold).monospacedDigit())
-                if let process = port.process {
-                    Text(process)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                if let path = port.path, path != "/" {
-                    Text(path)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            if port.isStale {
-                Text("Not in the last two listener checks — this server may have exited.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        // Stale entries stay tappable (the check runs every 10s, so a server
-        // that just restarted can read stale for a beat) but are visibly
-        // demoted so a dead port isn't the obvious thing to tap.
-        .opacity(port.isStale ? 0.5 : 1)
-        .contentShape(Rectangle())
-    }
-
-    private func accessibilityLabel(for port: DetectedPort) -> String {
-        var parts = ["Open port \(port.port)"]
-        if let process = port.process { parts.append("process \(process)") }
-        if let path = port.path, path != "/" { parts.append("path \(path)") }
-        if port.isStale { parts.append("may have exited") }
-        return parts.joined(separator: ", ")
     }
 
     // MARK: - Banners and status
@@ -633,6 +591,71 @@ struct PreviewScreen: View {
     }
 }
 
+/// One row of the detected-ports picker.
+///
+/// Lives outside `PreviewScreen` so `PortPickerRowLayoutTests` can host it and
+/// measure it. That test exists because this row shipped with a hit area only
+/// as wide as its own text: `.buttonStyle(.plain)` sizes a button to its label,
+/// and the label was a `VStack` that hugged its content, so the row *looked*
+/// full width but only the port number responded to a tap. The stretch below is
+/// the fix, and its absence is invisible in a screenshot — hence a test.
+struct PortPickerRow: View {
+    let port: DetectedPort
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(String(port.port))
+                            .font(.body.weight(.semibold).monospacedDigit())
+                        if let process = port.process {
+                            Text(process)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let path = port.path, path != "/" {
+                            Text(path)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    if port.isStale {
+                        Text("Not in the last two listener checks — this server may have exited.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                // The stretch: take the whole row, not just the text.
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+            // Stale entries stay tappable (the check runs every 10s, so a
+            // server that just restarted can read stale for a beat) but are
+            // visibly demoted so a dead port isn't the obvious thing to tap.
+            .opacity(port.isStale ? 0.5 : 1)
+            // After the stretch, so the shape covers the full width.
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Self.accessibilityLabel(for: port))
+    }
+
+    static func accessibilityLabel(for port: DetectedPort) -> String {
+        var parts = ["Open port \(port.port)"]
+        if let process = port.process { parts.append("process \(process)") }
+        if let path = port.path, path != "/" { parts.append("path \(path)") }
+        if port.isStale { parts.append("may have exited") }
+        return parts.joined(separator: ", ")
+    }
+}
+
 enum PreviewRulesError: LocalizedError {
     case unavailable
 
@@ -789,6 +812,7 @@ struct PreviewWebView: UIViewRepresentable {
             PreviewConsoleBridge.install(in: configuration.userContentController, console: console)
         }
 
+        previewTrace("UI makeUIView -> NEW WKWebView (coordinator recreated)")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         // No `uiDelegate` — ON PURPOSE, and it must stay that way. Without a
@@ -820,9 +844,24 @@ struct PreviewWebView: UIViewRepresentable {
         context.coordinator.onError = onError
         context.coordinator.onBlocked = onBlocked
 
-        let userAgentChanged = webView.customUserAgent != customUserAgent
+        // Compare against what WE last applied, never against
+        // `webView.customUserAgent`.
+        //
+        // WKWebView does not round-trip nil through that property: in mobile
+        // mode `customUserAgent` is nil (meaning "use the stock UA"), and
+        // reading it back does not return nil, so `webView.customUserAgent !=
+        // customUserAgent` was true on EVERY SwiftUI render. Every render
+        // therefore called `load()`, which re-rendered, which loaded… a reload
+        // loop that never let the page finish, measured on device at ~1000
+        // fetches of the same URL. Desktop mode was unaffected because a
+        // literal UA string does read back equal — which is exactly why the
+        // field report was "desktop view works, mobile doesn't".
+        let userAgentChanged = !context.coordinator.hasAppliedUserAgent
+            || context.coordinator.appliedUserAgent != customUserAgent
         if userAgentChanged {
             webView.customUserAgent = customUserAgent
+            context.coordinator.appliedUserAgent = customUserAgent
+            context.coordinator.hasAppliedUserAgent = true
             // A UA swap only takes effect on the next request — the loaded DOM
             // was built for the old one — so the toggle has to reload, and the
             // reload is driven from here rather than from a token bump in the
@@ -833,6 +872,7 @@ struct PreviewWebView: UIViewRepresentable {
             || context.coordinator.loadedURL != url
             || context.coordinator.loadedToken != reloadToken
         guard needsLoad else { return }
+        previewTrace("UI load(): uaChanged=\(userAgentChanged) urlChanged=\(context.coordinator.loadedURL != url) tokenChanged=\(context.coordinator.loadedToken != reloadToken)")
         context.coordinator.loadedURL = url
         context.coordinator.loadedToken = reloadToken
         // Cache-defeating by default: a dev server rebuilds its bundle under
@@ -855,6 +895,11 @@ struct PreviewWebView: UIViewRepresentable {
         /// render needs a real `load()`.
         var loadedURL: URL?
         var loadedToken: Int?
+        /// The user agent we last applied, and whether we have applied one at
+        /// all. Tracked here because WKWebView's own property cannot be
+        /// compared against — see `updateUIView`.
+        var appliedUserAgent: String?
+        var hasAppliedUserAgent = false
 
         init(
             forwardedPort: Int,
