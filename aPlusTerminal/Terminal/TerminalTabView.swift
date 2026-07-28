@@ -235,6 +235,11 @@ struct TerminalTabView: View {
     /// routes that can strand it (remote hangup, wind-down, a pop-out restore
     /// into a session that no longer exists).
     private func dismissStrandedKeyboard() {
+        // This view stays mounted while the Settings tab is frontmost and the
+        // notification is global, so without the tab check this would yank the
+        // keyboard out from under Settings' own text fields (key name, agent
+        // profiles) the moment they opened it.
+        guard router.selectedTab == .terminal else { return }
         // A sheet or the monitor cover owns the screen, and its fields are
         // entitled to a keyboard.
         guard path.isEmpty, !addingServer, !addingMonitor, !discovering,
