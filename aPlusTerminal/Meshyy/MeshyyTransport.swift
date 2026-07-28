@@ -59,9 +59,13 @@ final class MeshyyTransport {
     private var eventTask: Task<Void, Never>?
     private(set) var isFinished = false
 
-    private init(session: MeshyySession, sessionID: String) {
+    /// The session name, kept so every reattach lands on the SAME daemon session.
+    private let name: String
+
+    private init(session: MeshyySession, sessionID: String, name: String) {
         self.session = session
         self.sessionID = sessionID
+        self.name = name
         (output, outputContinuation) = AsyncStream.makeStream(
             of: Data.self,
             // Matches SSHConnection's bound and for the same reason: a hostile or
@@ -151,7 +155,7 @@ final class MeshyyTransport {
         }
 
         let session = MeshyySession(size: TerminalSize(cols: cols, rows: rows))
-        let transport = MeshyyTransport(session: session, sessionID: response.sessionID)
+        let transport = MeshyyTransport(session: session, sessionID: response.sessionID, name: name)
         transport.startPump()
         do {
             try await session.attach(bootstrap: response, sshHost: sshHost)
@@ -160,6 +164,53 @@ final class MeshyyTransport {
             return .failure(.connectFailed(error.localizedDescription))
         }
         return .success(transport)
+    }
+
+    /// Re-attaches an EXISTING transport over a new SSH connection.
+    ///
+    /// This is the method that makes the feature real, and its absence is why the
+    /// first version did nothing it advertised. `MeshyySession` carries
+    /// `consumedOffset` — how many bytes this client has actually drawn — and that is
+    /// the ONLY durable state a resume needs. Building a fresh session per connect, as
+    /// the first version did, reset it to zero every time, so every attach asked for a
+    /// *fresh* screen and the daemon replayed nothing. The shell survived and the user
+    /// saw none of what it had said.
+    ///
+    /// Keeping one session for the life of the terminal tab fixes that: the offset
+    /// persists, the reattach asks to resume from it, and the daemon sends the bytes
+    /// that were missed.
+    func reattach(over ssh: SSHConnection, sshHost: String, cols: Int, rows: Int) async
+        -> Result<Void, Unavailable>
+    {
+        let json: String
+        do {
+            json = try await ssh.runCommand(Self.bootstrapCommand(session: name))
+        } catch {
+            return .failure(.daemonAbsent)
+        }
+        let response: BootstrapResponse
+        do {
+            response = try BootstrapResponse.parse(json)
+            try response.validate()
+        } catch {
+            return .failure(.malformedBootstrap(error.localizedDescription))
+        }
+        guard response.protocol >= Meshyy.protocolVersion else {
+            return .failure(.protocolTooOld(daemon: response.protocol, client: Meshyy.protocolVersion))
+        }
+        do {
+            try await session.resize(to: TerminalSize(cols: cols, rows: rows))
+            try await session.attach(bootstrap: response, sshHost: sshHost)
+        } catch {
+            return .failure(.connectFailed(error.localizedDescription))
+        }
+        return .success(())
+    }
+
+    /// How many bytes this client has drawn. The resume point, exposed for diagnostics
+    /// and so a test can prove the offset actually survives a reconnect.
+    var consumedOffset: UInt64 {
+        get async { await session.consumedOffset }
     }
 
     /// One ordered consumer of the session's events.
