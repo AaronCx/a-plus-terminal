@@ -27,11 +27,28 @@ final class MeshyyLiveTests: XCTestCase {
     ///
     /// Each test also uses its own session name, so one test shutting its session down
     /// cannot strand the other.
+    /// A token older than this is past meshyy's 60s TTL and would be refused.
+    ///
+    /// Skipping on age rather than letting the attach fail is the difference between
+    /// "these tests need setup" and "the transport is broken" — and the two look
+    /// identical from a red X. `make test` builds before it runs, which is long enough
+    /// to expire a token minted beforehand, so plain `make test` skips these and
+    /// `make test-meshyy-live` (build → mint → run, in that order) runs them.
+    private static let tokenTTL: TimeInterval = 45
+
     private func liveBootstrap(_ fixture: String) throws -> BootstrapResponse {
         let path = "/tmp/meshyy-live-\(fixture).json"
         guard let json = try? String(contentsOfFile: path, encoding: .utf8), !json.isEmpty else {
             throw XCTSkip("""
-                no live meshyy bootstrap at \(path) — see scripts/meshyy-live-fixtures.sh
+                no live meshyy bootstrap at \(path) — run `make test-meshyy-live`
+                """)
+        }
+        let minted = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        if let minted, Date().timeIntervalSince(minted) > Self.tokenTTL {
+            throw XCTSkip("""
+                the bootstrap at \(path) is \(Int(Date().timeIntervalSince(minted)))s old and \
+                meshyy tokens expire after 60s — run `make test-meshyy-live`, which builds \
+                first and mints second
                 """)
         }
         return try BootstrapResponse.parse(json)

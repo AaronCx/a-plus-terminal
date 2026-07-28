@@ -1,3 +1,4 @@
+import MeshyyCore
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
@@ -105,6 +106,19 @@ struct TerminalScreen: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if session.state == .connected {
+                // M6 tier 1. Above the key bar rather than replacing it: the palette
+                // comes and goes with the agent's status, and a row that displaced the
+                // user's own keys would move the buttons they were reaching for.
+                let quickActions = QuickActionAvailability
+                    .actions(forAgentStatus: session.agentMonitor.status)
+                if !quickActions.isEmpty {
+                    QuickActionBar(
+                        actions: quickActions,
+                        agentName: session.agentMonitor.detected?.displayName
+                    ) { action in
+                        session.sendInput(Data(action.sends))
+                    }
+                }
                 KeyAccessoryBar(
                     bridge: session.bridge,
                     onMic: { showDictation = true },
