@@ -105,3 +105,47 @@ final class SessionExitWhileAwayUITests: XCTestCase {
         )
     }
 }
+
+/// The stranded-keyboard guard lives on `TerminalTabView`, which stays mounted
+/// while Settings is frontmost — and it reacts to a *global* notification. So
+/// it has to prove it leaves other tabs alone: Settings has real text fields
+/// (key name, agent profiles) and a guard that over-fires would yank the
+/// keyboard away the instant one opened.
+final class KeyboardGuardScopeUITests: XCTestCase {
+    private var app: XCUIApplication!
+
+    override func setUpWithError() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["APLUSTERMINAL_LIVE_QA"] == "1", "live QA disabled (set APLUSTERMINAL_LIVE_QA=1)")
+        continueAfterFailure = true
+        app = XCUIApplication()
+        app.launch()
+    }
+
+    func testTypingInSettingsKeepsItsKeyboard() {
+        app.tabBars.buttons["Settings"].tap()
+        sleep(1)
+        let manageKeys = app.staticTexts["Manage Keys"]
+        var swipes = 0
+        while !manageKeys.isHittable && swipes < 5 {
+            app.swipeUp()
+            swipes += 1
+        }
+        XCTAssertTrue(manageKeys.waitForExistence(timeout: 10), "Manage Keys row missing")
+        manageKeys.tap()
+        sleep(1)
+
+        app.buttons["Add Key"].tap()
+        app.buttons["Generate New Key"].tap()
+        let nameField = app.textFields["Key name"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 5), "generate alert missing")
+        nameField.tap()
+        sleep(1)
+        XCTAssertEqual(app.keyboards.count, 1, "the guard dismissed Settings' own keyboard")
+
+        // And typing still lands, which it cannot if focus was resigned.
+        nameField.typeText("scope-check")
+        sleep(1)
+        XCTAssertEqual(nameField.value as? String, "scope-check")
+    }
+}
