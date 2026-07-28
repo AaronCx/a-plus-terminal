@@ -50,6 +50,7 @@ struct PreviewScreen: View {
     /// reloads, so a token is what tells `updateUIView` "load again anyway".
     @State private var reloadToken = 0
     @State private var isStarting = false
+    @State private var isRefreshing = false
     @State private var isLoading = false
     @State private var loadError: String?
     /// Most recent navigation the guard refused, surfaced as a dismissible
@@ -288,7 +289,7 @@ struct PreviewScreen: View {
                 }
             }
 
-            Section("Detected Ports") {
+            Section {
                 if session.portDetector.ports.isEmpty {
                     Text("Nothing detected yet. Start a dev server in this session, or type its port below.")
                         .font(.callout)
@@ -300,6 +301,28 @@ struct PreviewScreen: View {
                         }
                     }
                 }
+            } header: {
+                HStack {
+                    Text("Detected Ports")
+                    Spacer()
+                    // The list refreshes on its own every 10s, which is a long
+                    // time to stare at a server you just started.
+                    Button {
+                        Task {
+                            isRefreshing = true
+                            await session.refreshListenerSnapshot()
+                            isRefreshing = false
+                        }
+                    } label: {
+                        if isRefreshing {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(isRefreshing || session.state != .connected)
+                    .accessibilityLabel("Refresh Detected Ports")
+                }
             }
 
             Section("Other Port") {
@@ -309,6 +332,9 @@ struct PreviewScreen: View {
                         .accessibilityLabel("Port Number")
                     Button("Open") {
                         guard let port = validatedManualPort else { return }
+                        // Typing a port is the strongest vouch there is, so it
+                        // joins the list instead of vanishing once opened.
+                        session.portDetector.noteManualPort(port)
                         // No scraped path for a hand-typed port — start at root.
                         Task { await start(remotePort: port, path: nil) }
                     }
@@ -622,7 +648,14 @@ struct PortPickerRow: View {
                                 .lineLimit(1)
                         }
                     }
-                    if port.isStale {
+                    if !port.reachableOnLoopback {
+                        // Listed, but the tunnel dials the far end's loopback
+                        // and this server is not on it — `vite --host` is the
+                        // usual way here. Say so rather than load a spinner.
+                        Text("Bound to another address, not localhost — restart it without --host to preview.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else if port.isStale {
                         Text("Not in the last two listener checks — this server may have exited.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -651,6 +684,7 @@ struct PortPickerRow: View {
         var parts = ["Open port \(port.port)"]
         if let process = port.process { parts.append("process \(process)") }
         if let path = port.path, path != "/" { parts.append("path \(path)") }
+        if !port.reachableOnLoopback { parts.append("not on localhost, cannot be previewed") }
         if port.isStale { parts.append("may have exited") }
         return parts.joined(separator: ", ")
     }

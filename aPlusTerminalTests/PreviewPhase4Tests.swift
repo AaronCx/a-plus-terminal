@@ -536,3 +536,126 @@ final class PortPickerRowLayoutTests: XCTestCase {
         )
     }
 }
+
+// MARK: - Picker: eviction, manual entry, and un-tunnellable listeners
+
+/// Build 41 field report: "i had to type in port it didnt show up on detected
+/// even after manually Porting in". Two separate causes — the entry cap on a
+/// busy host, and a hand-typed port never joining the list — plus the failure
+/// mode that sits right behind them: a listener bound somewhere the tunnel
+/// cannot reach.
+@MainActor
+final class PortPickerDiscoveryTests: XCTestCase {
+
+    // MARK: The cap
+
+    func testABusyHostNoLongerEvictsAPortThePickerJustShowed() {
+        let detector = PortDetector()
+        // A developer Mac idles at roughly this many listeners.
+        let lines = (1...21).map { "proc\($0) \(100 + $0) acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:\(9000 + $0) (LISTEN)" }
+        detector.applyListenerSnapshot(lines.joined(separator: "\n"))
+        XCTAssertEqual(detector.ports.count, PortDetector.maxEntries)
+        XCTAssertGreaterThan(PortDetector.maxEntries, 8, "the cap that caused the report")
+    }
+
+    /// The cap still has to hold, or a runaway host grows the list without end.
+    func testCapIsStillEnforced() {
+        let detector = PortDetector()
+        let lines = (1...60).map { "p\($0) \($0) acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:\(20000 + $0) (LISTEN)" }
+        detector.applyListenerSnapshot(lines.joined(separator: "\n"))
+        XCTAssertEqual(detector.ports.count, PortDetector.maxEntries)
+    }
+
+    // MARK: Typing a port
+
+    func testAHandTypedPortJoinsTheListAtTheTop() {
+        let detector = PortDetector()
+        detector.applyListenerSnapshot("node 1 acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:3000 (LISTEN)")
+        detector.noteManualPort(8090)
+        XCTAssertEqual(detector.ports.first?.port, 8090, "a typed port must be reachable again afterwards")
+    }
+
+    /// The whole point of vouching: a busy host must not evict the entry the
+    /// user typed in themselves.
+    func testAHandTypedPortSurvivesABusySnapshot() {
+        let detector = PortDetector()
+        detector.noteManualPort(8090)
+        let lines = (1...40).map { "p\($0) \($0) acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:\(30000 + $0) (LISTEN)" }
+        detector.applyListenerSnapshot(lines.joined(separator: "\n"))
+        XCTAssertTrue(detector.ports.contains { $0.port == 8090 },
+                      "the typed port was evicted by unvouched listeners")
+    }
+
+    func testTypingAnAlreadyListedPortPromotesItRatherThanDuplicating() {
+        let detector = PortDetector()
+        detector.applyListenerSnapshot("""
+        a 1 acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:3000 (LISTEN)
+        b 2 acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:5173 (LISTEN)
+        """)
+        detector.noteManualPort(5173)
+        XCTAssertEqual(detector.ports.filter { $0.port == 5173 }.count, 1)
+        XCTAssertEqual(detector.ports.first?.port, 5173)
+        XCTAssertEqual(detector.ports.first?.process, "b", "promotion must not discard the process name")
+    }
+
+    func testAnOutOfRangeTypedPortIsIgnored() {
+        let detector = PortDetector()
+        detector.noteManualPort(0)
+        detector.noteManualPort(70000)
+        XCTAssertTrue(detector.ports.isEmpty)
+    }
+
+    // MARK: Listeners the tunnel cannot reach
+
+    func testLoopbackAndWildcardBindsAreReachable() {
+        for address in ["127.0.0.1:5173", "[::1]:5173", "::1.5173", "127.0.0.1.5173",
+                        "*:5173", "0.0.0.0:5173", "[::]:5173", "localhost:5173"] {
+            XCTAssertTrue(PortDetector.reachesLoopback(address), "\(address) should be reachable")
+        }
+    }
+
+    func testSpecificNonLoopbackBindsAreNotReachable() {
+        for address in ["100.79.92.82:8090", "192.168.1.4:5173", "10.0.0.2.5173", "[fe80::1]:5173"] {
+            XCTAssertFalse(PortDetector.reachesLoopback(address), "\(address) should NOT be reachable")
+        }
+    }
+
+    /// `vite --host` on a Tailscale box: a real listener that can never load
+    /// through the tunnel, because the tunnel dials the far end's loopback.
+    func testATailscaleOnlyServerIsListedButFlagged() {
+        let detector = PortDetector()
+        detector.applyListenerSnapshot("Python 42 acx 5u IPv4 0x0 0t0 TCP 100.79.92.82:8090 (LISTEN)")
+        let entry = detector.ports.first { $0.port == 8090 }
+        XCTAssertNotNil(entry, "a non-loopback listener is still a real listener and must be shown")
+        XCTAssertFalse(entry?.reachableOnLoopback ?? true, "it cannot be tunnelled and must say so")
+    }
+
+    /// One server, several address families — one loopback binding is all the
+    /// tunnel needs, whichever order the rows arrive in.
+    func testAnyLoopbackBindingMakesThePortReachable() {
+        for lines in [["Python 42 acx 5u IPv4 0x0 0t0 TCP 100.79.92.82:8090 (LISTEN)",
+                       "Python 42 acx 6u IPv4 0x0 0t0 TCP 127.0.0.1:8090 (LISTEN)"],
+                      ["Python 42 acx 6u IPv4 0x0 0t0 TCP 127.0.0.1:8090 (LISTEN)",
+                       "Python 42 acx 5u IPv4 0x0 0t0 TCP 100.79.92.82:8090 (LISTEN)"]] {
+            let detector = PortDetector()
+            detector.applyListenerSnapshot(lines.joined(separator: "\n"))
+            XCTAssertTrue(detector.ports.first { $0.port == 8090 }?.reachableOnLoopback ?? false,
+                          "a loopback binding exists, so the port is reachable")
+        }
+    }
+
+    /// A scrape knows no bind address; it must not overwrite what a snapshot
+    /// established, or the warning would flicker away on the next printed URL.
+    func testAScrapeDoesNotClearTheFlagASnapshotSet() {
+        let detector = PortDetector()
+        detector.applyListenerSnapshot("Python 42 acx 5u IPv4 0x0 0t0 TCP 100.79.92.82:8090 (LISTEN)")
+        detector.observe(Array("serving on http://localhost:8090/\n".utf8))
+        XCTAssertFalse(detector.ports.first { $0.port == 8090 }?.reachableOnLoopback ?? true)
+    }
+
+    func testTheDefaultIsReachableSoNothingElseRegresses() {
+        let detector = PortDetector()
+        detector.observe(Array("Local: http://localhost:5173/\n".utf8))
+        XCTAssertTrue(detector.ports.first?.reachableOnLoopback ?? false)
+    }
+}

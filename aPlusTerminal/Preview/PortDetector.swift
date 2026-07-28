@@ -16,6 +16,14 @@ struct DetectedPort: Identifiable, Equatable, Sendable {
     /// Absent from two consecutive listener snapshots — greyed in the UI but
     /// deliberately still offered. See the merge notes on `PortDetector`.
     var isStale: Bool
+    /// Whether a connection to the far end's *loopback* would actually reach
+    /// this server. The tunnel always dials `127.0.0.1:<port>` on the remote
+    /// (see `SSHConnection.openForward`), so a server bound only to a LAN or
+    /// Tailscale address is listed — it is a real listener — but could never
+    /// load, and the picker says so rather than handing the user a spinner.
+    /// A wildcard bind (`*`, `0.0.0.0`, `::`) counts as reachable, because it
+    /// accepts loopback connections too.
+    var reachableOnLoopback: Bool = true
 }
 
 /// A `scheme://loopback[:port][/path]` occurrence lifted out of terminal output.
@@ -27,7 +35,11 @@ struct ScrapedEndpoint: Equatable, Sendable {
 /// One LISTEN row of `lsof`/`ss`/`netstat` output.
 struct ListenerRow: Equatable, Sendable {
     let port: Int
-    let process: String?
+    var process: String?
+    /// See `DetectedPort.reachableOnLoopback`. Per row, because one server
+    /// commonly binds several addresses and only one of them needs to be
+    /// loopback (or wildcard) for the tunnel to work.
+    var reachableOnLoopback: Bool = true
 }
 
 // The two tables below sit at file scope rather than being `static let`s on
@@ -83,7 +95,12 @@ private let loopbackHostScalars: [[UnicodeScalar]] = [
 
 @MainActor
 final class PortDetector {
-    static let maxEntries = 8
+    // 8 was too tight in the field: a developer Mac idles at ~20 loopback
+    // listeners (rapportd, ControlCenter, ollama, container runtimes), so the
+    // one dev server the user actually wanted was evicted before they could
+    // reach it — reported on build 41. Vouching still decides *who* gets
+    // evicted; this decides how often anyone has to be.
+    nonisolated static let maxEntries = 14
     /// Ordered fallbacks: `lsof` is the macOS answer, `ss` the modern Linux
     /// one, `netstat -an` the last resort that exists essentially everywhere
     /// (BusyBox included). `2>/dev/null` keeps "command not found" out of the
@@ -170,6 +187,18 @@ final class PortDetector {
         upsert(port: port, path: (path.isEmpty || path == "/") ? nil : path, process: nil, vouched: true)
     }
 
+    // MARK: - Source B2: the user typed it
+
+    /// The user typed a port into "Other Port" and opened it. That is the
+    /// strongest vouch there is — stronger than a printed URL, because it is an
+    /// explicit request rather than an inference — so the entry is promoted to
+    /// the head of the list and protected from eviction like any other vouched
+    /// port. Reported on build 41: a hand-typed port opened fine but never
+    /// appeared in Detected Ports, so there was no way back to it.
+    func noteManualPort(_ port: Int) {
+        upsert(port: port, path: nil, process: nil, vouched: true)
+    }
+
     // MARK: - Source C: listener ground truth
 
     func applyListenerSnapshot(_ output: String) {
@@ -194,7 +223,8 @@ final class PortDetector {
         for row in rows {
             Self.upsert(
                 &updated, scraped: &scraped, missed: &missed,
-                port: row.port, path: nil, process: row.process, vouched: false
+                port: row.port, path: nil, process: row.process, vouched: false,
+                reachableOnLoopback: row.reachableOnLoopback
             )
         }
 
@@ -260,7 +290,8 @@ final class PortDetector {
         port: Int,
         path: String?,
         process: String?,
-        vouched: Bool
+        vouched: Bool,
+        reachableOnLoopback: Bool? = nil
     ) {
         guard (1...65535).contains(port) else { return }
         if vouched { scraped.insert(port) }
@@ -273,6 +304,9 @@ final class PortDetector {
             // server later prints a bare "http://localhost:5173".
             if let path { entry.path = path }
             if let process { entry.process = process }
+            // Only a listener snapshot knows the bind address, so a scrape must
+            // not overwrite what one established.
+            if let reachableOnLoopback { entry.reachableOnLoopback = reachableOnLoopback }
             entry.isStale = false
             if vouched {
                 ports.remove(at: index)
@@ -284,9 +318,11 @@ final class PortDetector {
                 ports[index] = entry
             }
         } else if vouched {
-            ports.insert(DetectedPort(port: port, path: path, process: process, isStale: false), at: 0)
+            ports.insert(DetectedPort(port: port, path: path, process: process, isStale: false,
+                                      reachableOnLoopback: reachableOnLoopback ?? true), at: 0)
         } else {
-            ports.append(DetectedPort(port: port, path: path, process: process, isStale: false))
+            ports.append(DetectedPort(port: port, path: path, process: process, isStale: false,
+                                      reachableOnLoopback: reachableOnLoopback ?? true))
         }
         missed[port] = 0
         trimToCap(&ports, scraped: &scraped, missed: &missed)
@@ -472,10 +508,12 @@ final class PortDetector {
                 // One server yields several rows (lsof prints the IPv4 and IPv6
                 // sockets separately, ss one per address family). Keep the first
                 // row's position but let a later row fill in a process name the
-                // first one lacked.
-                if rows[existing].process == nil, let process = row.process {
-                    rows[existing] = ListenerRow(port: row.port, process: process)
-                }
+                // first one lacked — and let ANY reachable row win, since one
+                // loopback binding is all the tunnel needs.
+                var merged = rows[existing]
+                if merged.process == nil, let process = row.process { merged.process = process }
+                merged.reachableOnLoopback = merged.reachableOnLoopback || row.reachableOnLoopback
+                rows[existing] = merged
                 continue
             }
             indexByPort[row.port] = rows.count
@@ -499,10 +537,12 @@ final class PortDetector {
         // being blank on some builds. The header line carries no "(LISTEN)"
         // and so is skipped here, not special-cased.
         if let stateIndex = fields.firstIndex(of: "(LISTEN)"), stateIndex >= 2 {
-            guard let port = port(fromAddress: fields[stateIndex - 1]) else { return nil }
+            let address = fields[stateIndex - 1]
+            guard let port = port(fromAddress: address) else { return nil }
             // lsof truncates COMMAND to 9 characters unless invoked with
             // "+c 0"; surfaced as-is rather than guessed at.
-            return ListenerRow(port: port, process: fields[0])
+            return ListenerRow(port: port, process: fields[0],
+                               reachableOnLoopback: reachesLoopback(address))
         }
 
         // Linux ss -lntp:
@@ -512,7 +552,8 @@ final class PortDetector {
         if fields[0].uppercased() == "LISTEN", fields.count >= 4 {
             guard let port = port(fromAddress: fields[3]) else { return nil }
             // The process column is absent without -p or without privileges.
-            return ListenerRow(port: port, process: processName(inSSLine: line))
+            return ListenerRow(port: port, process: processName(inSSLine: line),
+                               reachableOnLoopback: reachesLoopback(fields[3]))
         }
 
         // netstat -an fallback, BSD and Linux:
@@ -522,10 +563,32 @@ final class PortDetector {
         // still worth having, since liveness is what stops an entry going stale.
         if fields[0].lowercased().hasPrefix("tcp"), fields.contains("LISTEN"), fields.count >= 4 {
             guard let port = port(fromAddress: fields[3]) else { return nil }
-            return ListenerRow(port: port, process: nil)
+            return ListenerRow(port: port, process: nil,
+                               reachableOnLoopback: reachesLoopback(fields[3]))
         }
 
         return nil
+    }
+
+    /// Whether dialling the far end's `127.0.0.1:<port>` reaches a listener at
+    /// this address — which is the only thing the tunnel can do.
+    ///
+    /// A wildcard bind (`*`, `0.0.0.0`, `::`) accepts loopback connections, so
+    /// it counts. A specific non-loopback address (`192.168.1.4`, a Tailscale
+    /// 100.x, a container IP) does not: `vite --host` is the everyday way to
+    /// end up there, and the resulting entry is a real listener that can never
+    /// load through the tunnel.
+    nonisolated static func reachesLoopback(_ address: String) -> Bool {
+        let scalars = Array(address.unicodeScalars)
+        var end = scalars.count
+        while end > 0, isASCIIDigit(scalars[end - 1]) { end -= 1 }
+        // Drop the ":"/"." that separates the port, leaving the host part.
+        if end > 0, scalars[end - 1] == ":" || scalars[end - 1] == "." { end -= 1 }
+        var host = string(scalars, 0, end)
+        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        if host.isEmpty || host == "*" || host == "0.0.0.0" || host == "::" { return true }
+        if host == "::1" || host == "localhost" { return true }
+        return host.hasPrefix("127.")
     }
 
     /// Port out of `*:5173`, `127.0.0.1:5173`, `[::1]:5173`, and the BSD
