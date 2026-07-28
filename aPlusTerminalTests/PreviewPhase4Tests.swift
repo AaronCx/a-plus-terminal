@@ -1,4 +1,5 @@
 import CoreVideo
+import SwiftUI
 import UIKit
 import WebKit
 import XCTest
@@ -437,5 +438,101 @@ final class PreviewUserAgentReloadTests: XCTestCase {
         XCTAssertFalse(changed(PreviewWebView.desktopUserAgent))
         XCTAssertTrue(changed(nil))
         XCTAssertFalse(changed(nil))
+    }
+}
+
+// MARK: - Port picker: the whole row has to be the tap target
+
+/// Aaron on device, build 40: "on this list page only clicking the numbers
+/// brings you to the preview not the bar."
+///
+/// `.buttonStyle(.plain)` sizes a button to its label. The label was a `VStack`
+/// that hugs its content, so a row reading "5173  node" was ~110pt of tappable
+/// area inside a ~350pt-wide row — and nothing about the rendering said so.
+/// These tests measure the row the way the layout system does: propose a width
+/// and ask what it takes.
+@MainActor
+final class PortPickerRowLayoutTests: XCTestCase {
+    private let proposedWidth: CGFloat = 350
+
+    private func measuredWidth(_ port: DetectedPort) -> CGFloat {
+        let host = UIHostingController(rootView: PortPickerRow(port: port) {})
+        // A finite width proposal with unbounded height is what a List row
+        // hands its content.
+        return host.sizeThatFits(
+            in: CGSize(width: proposedWidth, height: .greatestFiniteMagnitude)
+        ).width
+    }
+
+    func testShortRowStillFillsTheFullWidth() {
+        // The narrowest realistic row: a bare port, no process, no path. Before
+        // the fix this measured roughly the width of four digits.
+        let width = measuredWidth(DetectedPort(port: 5173, path: nil, process: nil, isStale: false))
+        XCTAssertEqual(
+            width, proposedWidth, accuracy: 0.5,
+            "a short row must still claim the whole width, or its hit area shrinks to the text"
+        )
+    }
+
+    func testEveryRowVariantFillsTheFullWidth() {
+        let variants: [(String, DetectedPort)] = [
+            ("port only", DetectedPort(port: 3000, path: nil, process: nil, isStale: false)),
+            ("with process", DetectedPort(port: 5173, path: nil, process: "node", isStale: false)),
+            ("with path", DetectedPort(port: 8000, path: "/admin", process: "Python", isStale: false)),
+            ("root path is hidden", DetectedPort(port: 8080, path: "/", process: "caddy", isStale: false)),
+            ("stale, two lines", DetectedPort(port: 11434, path: nil, process: "ollama", isStale: true)),
+        ]
+        for (name, port) in variants {
+            XCTAssertEqual(
+                measuredWidth(port), proposedWidth, accuracy: 0.5,
+                "\(name): row did not fill the proposed width"
+            )
+        }
+    }
+
+    func testTallStaleRowKeepsItsSecondLine() {
+        // Guards the stretch against being written as a fixed `.frame(width:)`,
+        // which would also satisfy the width assertions while clipping the
+        // "may have exited" line.
+        let host = UIHostingController(
+            rootView: PortPickerRow(
+                port: DetectedPort(port: 11434, path: nil, process: "ollama", isStale: true)
+            ) {}
+        )
+        let stale = host.sizeThatFits(
+            in: CGSize(width: proposedWidth, height: .greatestFiniteMagnitude)
+        ).height
+        let fresh = UIHostingController(
+            rootView: PortPickerRow(
+                port: DetectedPort(port: 11434, path: nil, process: "ollama", isStale: false)
+            ) {}
+        ).sizeThatFits(in: CGSize(width: proposedWidth, height: .greatestFiniteMagnitude)).height
+        XCTAssertGreaterThan(stale, fresh, "the stale explanation line must still render")
+    }
+
+    func testTappingTheRowRunsItsAction() {
+        // The row owns the Button now, so keep a check that the action is
+        // actually wired to it.
+        var fired = 0
+        let row = PortPickerRow(
+            port: DetectedPort(port: 5173, path: nil, process: "node", isStale: false)
+        ) { fired += 1 }
+        row.action()
+        XCTAssertEqual(fired, 1)
+    }
+
+    func testAccessibilityLabelDescribesTheRow() {
+        XCTAssertEqual(
+            PortPickerRow.accessibilityLabel(
+                for: DetectedPort(port: 8000, path: "/admin", process: "Python", isStale: true)
+            ),
+            "Open port 8000, process Python, path /admin, may have exited"
+        )
+        XCTAssertEqual(
+            PortPickerRow.accessibilityLabel(
+                for: DetectedPort(port: 5173, path: "/", process: nil, isStale: false)
+            ),
+            "Open port 5173"
+        )
     }
 }
