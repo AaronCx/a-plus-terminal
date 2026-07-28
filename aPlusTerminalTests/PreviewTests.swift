@@ -105,13 +105,14 @@ final class PortDetectorStreamTests: XCTestCase {
         XCTAssertEqual(detector.ports.map(\.port), [3000, 5173])
     }
 
-    func testCapsAtEightEntriesEvictingTheOldest() {
+    func testCapsEntriesEvictingTheOldest() {
         let detector = PortDetector()
-        for port in 4000..<4012 {
+        let overflow = PortDetector.maxEntries + 4
+        for port in 4000..<(4000 + overflow) {
             detector.observe(Array("http://localhost:\(port)/\n".utf8))
         }
         XCTAssertEqual(detector.ports.count, PortDetector.maxEntries)
-        XCTAssertEqual(detector.ports.first?.port, 4011)
+        XCTAssertEqual(detector.ports.first?.port, 4000 + overflow - 1)
         XCTAssertFalse(detector.ports.contains { $0.port == 4000 })
     }
 
