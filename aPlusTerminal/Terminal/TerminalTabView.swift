@@ -217,7 +217,29 @@ struct TerminalTabView: View {
             } message: {
                 Text(wakeError ?? "")
             }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)) { _ in
+                dismissStrandedKeyboard()
+            }
         }
+    }
+
+    /// Nothing on the bare session list accepts text, so a keyboard standing
+    /// over it belongs to a first responder whose screen is gone.
+    ///
+    /// Field report (build 40): a session was popped out, the phone locked, the
+    /// shell expired while away, and returning through the pop-out landed on
+    /// this list with the keyboard up — "as if I did come back into the
+    /// session". UIKit restores the keyboard for its remembered first responder
+    /// on activation whether or not that view still has a screen, so the fix
+    /// has to react to the keyboard *appearing* rather than to any one of the
+    /// routes that can strand it (remote hangup, wind-down, a pop-out restore
+    /// into a session that no longer exists).
+    private func dismissStrandedKeyboard() {
+        // A sheet or the monitor cover owns the screen, and its fields are
+        // entitled to a keyboard.
+        guard path.isEmpty, !addingServer, !addingMonitor, !discovering,
+              editingServer == nil, discoveredServer == nil, vncManager.presented == nil else { return }
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
     private func wake(_ server: Server) {

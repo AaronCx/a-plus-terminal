@@ -12,9 +12,19 @@ final class VNCFrameSource: PiPFrameSource {
     /// the engine's 10 fps coalescer.
     private let pacer: PiPFrameCoalescer
     private var frozenFrame: CGImage?
+    /// Injectable clock (tests).
+    private let now: () -> Date
+    /// 1 Hz self-invalidation so the session timer advances even when the
+    /// remote screen is perfectly still — which, for a monitor left on a login
+    /// window or an idle desktop, is most of the time.
+    private var ticker: Task<Void, Never>?
 
     let preferredBufferSize = CGSize(width: 960, height: 600)
-    var onInvalidate: (() -> Void)?
+    var onInvalidate: (() -> Void)? {
+        didSet {
+            if onInvalidate != nil { startTicking() } else { stopTicking() }
+        }
+    }
     var onDetach: (() -> Void)?
 
     var followSuspended: Bool = false {
@@ -26,15 +36,43 @@ final class VNCFrameSource: PiPFrameSource {
 
     var restoreSessionID: UUID? { session?.id }
 
-    init(session: VNCMonitorSession, maxFrameInterval: TimeInterval = 0.2) {
+    init(
+        session: VNCMonitorSession,
+        maxFrameInterval: TimeInterval = 0.2,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.session = session
+        self.now = now
         self.pacer = PiPFrameCoalescer(minInterval: maxFrameInterval)
         pacer.render = { [weak self] in self?.onInvalidate?() }
+    }
+
+    /// Monitor uptime for the header, pre-formatted. nil once the session is
+    /// gone — a timer counting up for something that no longer exists is worse
+    /// than no timer.
+    var elapsedText: String? {
+        session.map { PiPElapsedFormatter.string(now().timeIntervalSince($0.startedAt)) }
     }
 
     /// Called (via the session's pipInvalidate slot) on every new frame.
     func noteFrame() {
         pacer.invalidate()
+    }
+
+    private func startTicking() {
+        guard ticker == nil else { return }
+        ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                self.onInvalidate?()
+            }
+        }
+    }
+
+    private func stopTicking() {
+        ticker?.cancel()
+        ticker = nil
     }
 
     func renderFrame(into pool: CVPixelBufferPool) -> CVPixelBuffer? {
@@ -87,13 +125,31 @@ final class VNCFrameSource: PiPFrameSource {
                 withAttributes: [.font: font, .foregroundColor: UIColor(white: 0.85, alpha: 1)]
             )
         }
+        var textLimit = bounds.width - 16
         if followSuspended {
-            drawPausedBadge(in: bounds)
+            textLimit = drawPausedBadge(in: bounds).minX - 12
         }
+        drawElapsed(in: bounds, rightEdge: textLimit)
         return buffer
     }
 
-    private func drawPausedBadge(in bounds: CGRect) {
+    /// Live monitor timer, right-aligned beside the paused badge — same glyph
+    /// and placement as the terminal and preview pop-outs.
+    private func drawElapsed(in bounds: CGRect, rightEdge: CGFloat) {
+        guard let elapsed = elapsedText else { return }
+        let font = UIFont.monospacedDigitSystemFont(ofSize: 22, weight: .medium)
+        let text = "\u{23F1} \(elapsed)" as NSString
+        let size = text.size(withAttributes: [.font: font])
+        // y matches the paused badge's text (badge origin 16, inset 5), so the
+        // two sit on the same line when both are up.
+        text.draw(
+            at: CGPoint(x: rightEdge - size.width, y: 21),
+            withAttributes: [.font: font, .foregroundColor: UIColor(white: 0.85, alpha: 1)]
+        )
+    }
+
+    @discardableResult
+    private func drawPausedBadge(in bounds: CGRect) -> CGRect {
         let font = UIFont.systemFont(ofSize: 22, weight: .semibold)
         let text = "Paused"
         let textSize = (text as NSString).size(withAttributes: [.font: font])
@@ -111,6 +167,7 @@ final class VNCFrameSource: PiPFrameSource {
             at: CGPoint(x: badge.minX + padding, y: badge.minY + 5),
             withAttributes: [.font: font, .foregroundColor: UIColor.systemYellow]
         )
+        return badge
     }
 
     func detach() {

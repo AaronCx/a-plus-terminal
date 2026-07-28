@@ -632,3 +632,49 @@ final class ServerKindCodableTests: XCTestCase {
         XCTAssertEqual(odd.displayAddress, "studio.local:5901")
     }
 }
+
+/// The monitor pop-out carries the same live session timer as the terminal and
+/// preview windows (Aaron: "adding session timer to all pip windows").
+@MainActor
+final class VNCFrameSourceElapsedTests: XCTestCase {
+    private func makeSource(now: @escaping () -> Date) -> (VNCFrameSource, VNCMonitorSession) {
+        let passwords = PasswordStore(secrets: InMemorySecretStore())
+        let server = Server(name: "studio", host: "h", username: "", kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+        let session = VNCMonitorSession(server: server, passwords: passwords, makeConnection: { _ in MockVNCConnection() })
+        return (VNCFrameSource(session: session, now: now), session)
+    }
+
+    func testElapsedCountsFromWhenTheMonitorOpened() {
+        // startedAt is stamped at init, so anchor the clock to it.
+        var now = Date()
+        let (source, session) = makeSource(now: { now })
+        now = session.startedAt.addingTimeInterval(125)
+        XCTAssertEqual(source.elapsedText, "2:05")
+        now = session.startedAt.addingTimeInterval(3807)
+        XCTAssertEqual(source.elapsedText, "1:03:27")
+    }
+
+    /// A timer still counting up for a monitor that is gone would be a lie.
+    func testElapsedStopsWhenTheSessionGoesAway() {
+        var source: VNCFrameSource!
+        autoreleasepool {
+            let passwords = PasswordStore(secrets: InMemorySecretStore())
+            let server = Server(name: "s", host: "h", username: "", kind: .vncMonitor, vncAuthMethod: VNCAuthMethod.none)
+            let session = VNCMonitorSession(server: server, passwords: passwords, makeConnection: { _ in MockVNCConnection() })
+            source = VNCFrameSource(session: session)
+            XCTAssertNotNil(source.elapsedText)
+        }
+        XCTAssertNil(source.elapsedText, "the source holds the session weakly — no session, no timer")
+    }
+
+    /// A monitor left on a still desktop produces no frames, so without its own
+    /// ticker the clock would sit frozen in the corner.
+    func testTickerAdvancesTheClockWithoutAnyFrames() async throws {
+        let (source, _) = makeSource(now: Date.init)
+        var ticks = 0
+        source.onInvalidate = { ticks += 1 }
+        try await Task.sleep(for: .seconds(2.2))
+        source.onInvalidate = nil
+        XCTAssertGreaterThanOrEqual(ticks, 1, "no 1 Hz tick — a still screen would freeze the timer")
+    }
+}
