@@ -102,3 +102,79 @@ final class PreviewPortPickerUITests: XCTestCase {
         shot("preview opened from an edge tap")
     }
 }
+
+/// App Store screenshot capture for the Preview feature. Gated on
+/// `APLUSTERMINAL_SCREENSHOTS=1` as well as live QA, so it never runs by
+/// accident, and driven against a real SSH host with a real dev server —
+/// a store screenshot has to be the app actually doing the thing.
+///
+/// Run on a 6.7"-class simulator (the store set is APP_IPHONE_67):
+///   xcodebuild test ... -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
+///     APLUSTERMINAL_LIVE_QA=1 APLUSTERMINAL_SCREENSHOTS=1 \
+///     APLUSTERMINAL_SHOT_PATH=/shot.html APLUSTERMINAL_TEST_SERVER=... APLUSTERMINAL_TEST_PRIVATE_KEY=...
+final class PreviewScreenshotUITests: XCTestCase {
+    private var app: XCUIApplication!
+
+    override func setUpWithError() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["APLUSTERMINAL_LIVE_QA"] == "1", "live QA disabled")
+        try XCTSkipUnless(env["APLUSTERMINAL_SCREENSHOTS"] == "1", "screenshot capture disabled")
+        continueAfterFailure = false
+
+        app = XCUIApplication()
+        app.launchEnvironment["APLUSTERMINAL_TEST_SERVER"] = env["APLUSTERMINAL_TEST_SERVER"]
+        app.launchEnvironment["APLUSTERMINAL_TEST_PRIVATE_KEY"] = env["APLUSTERMINAL_TEST_PRIVATE_KEY"]
+        app.launchEnvironment["APLUSTERMINAL_TEST_CONNECT_AFTER_MS"] = "1500"
+        app.launch()
+    }
+
+    private func shot(_ name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Pasteboard route, as in the other live suites.
+    private func type(_ text: String, settle: UInt32 = 2) {
+        UIPasteboard.general.string = text
+        app.buttons["Paste"].tap()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let allow = springboard.alerts.buttons["Allow Paste"]
+        if allow.waitForExistence(timeout: 3) {
+            allow.tap()
+        }
+        sleep(settle)
+    }
+
+    func testCapturePreviewScreenshot() throws {
+        let port = ProcessInfo.processInfo.environment["APLUSTERMINAL_SHOT_PORT"] ?? "5173"
+        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 60), "never reached a connected session")
+
+        // Print the dev server's URL the way a dev server does. This is not
+        // decoration: the picker caps at 8 entries and this Mac has ~21
+        // loopback listeners, so an unvouched port is evicted before it can be
+        // shown. A scraped URL is what protects it — and it is the flow the
+        // feature is built around anyway.
+        type("clear; echo '  ➜  Local:   http://localhost:\(port)/'\n", settle: 3)
+
+        let previewButton = app.buttons["Preview Local Server"]
+        XCTAssertTrue(previewButton.waitForExistence(timeout: 60), "never reached a connected session")
+        previewButton.tap()
+
+        // Pick the dev server explicitly rather than "whatever is first" — the
+        // machine has plenty of other listeners and the screenshot must show a
+        // real page, not rapportd.
+        let row = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Open port \(port)")
+        ).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 60), "dev server on \(port) was not detected")
+        shot("preview-picker")
+        row.tap()
+
+        XCTAssertTrue(app.buttons["Reload Preview"].waitForExistence(timeout: 45), "preview never bound")
+        // Let the page paint and the layout settle before capturing.
+        sleep(6)
+        shot("preview-page")
+    }
+}
