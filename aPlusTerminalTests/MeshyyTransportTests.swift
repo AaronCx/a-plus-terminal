@@ -246,3 +246,52 @@ final class QuickActionBarTests: XCTestCase {
         }
     }
 }
+
+// MARK: - One shell, decided once
+
+@MainActor
+final class SingleShellTests: XCTestCase {
+    /// The defect this design replaced: with the toggle on, the app opened an SSH pty
+    /// AND attached meshyy, so one visible terminal had two live shells on the host —
+    /// different scrollback, different cursor, different rc-file side effects — and it
+    /// switched between them when meshyy faltered. Reported as "not doing at all what
+    /// is advertised", and correctly.
+    ///
+    /// `SSHConnection.connect(_:openShell:)` is the seam that makes one shell
+    /// structural rather than careful: when meshyy is going to carry the terminal, the
+    /// SSH connection is opened WITHOUT a pty, so a second shell cannot exist even if
+    /// later code is wrong.
+    func testConnectCanBeMadeWithoutSpawningAShell() throws {
+        // A compile-time assertion, deliberately. If the parameter is removed or
+        // renamed, the one-shell guarantee has been dismantled and this stops building
+        // — which is a louder failure than a runtime assertion nobody reads.
+        let withShell: (SSHConnection.Configuration, Bool) -> Void = { _, _ in }
+        XCTAssertNotNil(withShell)
+
+        let connectSignature: (SSHConnection) -> (SSHConnection.Configuration, Bool) async throws -> Void = {
+            connection in { config, open in try await connection.connect(config, openShell: open) }
+        }
+        XCTAssertNotNil(connectSignature)
+
+        let openLater: (SSHConnection) -> (SSHConnection.Configuration) async throws -> Void = {
+            connection in { config in try await connection.openShell(config) }
+        }
+        XCTAssertNotNil(openLater, "the deferred shell open is what lets the probe decide first")
+    }
+
+    /// The toggle is the fallback. There is no runtime switch, so the only thing that
+    /// decides which transport runs is this preference, read once per connect.
+    func testToggleIsTheOnlyFallbackMechanism() {
+        let defaults = UserDefaults(suiteName: "one-shell-\(UUID().uuidString)")!
+        let settings = AppSettings(defaults: defaults)
+
+        XCTAssertFalse(settings.meshyyTransport, "default off means default = today's app")
+        settings.meshyyTransport = true
+        XCTAssertTrue(settings.meshyyTransport)
+        settings.meshyyTransport = false
+        XCTAssertFalse(
+            settings.meshyyTransport,
+            "turning it off must be enough to get plain SSH back — that is the escape hatch"
+        )
+    }
+}

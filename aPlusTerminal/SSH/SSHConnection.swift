@@ -132,7 +132,15 @@ actor SSHConnection {
         )
     }
 
-    func connect(_ config: Configuration) async throws {
+    /// Connects, and opens the interactive shell only if asked.
+    ///
+    /// `openShell: false` exists for meshyy. When the daemon is going to carry the
+    /// terminal, opening an SSH pty as well would spawn a SECOND shell on the same
+    /// host for one visible terminal — which is where the wrong frame, the wrong
+    /// scrollback and the duplicate rc-file side effects all came from. The SSH
+    /// connection is still needed for the bootstrap exec channel, SFTP, the preview
+    /// forward and multiplexer discovery; it just does not get a pty.
+    func connect(_ config: Configuration, openShell: Bool = true) async throws {
         state = .connecting
         let validator = TOFUHostKeyValidator(pinnedKey: config.knownHostKey)
         var settings = SSHClientSettings(
@@ -167,14 +175,26 @@ actor SSHConnection {
             throw resolved
         }
 
-        do {
-            try await openPTY(config)
-        } catch {
-            state = .disconnected(error)
-            await closeClient()
-            throw error
+        if openShell {
+            do {
+                try await openPTY(config)
+            } catch {
+                state = .disconnected(error)
+                await closeClient()
+                throw error
+            }
         }
         state = .connected
+    }
+
+    /// Opens the interactive shell on an already-connected client.
+    ///
+    /// Used when the meshyy probe comes back empty: the decision of which transport
+    /// carries the terminal is made ONCE, before any shell exists, and only the winner
+    /// ever spawns one.
+    func openShell(_ config: Configuration) async throws {
+        guard client != nil else { throw SSHConnectionError.notConnected }
+        try await openPTY(config)
     }
 
     func send(_ data: Data) async throws {

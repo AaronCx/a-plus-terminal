@@ -97,9 +97,9 @@ final class TerminalSession: Identifiable, Hashable {
     private var scrollBridge: ScrollBridge?
     private var pumpTask: Task<Void, Never>?
     private var meshyyPumpTask: Task<Void, Never>?
-    private var meshyyNegotiationTask: Task<Void, Never>?
-    /// False while meshyy is drawing: the SSH pump keeps draining but stops feeding.
-    private var sshPumpFeedsTerminal = true
+    /// The config the winning candidate connected with, so the SSH shell can still be
+    /// opened later if the meshyy probe comes back empty.
+    private var lastCandidateConfig: SSHConnection.Configuration?
     private var reconnectLoop: Task<Void, Never>?
     private var keepaliveTask: Task<Void, Never>?
     /// Idle keepalive cadence. A foreground PTY with no typing produces no
@@ -527,8 +527,6 @@ final class TerminalSession: Identifiable, Hashable {
         //
         // Previously suspend ignored meshyy altogether, so the transport was left
         // running against a connection iOS was about to freeze.
-        meshyyNegotiationTask?.cancel()
-        meshyyNegotiationTask = nil
         meshyyPumpTask?.cancel()
         meshyyPumpTask = nil
         await meshyy?.detach()
@@ -768,9 +766,19 @@ final class TerminalSession: Identifiable, Hashable {
         await stopPreview()
         await connection.disconnect()
 
-        let fresh = try await connectBestCandidate(auth: auth)
+        // ONE SHELL. The transport that carries the terminal is chosen ONCE, here,
+        // before any shell exists — and only the winner ever spawns one.
+        //
+        // The previous version opened an SSH pty AND attached meshyy, leaving two live
+        // shells on the host for one visible terminal, and switched between them when
+        // meshyy faltered. That is where the wrong frame and the wrong scrollback came
+        // from: they were different shells with different state. There is no runtime
+        // fallback now, by design — the Settings toggle IS the fallback, and a user who
+        // finds meshyy misbehaving turns it off and gets exactly today's app back.
+        let wantsMeshyy = settings.meshyyTransport
+        let fresh = try await connectBestCandidate(auth: auth, openShell: !wantsMeshyy)
         connection = fresh
-        // Clear whatever the dead PTY left on screen before the new shell and
+        // Clear whatever the dead pty left on screen before the new shell and
         // tmux attach repaint — otherwise old and new frames overlay.
         terminalView.getTerminal().resetToInitialState()
 
@@ -784,79 +792,38 @@ final class TerminalSession: Identifiable, Hashable {
         // shell's working/waiting reading.
         agentMonitor.reset()
 
-        // FIRST PAINT IS NEVER BLOCKED ON meshyy.
-        //
-        // The first version awaited the bootstrap here, before starting the pump — so
-        // nothing was drawn until an SSH exec channel had opened, run a shell probe and
-        // returned, on every single connect including hosts with no daemon at all. In a
-        // product whose §1 justification is time-to-first-paint, that is exactly
-        // backwards, and it was immediately obvious in use as "slow to connect".
-        //
-        // So the SSH PTY starts drawing straight away, and meshyy is negotiated behind
-        // it. If it works, the session upgrades mid-flight and the user sees nothing but
-        // a terminal that came up as fast as it always did.
-        startPump(reading: fresh)
-        if settings.meshyyTransport {
-            startMeshyyNegotiation(over: fresh)
-        } else {
-            await stopMeshyy()
-        }
-    }
+        await stopMeshyy()
+        meshyyUnavailable = nil
 
-    /// Negotiates meshyy in the background and upgrades the session if it succeeds.
-    private func startMeshyyNegotiation(over ssh: SSHConnection) {
-        meshyyNegotiationTask?.cancel()
-        meshyyNegotiationTask = Task { [weak self] in
-            guard let self else { return }
-            let size = self.currentWindowSize()
-
-            // An EXISTING transport re-attaches, preserving consumedOffset — that is
-            // what makes the daemon replay what was missed. Only a first-ever connect
-            // builds one.
-            if let existing = self.meshyy {
-                let result = await existing.reattach(
-                    over: ssh, sshHost: self.server.host, cols: size.cols, rows: size.rows
-                )
-                guard !Task.isCancelled else { return }
-                switch result {
-                case .success:
-                    self.meshyyUnavailable = nil
-                    self.sshPumpFeedsTerminal = false
-                case .failure(let reason):
-                    self.meshyyUnavailable = reason.errorDescription
-                    self.meshyy = nil
-                    self.sshPumpFeedsTerminal = true
-                }
-                return
-            }
-
+        if wantsMeshyy {
+            let size = currentWindowSize()
             let result = await MeshyyTransport.bootstrap(
-                over: ssh,
-                serverID: self.server.id,
-                sshHost: self.server.host,
+                over: fresh,
+                serverID: server.id,
+                sshHost: server.host,
                 cols: size.cols,
                 rows: size.rows
             )
-            guard !Task.isCancelled else { return }
             switch result {
             case .success(let transport):
-                self.meshyy = transport
-                self.meshyyUnavailable = nil
-                // Clear the SSH shell's frame before meshyy paints its own, or the two
-                // overlay: they are different shells on the same screen.
-                self.terminalView.getTerminal().resetToInitialState()
-                self.sshPumpFeedsTerminal = false
-                self.startMeshyyPump(reading: transport, sshConnection: ssh)
+                meshyy = transport
+                startMeshyyPump(reading: transport)
+                return
             case .failure(let reason):
-                self.meshyyUnavailable = reason.errorDescription
+                // No daemon here, or it refused. Say so, and open the SSH shell that
+                // was deliberately not opened above. This is a CONNECT-time decision,
+                // not a mid-session switch: still exactly one shell.
+                meshyyUnavailable = reason.errorDescription
+                if let config = lastCandidateConfig {
+                    try await fresh.openShell(config)
+                }
             }
         }
+        startPump(reading: fresh)
     }
 
     /// Tears down the meshyy transport without touching the SSH connection.
     private func stopMeshyy() async {
-        meshyyNegotiationTask?.cancel()
-        meshyyNegotiationTask = nil
         guard let transport = meshyy else { return }
         meshyy = nil
         meshyyPumpTask?.cancel()
@@ -872,7 +839,7 @@ final class TerminalSession: Identifiable, Hashable {
     /// only that the resumable transport gave up — the session is still alive, so the
     /// right response is to fall back to the SSH PTY that was left open underneath, not
     /// to tear the session down.
-    private func startMeshyyPump(reading transport: MeshyyTransport, sshConnection: SSHConnection) {
+    private func startMeshyyPump(reading transport: MeshyyTransport) {
         meshyyPumpTask = Task { [weak self] in
             for await chunk in transport.output {
                 guard let self, !Task.isCancelled else { return }
@@ -883,19 +850,23 @@ final class TerminalSession: Identifiable, Hashable {
                 self.pipInvalidate?()
             }
             guard let self, !Task.isCancelled, self.meshyy === transport else { return }
-            await self.fallBackToSSH(sshConnection)
+            // meshyy ended. There is no SSH shell hiding behind it to fall back to —
+            // that was the whole point — so this is a dropped session like any other,
+            // and the reconnect path handles it. A user who wants SSH turns the toggle
+            // off, which is what it is for.
+            self.meshyyEnded()
         }
     }
 
-    /// meshyy stopped while the SSH connection is still good. Carry on over SSH.
-    private func fallBackToSSH(_ connection: SSHConnection) async {
-        guard state == .connected, meshyy != nil else { return }
+    /// The meshyy session ended without the user closing it.
+    private func meshyyEnded() {
+        guard state == .connected else { return }
         meshyy = nil
-        meshyyUnavailable = "The meshyy connection dropped — back on SSH."
-        // Re-point the existing SSH pump at the terminal. It has been draining the
-        // channel all along so the PTY never blocked; it just was not drawing.
-        sshPumpFeedsTerminal = true
+        stopPreviewImmediately()
+        state = .reconnecting
+        Task { await reconnect(maxAttempts: 10) }
     }
+
 
     /// Walks the server's candidate hosts in order (last winner first within
     /// this session) and returns the first connection that completes an SSH
@@ -909,7 +880,10 @@ final class TerminalSession: Identifiable, Hashable {
     /// host, where it still aborts the walk immediately (never quietly
     /// connect elsewhere past a MITM warning). A first connect with no pinned
     /// key does TOFU on whichever candidate connects first, exactly as today.
-    private func connectBestCandidate(auth: SSHConnection.AuthMethod) async throws -> SSHConnection {
+    private func connectBestCandidate(
+        auth: SSHConnection.AuthMethod,
+        openShell: Bool
+    ) async throws -> SSHConnection {
         var candidates = server.connectionCandidates
         if let preferred = preferredCandidateHost,
            let index = candidates.firstIndex(of: preferred), index > 0 {
@@ -939,8 +913,9 @@ final class TerminalSession: Identifiable, Hashable {
 
             let fresh = SSHConnection()
             do {
-                try await fresh.connect(config)
+                try await fresh.connect(config, openShell: openShell)
                 preferredCandidateHost = candidate
+                lastCandidateConfig = config
                 return fresh
             } catch {
                 if case SSHConnectionError.hostKeyMismatch = error {
@@ -1013,13 +988,11 @@ final class TerminalSession: Identifiable, Hashable {
     /// fills its window, the remote shell blocks on its own stdout, and the session
     /// hangs for real — the same failure meshyy's own daemon has a ring buffer to
     /// avoid. So the pump keeps running and simply does not draw.
-    private func startPump(reading connection: SSHConnection, feedsTerminal: Bool = true) {
-        sshPumpFeedsTerminal = feedsTerminal
+    private func startPump(reading connection: SSHConnection) {
         pumpTask = Task { [weak self] in
             for await chunk in await connection.output {
                 guard let self, !Task.isCancelled else { return }
                 let bytes = [UInt8](chunk)
-                guard self.sshPumpFeedsTerminal else { continue }
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
                 // Source A of the preview's port detection. Cheap by
