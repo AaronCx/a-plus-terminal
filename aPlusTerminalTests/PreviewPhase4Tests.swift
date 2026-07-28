@@ -549,7 +549,7 @@ final class PortPickerDiscoveryTests: XCTestCase {
 
     // MARK: The cap
 
-    func testABusyHostNoLongerEvictsAPortThePickerJustShowed() {
+    func testBusyHostKeepsMoreEntries() {
         let detector = PortDetector()
         // A developer Mac idles at roughly this many listeners.
         let lines = (1...21).map { "proc\($0) \(100 + $0) acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:\(9000 + $0) (LISTEN)" }
@@ -568,7 +568,7 @@ final class PortPickerDiscoveryTests: XCTestCase {
 
     // MARK: Typing a port
 
-    func testAHandTypedPortJoinsTheListAtTheTop() {
+    func testTypedPortJoinsListAtTop() {
         let detector = PortDetector()
         detector.applyListenerSnapshot("node 1 acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:3000 (LISTEN)")
         detector.noteManualPort(8090)
@@ -577,7 +577,7 @@ final class PortPickerDiscoveryTests: XCTestCase {
 
     /// The whole point of vouching: a busy host must not evict the entry the
     /// user typed in themselves.
-    func testAHandTypedPortSurvivesABusySnapshot() {
+    func testTypedPortSurvivesBusySnapshot() {
         let detector = PortDetector()
         detector.noteManualPort(8090)
         let lines = (1...40).map { "p\($0) \($0) acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:\(30000 + $0) (LISTEN)" }
@@ -586,7 +586,7 @@ final class PortPickerDiscoveryTests: XCTestCase {
                       "the typed port was evicted by unvouched listeners")
     }
 
-    func testTypingAnAlreadyListedPortPromotesItRatherThanDuplicating() {
+    func testTypingListedPortPromotesIt() {
         let detector = PortDetector()
         detector.applyListenerSnapshot("""
         a 1 acx 5u IPv4 0x0 0t0 TCP 127.0.0.1:3000 (LISTEN)
@@ -598,7 +598,7 @@ final class PortPickerDiscoveryTests: XCTestCase {
         XCTAssertEqual(detector.ports.first?.process, "b", "promotion must not discard the process name")
     }
 
-    func testAnOutOfRangeTypedPortIsIgnored() {
+    func testTypedPortOutOfRangeIgnored() {
         let detector = PortDetector()
         detector.noteManualPort(0)
         detector.noteManualPort(70000)
@@ -607,14 +607,14 @@ final class PortPickerDiscoveryTests: XCTestCase {
 
     // MARK: Listeners the tunnel cannot reach
 
-    func testLoopbackAndWildcardBindsAreReachable() {
+    func testLoopbackAndWildcardReachable() {
         for address in ["127.0.0.1:5173", "[::1]:5173", "::1.5173", "127.0.0.1.5173",
                         "*:5173", "0.0.0.0:5173", "[::]:5173", "localhost:5173"] {
             XCTAssertTrue(PortDetector.reachesLoopback(address), "\(address) should be reachable")
         }
     }
 
-    func testSpecificNonLoopbackBindsAreNotReachable() {
+    func testOtherAddressesNotReachable() {
         for address in ["100.79.92.82:8090", "192.168.1.4:5173", "10.0.0.2.5173", "[fe80::1]:5173"] {
             XCTAssertFalse(PortDetector.reachesLoopback(address), "\(address) should NOT be reachable")
         }
@@ -622,7 +622,7 @@ final class PortPickerDiscoveryTests: XCTestCase {
 
     /// `vite --host` on a Tailscale box: a real listener that can never load
     /// through the tunnel, because the tunnel dials the far end's loopback.
-    func testATailscaleOnlyServerIsListedButFlagged() {
+    func testLanOnlyServerListedButFlagged() {
         let detector = PortDetector()
         detector.applyListenerSnapshot("Python 42 acx 5u IPv4 0x0 0t0 TCP 100.79.92.82:8090 (LISTEN)")
         let entry = detector.ports.first { $0.port == 8090 }
@@ -632,7 +632,7 @@ final class PortPickerDiscoveryTests: XCTestCase {
 
     /// One server, several address families — one loopback binding is all the
     /// tunnel needs, whichever order the rows arrive in.
-    func testAnyLoopbackBindingMakesThePortReachable() {
+    func testAnyLoopbackBindingWins() {
         for lines in [["Python 42 acx 5u IPv4 0x0 0t0 TCP 100.79.92.82:8090 (LISTEN)",
                        "Python 42 acx 6u IPv4 0x0 0t0 TCP 127.0.0.1:8090 (LISTEN)"],
                       ["Python 42 acx 6u IPv4 0x0 0t0 TCP 127.0.0.1:8090 (LISTEN)",
@@ -653,7 +653,7 @@ final class PortPickerDiscoveryTests: XCTestCase {
         XCTAssertFalse(detector.ports.first { $0.port == 8090 }?.reachableOnLoopback ?? true)
     }
 
-    func testTheDefaultIsReachableSoNothingElseRegresses() {
+    func testDefaultIsReachable() {
         let detector = PortDetector()
         detector.observe(Array("Local: http://localhost:5173/\n".utf8))
         XCTAssertTrue(detector.ports.first?.reachableOnLoopback ?? false)

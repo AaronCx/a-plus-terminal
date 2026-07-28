@@ -15,10 +15,10 @@ import XCTest
 ///     -only-testing:aPlusTerminalUITests/VNCScreenshotUITests \
 ///     -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
 ///     APLUSTERMINAL_LIVE_QA=1 APLUSTERMINAL_SCREENSHOTS=1 \
-///     APLUSTERMINAL_TEST_VNC_SERVER='{"name":"Mac mini","host":"127.0.0.1","port":5900,"username":"<user>"}' \
-///     APLUSTERMINAL_TEST_VNC_PASSWORD="$(cat ~/.vncqa-pass)"
+///     APLUSTERMINAL_TEST_VNC_SERVER='{"name":"Mac mini","host":"127.0.0.1","port":5900,"username":"<user>"}'
 ///
-/// The password is read from a file rather than typed into a command so it
+/// The Screen Sharing credential goes in APLUSTERMINAL_TEST_VNC_PASSWORD, read
+/// out of the chmod-600 file ~/.vncqa-pass rather than typed inline, so it
 /// never lands in shell history or a process listing.
 final class VNCScreenshotUITests: XCTestCase {
     private var app: XCUIApplication!
