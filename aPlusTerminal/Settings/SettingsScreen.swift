@@ -104,6 +104,14 @@ struct SettingsScreen: View {
                 }
 
                 Section {
+                    Toggle("Capture console output", isOn: $settings.previewConsoleCapture)
+                } header: {
+                    Text("Preview")
+                } footer: {
+                    Text("Shows the previewed page's console.log messages in a pane inside the preview, since a phone has no developer tools. This works by injecting a small script into your own page — it's the only part of Preview that does, which is why it's a choice. Off = nothing is injected and no messages are captured. Nothing leaves your device either way.")
+                }
+
+                Section {
                     NavigationLink("Customize key bar") {
                         KeyBarSettingsView()
                     }

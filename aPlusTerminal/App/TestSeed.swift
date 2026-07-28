@@ -72,6 +72,12 @@ enum TestSeed {
             settings.autoPopOutOnAppSwitch = true
             print("TESTSEED: pop-out toggles enabled")
         }
+        // Preview console capture is opt-in in Settings; a headless harness
+        // needs to be able to turn it on without driving the UI.
+        if env["APLUSTERMINAL_TEST_ENABLE_PREVIEW_CONSOLE"] == "1", let settings {
+            settings.previewConsoleCapture = true
+            print("TESTSEED: preview console capture enabled")
+        }
         guard let json = env["APLUSTERMINAL_TEST_SERVER"],
               let pemBase64 = env["APLUSTERMINAL_TEST_PRIVATE_KEY"],
               let pemData = Data(base64Encoded: pemBase64),
