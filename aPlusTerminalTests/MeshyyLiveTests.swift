@@ -1,0 +1,139 @@
+import MeshyyCore
+import MeshyyKit
+import XCTest
+@testable import aPlusTerminal
+
+/// Drives a REAL meshyy session from an iOS process against a real `meshyyd`.
+///
+/// **Why this exists when meshyy has 176 tests of its own.** Every one of those runs
+/// macOS-to-macOS, in one process, against a daemon it started itself. This app is the
+/// first iOS client, and "Network framework QUIC works between two macOS processes" is
+/// not evidence that it works from an iOS process to a macOS daemon. Different
+/// platform, different sandbox, different network stack path. That gap is exactly the
+/// kind that reaches TestFlight, so it is closed here before shipping rather than by a
+/// user.
+///
+/// Skips cleanly with no fixtures, so CI stays green:
+///
+///     ./scripts/meshyy-live-fixtures.sh && make test
+///
+/// Tokens are single-use and short-TTL, so the fixtures must be minted immediately
+/// before each run — a stale one is a refused attach, not a false pass.
+@MainActor
+final class MeshyyLiveTests: XCTestCase {
+    /// One fixture per attach, because **a token is single-use**. The first version of
+    /// this file handed the same fixture to both tests and the second attach was
+    /// refused — which reads exactly like a broken transport and was a broken harness.
+    ///
+    /// Each test also uses its own session name, so one test shutting its session down
+    /// cannot strand the other.
+    private func liveBootstrap(_ fixture: String) throws -> BootstrapResponse {
+        let path = "/tmp/meshyy-live-\(fixture).json"
+        guard let json = try? String(contentsOfFile: path, encoding: .utf8), !json.isEmpty else {
+            throw XCTSkip("""
+                no live meshyy bootstrap at \(path) — see scripts/meshyy-live-fixtures.sh
+                """)
+        }
+        return try BootstrapResponse.parse(json)
+    }
+
+    /// The whole point: an iOS process opens QUIC to the daemon, types, and sees the
+    /// shell's answer come back.
+    func testIOSClientDrivesARealDaemonOverQUIC() async throws {
+        let bootstrap = try liveBootstrap("drive")
+        try bootstrap.validate()
+
+        let session = MeshyySession(size: TerminalSize(cols: 80, rows: 24))
+        let received = Received()
+        let collector = Task {
+            for await event in await session.events {
+                if case .output(let bytes) = event { await received.append(bytes) }
+            }
+        }
+        defer { collector.cancel() }
+
+        try await session.attach(bootstrap: bootstrap, sshHost: "127.0.0.1")
+
+        // A marker split in two, so the command's own echo cannot satisfy the
+        // assertion — the same trick the QUIC transport tests use.
+        let marker = "MESHYY" + "-IOS-LIVE-OK"
+        try await session.send(Array("printf '%s%s\\n' 'MESHYY' '-IOS-LIVE-OK'\n".utf8))
+
+        let arrived = await received.waitForText(marker, timeout: 25)
+        let text = await received.text
+        XCTAssertTrue(
+            arrived,
+            "an iOS process could not drive a real meshyyd over QUIC. Got: \(text.suffix(400).debugDescription)"
+        )
+
+        await session.shutdown(reason: "test finished")
+    }
+
+    /// The property the whole feature is for: bytes produced while the client is away
+    /// are replayed when it comes back.
+    ///
+    /// This is what an SSH session structurally cannot do — a dropped SSH connection
+    /// has lost that output — so it is the one behaviour worth proving on the real
+    /// thing rather than trusting from a unit test.
+    func testOutputProducedWhileDetachedIsReplayedOnReattach() async throws {
+        let bootstrap = try liveBootstrap("replay-a")
+        let session = MeshyySession(size: TerminalSize(cols: 80, rows: 24))
+        let received = Received()
+        let collector = Task {
+            for await event in await session.events {
+                if case .output(let bytes) = event { await received.append(bytes) }
+            }
+        }
+        defer { collector.cancel() }
+
+        try await session.attach(bootstrap: bootstrap, sshHost: "127.0.0.1")
+        // Wait for the shell to be live rather than for a specific prompt character —
+        // the prompt is whatever the user's shell renders, and asserting on "$" made
+        // this hang for 15s on a zsh "%" before failing for the wrong reason.
+        try await session.send(Array("printf '%s%s\\n' 'SHELL' '-READY'\n".utf8))
+        // Hoisted: XCTAssert's autoclosure cannot be async.
+        let shellReady = await received.waitForText("SHELL-READY", timeout: 20)
+        XCTAssertTrue(shellReady, "the shell never came up, so there is nothing to detach from")
+
+        // Ask for output that lands AFTER we are gone, then leave. `detach` keeps the
+        // daemon's shell running and its ring buffer filling — that is the difference
+        // from `shutdown`.
+        try await session.send(Array("(sleep 2; printf '%s%s\\n' 'WHILE' '-AWAY-42') &\n".utf8))
+        try await Task.sleep(for: .milliseconds(300))
+        await session.detach(reason: "test detaching")
+
+        // Gone for long enough that the output is definitely produced without us.
+        try await Task.sleep(for: .seconds(4))
+
+        // A fresh token — they are single-use — and reattach to the same session.
+        let second = try liveBootstrap("replay-b")
+        try await session.attach(bootstrap: second, sshHost: "127.0.0.1")
+
+        let replayed = await received.waitForText("WHILE-AWAY-42", timeout: 25)
+        let text = await received.text
+        XCTAssertTrue(
+            replayed,
+            "output produced while detached was not replayed — the one thing meshyy "
+                + "exists to do. Got: \(text.suffix(400).debugDescription)"
+        )
+        await session.shutdown(reason: "test finished")
+    }
+}
+
+/// Accumulates delivered bytes off the session's event stream.
+private actor Received {
+    private var bytes: [UInt8] = []
+
+    func append(_ chunk: [UInt8]) { bytes += chunk }
+
+    var text: String { String(decoding: bytes, as: UTF8.self) }
+
+    func waitForText(_ needle: String, timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if text.contains(needle) { return true }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return text.contains(needle)
+    }
+}
