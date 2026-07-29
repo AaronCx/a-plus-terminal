@@ -78,7 +78,21 @@ struct TerminalTabView: View {
                                         if server.kind == .vncMonitor {
                                             vncManager.open(server: server)
                                         } else {
-                                            path = [sessionManager.open(server: server)]
+                                            // Focus the session this server already has,
+                                            // rather than opening another one. The
+                                            // deep-link path below has always done this;
+                                            // tapping the row did not, so every tap
+                                            // created a tab.
+                                            //
+                                            // Under SSH the extras died with their
+                                            // connections and went unnoticed. Under meshyy
+                                            // they persist on the daemon by design, and on
+                                            // a host whose shell auto-attaches tmux each
+                                            // one becomes another tmux client — which
+                                            // clamps the whole session to the smallest
+                                            // client's size and makes the terminal stop
+                                            // filling the screen.
+                                            path = [sessionManager.focusOrOpen(server: server)]
                                         }
                                     }
                                     .contextMenu {

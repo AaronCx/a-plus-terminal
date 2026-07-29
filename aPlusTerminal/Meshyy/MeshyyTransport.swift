@@ -124,10 +124,19 @@ final class MeshyyTransport {
     /// filters it to `[a-z0-9-]` — the command crosses a shell, so anything else would
     /// be an injection hole of the same class meshyy's own daemon rules forbid.
     static func bootstrapCommand(session: String) -> String {
+        daemonCommand("attach --session \(session) --json")
+    }
+
+    /// Runs `meshyyd <arguments>` on the host, wherever the binary happens to live.
+    ///
+    /// `arguments` is composed HERE from values this app controls, never from anything
+    /// remote or user-typed — the string crosses an SSH exec channel and is read by a
+    /// shell.
+    static func daemonCommand(_ arguments: String) -> String {
         let probes = daemonCandidates.map { "\"\($0)\"" }.joined(separator: " ")
         return "for c in \(probes); do "
             + "if command -v \"$c\" >/dev/null 2>&1; then "
-            + "exec \"$c\" attach --session \(session) --json; fi; done; exit 127"
+            + "exec \"$c\" \(arguments); fi; done; exit 127"
     }
 
     /// Runs the §5.1 bootstrap over SSH and, if it succeeds, opens the meshyy session.

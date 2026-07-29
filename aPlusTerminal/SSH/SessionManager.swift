@@ -1002,8 +1002,19 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     /// Replays the real window size after connecting (§4.2 SIGWINCH contract).
+    /// Makes the far end match the on-screen size, whichever transport is carrying it.
+    ///
+    /// It used to resize the SSH connection ONLY. Under meshyy that connection has no
+    /// pty by design, so the post-connect resync — the one whose whole job is "make the
+    /// pty match the screen before a multiplexer draws into it" — went nowhere, and the
+    /// session kept whatever size `Hello` happened to carry at bootstrap. That size is
+    /// captured before the view has laid out at its final height, which is exactly how
+    /// a session ends up permanently shorter than the screen.
     private func syncWindowSize() async {
         let size = currentWindowSize()
+        if let meshyy {
+            try? await meshyy.resize(cols: size.cols, rows: size.rows)
+        }
         try? await connection.resize(cols: size.cols, rows: size.rows)
     }
 
@@ -1294,6 +1305,19 @@ final class SessionManager {
         // takes the end path on it — the cleanup for an Activity orphaned by
         // a force-quit while suspended, whose sessions no longer exist.
         refreshActivity()
+    }
+
+    /// The session for this server, opening one only if there is not one already.
+    ///
+    /// This is what tapping a server should do, and what the deep-link path always did.
+    /// `open` unconditionally creates, which is right for an explicit "new tab" and
+    /// wrong for "take me to my terminal".
+    @discardableResult
+    func focusOrOpen(server: Server) -> TerminalSession {
+        if let existing = sessions.first(where: { $0.server.id == server.id }) {
+            return existing
+        }
+        return open(server: server)
     }
 
     @discardableResult

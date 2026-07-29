@@ -30,7 +30,9 @@ test: generate
 test-meshyy-live: generate
 	$(XCBUILD) build-for-testing
 	./scripts/meshyy-live-fixtures.sh
-	$(XCBUILD) test-without-building -only-testing:aPlusTerminalTests/MeshyyLiveTests
+	$(XCBUILD) test-without-building \
+	  -only-testing:aPlusTerminalTests/MeshyyLiveTests \
+	  -only-testing:aPlusTerminalTests/MeshyySessionPileUpTests
 
 clean:
 	rm -rf aPlusTerminal.xcodeproj build DerivedData
