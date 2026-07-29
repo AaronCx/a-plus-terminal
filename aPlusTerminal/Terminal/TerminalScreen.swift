@@ -27,6 +27,30 @@ struct TerminalScreen: View {
         ZStack {
             TerminalHostView(session: session, fontSize: theme.terminalFontSize)
 
+            // OVERLAID, not a safeAreaInset. A top inset changes the safe area the
+            // terminal lays itself out against, and the keyboard's inset is computed
+            // from that same area — so adding one stopped the terminal regrowing when
+            // the keyboard was dismissed, leaving the bottom of the screen black. This
+            // is transient status; it has no business resizing the terminal under it.
+            if let reason = session.meshyyUnavailable, session.state == .connected {
+                VStack {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(reason)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.bar)
+                    Spacer()
+                }
+                .allowsHitTesting(false)
+            }
+
             if session.showMultiplexerHint {
                 VStack {
                     TmuxMouseHintBanner {
@@ -42,8 +66,18 @@ struct TerminalScreen: View {
                     ProgressView("Connecting to \(session.server.name)…")
                 }
             case .reconnecting:
-                statusCard {
-                    ProgressView("Reconnecting…")
+                // Held back briefly on purpose. A meshyy reconnect completes in
+                // roughly the time it takes to open a QUIC connection, so painting a
+                // full-screen card for it produces a flash across the terminal every
+                // time the transport blinks — reported as "a reconnecting that flashes
+                // by every so often while being actively in session".
+                //
+                // A reconnect the user never notices should not be announced. One that
+                // takes long enough to notice still is.
+                DelayedStatusCard(delay: .seconds(1.2)) {
+                    statusCard {
+                        ProgressView("Reconnecting…")
+                    }
                 }
             case .suspended:
                 if let conflict = session.hostKeyConflict {
@@ -108,26 +142,6 @@ struct TerminalScreen: View {
         .overlay(alignment: .top) {
             if session.isAttaching {
                 uploadingIndicator
-            }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            // Why meshyy is not carrying this session, when it was asked to. Shown at
-            // the top so it is impossible to miss: the whole point of the toggle is to
-            // find out whether meshyy works, and a fallback nobody can see answers
-            // nothing.
-            if let reason = session.meshyyUnavailable, session.state == .connected {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(reason)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.bar)
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -470,5 +484,29 @@ struct ConnectionFailureView: View {
                 .strokeBorder(.red.opacity(0.6), lineWidth: 1)
         )
         .padding(24)
+    }
+}
+
+
+/// Shows its content only if the state it describes outlives `delay`.
+///
+/// For transports that recover in a few hundred milliseconds, a status card is worse
+/// than nothing: it flashes over the terminal, draws the eye, and is gone before it can
+/// be read. This shows nothing at all for a fast recovery, and behaves normally for a
+/// slow one.
+struct DelayedStatusCard<Content: View>: View {
+    let delay: Duration
+    @ViewBuilder var content: Content
+    @State private var visible = false
+
+    var body: some View {
+        Group {
+            if visible { content }
+        }
+        .task {
+            try? await Task.sleep(for: delay)
+            visible = true
+        }
+        .onDisappear { visible = false }
     }
 }
