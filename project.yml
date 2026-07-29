@@ -11,7 +11,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # One source of truth for both targets — the app and widget MUST ship with
     # identical versions or App Store Connect rejects the upload.
-    CURRENT_PROJECT_VERSION: 46
+    CURRENT_PROJECT_VERSION: 47
     MARKETING_VERSION: "1.0.3"
 packages:
   # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
@@ -43,7 +43,7 @@ packages:
   # under a shipped build.
   Meshyy:
     url: https://github.com/AaronCx/meshyy.git
-    exactVersion: "0.1.2"
+    exactVersion: "0.1.4"
 targets:
   aPlusTerminal:
     type: application

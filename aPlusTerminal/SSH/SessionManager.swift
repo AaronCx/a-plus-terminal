@@ -455,7 +455,17 @@ final class TerminalSession: Identifiable, Hashable {
 
     /// The "Auto-reattach multiplexer" setting: the master on/off for the whole
     /// reattach feature (auto on connect/drop AND the paused-card picker).
-    var reattachEnabled: Bool { settings.autoReattachMultiplexer }
+    /// Whether the multiplexer reattach machinery applies at all.
+    ///
+    /// It does not when meshyy is carrying the session. That machinery exists because a
+    /// dropped SSH connection loses the shell, so coming back means finding a tmux
+    /// session and guessing which one — a question only the user can answer. meshyy
+    /// holds the shell itself, so there is nothing lost, nothing to find and nothing to
+    /// ask: reconnecting is just reattaching to the session that was already there.
+    ///
+    /// Running it anyway would be worse than redundant. It would attach a multiplexer
+    /// INSIDE a session that is already attached to one.
+    var reattachEnabled: Bool { settings.autoReattachMultiplexer && !isUsingMeshyy }
 
     /// Count of reconnect runs actually started — a deterministic test seam so
     /// "must not auto-reconnect" assertions don't depend on a fixed sleep.
@@ -808,7 +818,8 @@ final class TerminalSession: Identifiable, Hashable {
             let size = currentWindowSize()
             let result = await MeshyyTransport.bootstrap(
                 over: fresh,
-                serverID: server.id,
+                // The TAB's id, not the server's. See MeshyyTransport.sessionName.
+                sessionID: id,
                 sshHost: server.host,
                 cols: size.cols,
                 rows: size.rows

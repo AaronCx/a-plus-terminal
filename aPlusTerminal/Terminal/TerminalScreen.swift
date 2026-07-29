@@ -66,6 +66,12 @@ struct TerminalScreen: View {
                         sessionManager.close(session)
                         dismiss()
                     }
+                } else if session.isUsingMeshyy {
+                    // meshyy reconnects itself, so there is no card and no choice to
+                    // make — the session is simply coming back. Showing "reattach or
+                    // fresh shell?" here would be asking the user to solve a problem
+                    // meshyy exists to have already solved.
+                    ReconnectingView(serverName: session.server.name)
                 } else {
                     // Cleanly paused (backgrounded long enough that iOS froze
                     // us). Reconnect queries the *live* sessions, then attaches
@@ -131,27 +137,12 @@ struct TerminalScreen: View {
                 // rather than stacks, so the palette rendered UNDERNEATH the key bar
                 // with its label clipped in half. Shipped in build 45 and reported
                 // immediately, because it looks exactly like a rendering fault.
-                VStack(spacing: 0) {
-                    // M6 tier 1, above the key bar rather than replacing it: the palette
-                    // comes and goes with the agent's status, and a row that displaced
-                    // the user's own keys would move the buttons they were reaching for.
-                    let quickActions = QuickActionAvailability
-                        .actions(forAgentStatus: session.agentMonitor.status)
-                    if !quickActions.isEmpty {
-                        QuickActionBar(
-                            actions: quickActions,
-                            agentName: session.agentMonitor.detected?.displayName
-                        ) { action in
-                            session.sendInput(Data(action.sends))
-                        }
-                    }
-                    KeyAccessoryBar(
-                        bridge: session.bridge,
-                        onMic: { showDictation = true },
-                        onAttachPhoto: { showPhotoPicker = true },
-                        onAttachFile: { showFileImporter = true }
-                    )
-                }
+                KeyAccessoryBar(
+                    bridge: session.bridge,
+                    onMic: { showDictation = true },
+                    onAttachPhoto: { showPhotoPicker = true },
+                    onAttachFile: { showFileImporter = true }
+                )
             }
         }
         .sheet(isPresented: $showDictation) {
@@ -218,10 +209,23 @@ struct TerminalScreen: View {
             case .connected:
                 session.bridge.focus()
             case .suspended:
-                // Arriving via Live Activity tap or session list at a paused
-                // session: show the reattach-vs-fresh choice (the .suspended
-                // card) rather than silently reconnecting for them.
-                break
+                if session.isUsingMeshyy {
+                    // meshyy makes the choice obsolete, so do not ask. The reattach-vs-
+                    // fresh card exists because plain SSH cannot know WHICH multiplexer
+                    // session you meant — the answer had to come from the user. meshyy
+                    // holds one session per tab, addressed by name, so there is exactly
+                    // one thing to come back to and asking is just a tap in the way.
+                    //
+                    // `attachTo: nil` on purpose: no multiplexer attach command is run,
+                    // because the meshyy session already holds whatever was running,
+                    // tmux included.
+                    Task { await session.reconnect(attachTo: nil) }
+                } else {
+                    // Arriving via Live Activity tap or session list at a paused
+                    // session: show the reattach-vs-fresh choice (the .suspended
+                    // card) rather than silently reconnecting for them.
+                    break
+                }
             default:
                 break
             }
@@ -326,6 +330,29 @@ struct TmuxMouseHintBanner: View {
 /// Shown when a session was cleanly paused in the background (iOS froze the
 /// app, so the socket was suspended). The server-side session survives; the
 /// user chooses how to come back — reattach the multiplexer or a fresh shell.
+/// Shown while a meshyy session is coming back on its own.
+///
+/// Deliberately has no buttons. Every affordance on the SSH paused card — reattach,
+/// fresh shell — answers a question meshyy does not pose: the shell never went away,
+/// so there is nothing to choose between.
+struct ReconnectingView: View {
+    let serverName: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Reconnecting to \(serverName)…")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Text("Your session is still running on the server.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
+    }
+}
+
 struct SessionPausedView: View {
     /// Whether the reattach feature is on ("Auto-reattach multiplexer"). When
     /// off, Reconnect lands in a fresh shell, so the separate "New Shell" button

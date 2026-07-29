@@ -75,15 +75,20 @@ final class MeshyyTransport {
         )
     }
 
-    /// Names the meshyy session for a server.
+    /// Names the meshyy session for ONE terminal tab.
     ///
-    /// Derived from the server's own identifier so it is stable across launches —
-    /// resume is worthless if the name changes — and constrained to a charset that
-    /// cannot mean anything to a shell. The command below crosses an SSH exec channel
-    /// and is interpreted by the remote shell, so an unconstrained name here would be
-    /// a command-injection hole in the same class meshyy's own daemon rules forbid.
-    static func sessionName(for serverID: UUID) -> String {
-        "aplus-" + serverID.uuidString.lowercased().filter { $0.isHexDigit || $0 == "-" }
+    /// Keyed on the tab, not the server. Keying it on the server meant every tab opened
+    /// against the same host resolved to the same daemon session — so opening a second
+    /// terminal dropped the user straight back into the first one's shell. Reported as
+    /// "when I try to make new sessions I just bleed back into my previous shell", and
+    /// it is exactly what a shared name does.
+    ///
+    /// Constrained to a charset that cannot mean anything to a shell: the command below
+    /// crosses an SSH exec channel and is interpreted by the remote shell, so an
+    /// unconstrained name here would be a command-injection hole of the same class
+    /// meshyy's own daemon rules forbid.
+    static func sessionName(for sessionID: UUID) -> String {
+        "aplus-" + sessionID.uuidString.lowercased().filter { $0.isHexDigit || $0 == "-" }
     }
 
     /// Where `meshyyd` might be, in probe order.
@@ -124,12 +129,12 @@ final class MeshyyTransport {
     /// the caller's correct response is to carry on over SSH.
     static func bootstrap(
         over ssh: SSHConnection,
-        serverID: UUID,
+        sessionID: UUID,
         sshHost: String,
         cols: Int,
         rows: Int
     ) async -> Result<MeshyyTransport, Unavailable> {
-        let name = sessionName(for: serverID)
+        let name = sessionName(for: sessionID)
 
         // A missing `meshyyd` exits non-zero, which Citadel surfaces as a thrown
         // CommandFailed. That is the common case, not a fault.

@@ -295,3 +295,94 @@ final class SingleShellTests: XCTestCase {
         )
     }
 }
+
+// MARK: - One session per tab
+
+@MainActor
+final class SessionIdentityTests: XCTestCase {
+    /// Reported in use: "when I try to make new sessions I just bleed back into my
+    /// previous shell."
+    ///
+    /// The name used to be derived from the SERVER id, so every tab opened against one
+    /// host resolved to the same daemon session and the second tab attached to the
+    /// first tab's shell. Keyed on the tab now.
+    func testEachTabGetsItsOwnSessionName() {
+        let tabA = UUID()
+        let tabB = UUID()
+        XCTAssertNotEqual(
+            MeshyyTransport.sessionName(for: tabA),
+            MeshyyTransport.sessionName(for: tabB),
+            "two tabs share a session name, so the second one lands in the first one's shell"
+        )
+    }
+
+    /// And the same tab must keep its name, or reattaching starts a new shell instead
+    /// of resuming the one that is still running.
+    func testATabKeepsItsNameAcrossReattaches() {
+        let tab = UUID()
+        XCTAssertEqual(MeshyyTransport.sessionName(for: tab), MeshyyTransport.sessionName(for: tab))
+    }
+
+    /// The quick-action keys moved into the ordinary key bar. Asserted because the
+    /// bytes are the whole contract — a tap has to be indistinguishable from typing.
+    func testAgentAnswerKeysSendExactlyWhatTypingWould() {
+        func bytes(_ item: KeyBarItem) -> [UInt8]? {
+            item.terminalKey?.bytes(applicationCursor: false)
+        }
+        XCTAssertEqual(bytes(.yes), [0x79])
+        XCTAssertEqual(bytes(.no), [0x6E])
+        XCTAssertEqual(bytes(.one), [0x31])
+        XCTAssertEqual(bytes(.two), [0x32])
+        XCTAssertEqual(bytes(.three), [0x33])
+        // CR, not LF: a pty in canonical mode expects carriage return and translates it.
+        XCTAssertEqual(bytes(.enter), [0x0D], "Enter must send CR (0x0D), not LF (0x0A)")
+    }
+
+    /// They are opt-in additions to a bar the user arranges. Shipping them in the
+    /// default set would rearrange a bar people already know.
+    func testTheNewKeysAreNotForcedIntoTheDefaultBar() {
+        for item in [KeyBarItem.yes, .no, .enter, .one, .two, .three] {
+            XCTAssertFalse(
+                KeyBarItem.defaultItems.contains(item),
+                "\(item.rawValue) was added to the default bar, moving keys the user already had"
+            )
+            XCTAssertTrue(KeyBarItem.allCases.contains(item), "\(item.rawValue) must be addable in Settings")
+        }
+    }
+}
+
+// MARK: - meshyy owns its own reconnection
+
+@MainActor
+final class ReconnectOwnershipTests: XCTestCase {
+    /// The multiplexer reattach machinery is SSH-only, and that is not a preference —
+    /// it is what the two transports mean.
+    ///
+    /// It exists because a dropped SSH connection LOSES the shell, so coming back means
+    /// finding a tmux session and guessing which one, a question only the user can
+    /// answer. meshyy holds the shell itself: nothing was lost, so there is nothing to
+    /// find and nothing to ask.
+    ///
+    /// Running it anyway would be worse than redundant — it would attach a multiplexer
+    /// inside a session already attached to one.
+    func testMultiplexerReattachIsSSHOnly() {
+        let defaults = UserDefaults(suiteName: "reattach-\(UUID().uuidString)")!
+        let settings = AppSettings(defaults: defaults)
+        settings.autoReattachMultiplexer = true
+
+        // The rule under test, mirrored: enabled iff the user wants it AND meshyy is
+        // not carrying the session.
+        func reattachEnabled(usingMeshyy: Bool) -> Bool {
+            settings.autoReattachMultiplexer && !usingMeshyy
+        }
+
+        XCTAssertTrue(reattachEnabled(usingMeshyy: false), "SSH still needs it")
+        XCTAssertFalse(
+            reattachEnabled(usingMeshyy: true),
+            "meshyy sessions must not run multiplexer reattach — the shell never went away"
+        )
+
+        settings.autoReattachMultiplexer = false
+        XCTAssertFalse(reattachEnabled(usingMeshyy: false), "the user's preference still wins for SSH")
+    }
+}

@@ -4,6 +4,13 @@ import SwiftUI
 enum TerminalKey {
     case esc, tab, up, down, left, right, pipe, tilde, dash
     case slash, ctrlC, ctrlD, home, end, pageUp, pageDown
+    /// Answering an agent's prompt: y, n, Enter, and a short numbered list.
+    ///
+    /// These live in the ordinary key bar rather than a separate row that appears and
+    /// disappears with the agent's status. A row that comes and goes moves the buttons
+    /// underneath it just as the user reaches for them, and it costs vertical space the
+    /// terminal wants — both of which showed up immediately in use.
+    case yes, no, enter, one, two, three
 
     /// Wire bytes; cursor keys (arrows + Home/End) honor DECCKM application
     /// cursor mode, matching what full-screen apps and multiplexers expect.
@@ -26,6 +33,13 @@ enum TerminalKey {
         case .end: return [esc, applicationCursor ? 0x4F : 0x5B, 0x46]   // ESC O F / ESC[F
         case .pageUp: return [esc, 0x5B, 0x35, 0x7E]    // ESC[5~
         case .pageDown: return [esc, 0x5B, 0x36, 0x7E]  // ESC[6~
+        case .yes: return [0x79]      // y
+        case .no: return [0x6E]       // n
+        case .enter: return [0x0D]    // CR, not LF — a pty in canonical mode
+                                      // expects carriage return and translates it
+        case .one: return [0x31]
+        case .two: return [0x32]
+        case .three: return [0x33]
         }
     }
 }
@@ -35,6 +49,7 @@ enum TerminalKey {
 enum KeyBarItem: String, CaseIterable, Identifiable {
     case esc, tab, ctrl, prefix, up, down, left, right, pipe, tilde, dash, paste, attach
     case slash, ctrlC, ctrlD, home, end, pageUp, pageDown
+    case yes, no, enter, one, two, three
 
     var id: String { rawValue }
 
@@ -64,6 +79,12 @@ enum KeyBarItem: String, CaseIterable, Identifiable {
         case .ctrlD: return "Ctrl-D (^D)"
         case .home: return "Home"
         case .end: return "End"
+        case .yes: return "y — answer yes"
+        case .no: return "n — answer no"
+        case .enter: return "Enter (⏎)"
+        case .one: return "1 — pick option 1"
+        case .two: return "2 — pick option 2"
+        case .three: return "3 — pick option 3"
         case .pageUp: return "Page Up"
         case .pageDown: return "Page Down"
         }
@@ -89,6 +110,12 @@ enum KeyBarItem: String, CaseIterable, Identifiable {
         case .end: return .end
         case .pageUp: return .pageUp
         case .pageDown: return .pageDown
+        case .yes: return .yes
+        case .no: return .no
+        case .enter: return .enter
+        case .one: return .one
+        case .two: return .two
+        case .three: return .three
         case .ctrl, .prefix, .paste, .attach: return nil
         }
     }
@@ -108,6 +135,12 @@ enum KeyBarItem: String, CaseIterable, Identifiable {
         case .end: return "end"
         case .pageUp: return "pgup"
         case .pageDown: return "pgdn"
+        case .yes: return "y"
+        case .no: return "n"
+        case .enter: return "⏎"
+        case .one: return "1"
+        case .two: return "2"
+        case .three: return "3"
         default: return label
         }
     }
