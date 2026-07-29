@@ -6,6 +6,22 @@ import SwiftTerm
 final class TerminalEmulatorView: TerminalView {
     var interceptInsert: ((String) -> Bool)?
 
+    /// Fired after every layout pass, once SwiftTerm has recomputed its row and
+    /// column count for the new bounds.
+    ///
+    /// Exists because the delegate's `sizeChanged` is not reliably called when the
+    /// keyboard is DISMISSED — the view grows back, the emulator follows, and nothing
+    /// tells the remote. The result was a terminal that shrank with the keyboard and
+    /// never grew again: tmux kept drawing its status bar at the old bottom row and
+    /// everything below it stayed black. Reading the size after layout is the fact;
+    /// waiting to be told about it was the mistake.
+    var onLayout: (() -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayout?()
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         // Upstream SwiftTerm fix (#566/#567, landed after the 1.13.0 release we
@@ -170,12 +186,26 @@ struct TerminalHostView: UIViewRepresentable {
     func makeUIView(context: Context) -> TerminalEmulatorView {
         let view = session.terminalView
         view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        // The view is deliberately NOT opaque — SwiftTerm 1.13.0's glyph renderer
+        // needs the layer colour to show through (see the init above). That means
+        // anything it has not painted this frame shows whatever is behind it, and
+        // behind it is nothing, which reads as a black tear during a relayout.
+        //
+        // Giving the LAYER the terminal's own background colour keeps the unpainted
+        // region indistinguishable from the painted one, so a resize is invisible
+        // instead of a flash. This is not a repaint — it costs nothing per frame.
+        view.layer.backgroundColor = view.nativeBackgroundColor.cgColor
         return view
     }
 
     func updateUIView(_ view: TerminalEmulatorView, context: Context) {
         if abs(view.font.pointSize - fontSize) > 0.5 {
             view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        }
+        // Follow a theme change, so the fill never disagrees with the terminal.
+        let themed = view.nativeBackgroundColor.cgColor
+        if view.layer.backgroundColor != themed {
+            view.layer.backgroundColor = themed
         }
     }
 }

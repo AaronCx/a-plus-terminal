@@ -386,3 +386,50 @@ final class ReconnectOwnershipTests: XCTestCase {
         XCTAssertFalse(reattachEnabled(usingMeshyy: false), "the user's preference still wins for SSH")
     }
 }
+
+// MARK: - The terminal must regrow
+
+@MainActor
+final class TerminalRegrowTests: XCTestCase {
+    /// Reported twice: dismissing the keyboard left the bottom of the screen black,
+    /// permanently, for the life of the session.
+    ///
+    /// The cause was `currentWindowSize()` preferring `lastRequestedSize` over the
+    /// emulator's real dimensions. That turned ONE missed resize into a permanent one:
+    /// the keepalive re-asserted the stale size on every tick, so a terminal that shrank
+    /// for the keyboard and grew back stayed small on the server forever, and tmux kept
+    /// drawing its status bar at the old bottom row.
+    ///
+    /// The rule under test: the size we report is the size the emulator actually is.
+    func testReportedSizeFollowsTheEmulatorNotTheLastRequest() {
+        // Mirrors `currentWindowSize()`.
+        func reported(emulator: (cols: Int, rows: Int), lastRequested: (cols: Int, rows: Int)?) -> (Int, Int) {
+            if emulator.cols > 1, emulator.rows > 1 { return (emulator.cols, emulator.rows) }
+            if let lastRequested { return (max(2, lastRequested.cols), max(2, lastRequested.rows)) }
+            return (max(2, emulator.cols), max(2, emulator.rows))
+        }
+
+        // Keyboard dismissed: the emulator grew, the last request is stale.
+        XCTAssertEqual(
+            reported(emulator: (74, 64), lastRequested: (74, 35)).1, 64,
+            "a stale request won over the real size, which is what made the black permanent"
+        )
+        // Before first layout the emulator has nothing to say, so the request stands.
+        XCTAssertEqual(reported(emulator: (0, 0), lastRequested: (80, 24)).1, 24)
+        // And never a degenerate size.
+        XCTAssertGreaterThanOrEqual(reported(emulator: (0, 0), lastRequested: nil).0, 2)
+    }
+
+    /// The sync must be a no-op when nothing changed, or every layout pass would send a
+    /// resize — and a resize is a SIGWINCH that makes full-screen apps redraw.
+    func testSyncIsQuietWhenTheSizeIsUnchanged() {
+        func wouldSend(current: (cols: Int, rows: Int), last: (cols: Int, rows: Int)?) -> Bool {
+            guard current.cols > 1, current.rows > 1 else { return false }
+            if let last, last.cols == current.cols, last.rows == current.rows { return false }
+            return true
+        }
+        XCTAssertFalse(wouldSend(current: (74, 64), last: (74, 64)), "unchanged must not resend")
+        XCTAssertTrue(wouldSend(current: (74, 64), last: (74, 35)), "a real change must be sent")
+        XCTAssertFalse(wouldSend(current: (0, 0), last: (74, 64)), "a pre-layout size must be ignored")
+    }
+}

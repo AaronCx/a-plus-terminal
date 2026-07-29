@@ -199,6 +199,12 @@ final class TerminalSession: Identifiable, Hashable {
         terminalView.interceptInsert = { [weak bridge] text in
             bridge?.handleInsert(text) ?? false
         }
+        // Push the real size after every layout pass. `sizeChanged` is not reliably
+        // delivered when the keyboard is DISMISSED, and without this the remote keeps
+        // the keyboard-up row count for the life of the session.
+        terminalView.onLayout = { [weak self] in
+            MainActor.assumeIsolated { self?.syncSizeAfterLayout() }
+        }
         bridge.terminalView = terminalView
         bridge.sendData = { [weak self] data in
             self?.sendInput(data)
@@ -960,12 +966,36 @@ final class TerminalSession: Identifiable, Hashable {
 
     /// Best-known terminal dimensions: what the layout last reported, falling
     /// back to the emulator's current grid.
+    /// The size the terminal ACTUALLY is, not the last one we asked for.
+    ///
+    /// It used to prefer `lastRequestedSize`, which turned a single missed resize into
+    /// a permanent one: the keepalive re-asserted the stale size every tick, so a
+    /// terminal that shrank for the keyboard and grew back stayed small on the server
+    /// forever. The emulator's own dimensions are the ground truth for what is on
+    /// screen, and reading them makes every keepalive tick self-correcting.
     private func currentWindowSize() -> (cols: Int, rows: Int) {
+        let terminal = terminalView.getTerminal()
+        if terminal.cols > 1, terminal.rows > 1 {
+            return (terminal.cols, terminal.rows)
+        }
+        // Before the first layout the emulator has no meaningful size yet.
         if let lastRequestedSize {
             return (max(2, lastRequestedSize.cols), max(2, lastRequestedSize.rows))
         }
-        let terminal = terminalView.getTerminal()
         return (max(2, terminal.cols), max(2, terminal.rows))
+    }
+
+    /// Pushes the terminal's real size to the far end if it has drifted.
+    ///
+    /// Called on every layout pass, so dismissing the keyboard regrows the remote
+    /// immediately rather than at the next keepalive tick — or never.
+    private func syncSizeAfterLayout() {
+        let size = currentWindowSize()
+        guard size.cols > 1, size.rows > 1 else { return }
+        if let last = lastRequestedSize, last.cols == size.cols, last.rows == size.rows {
+            return
+        }
+        resize(cols: size.cols, rows: size.rows)
     }
 
     /// Replays the real window size after connecting (§4.2 SIGWINCH contract).
