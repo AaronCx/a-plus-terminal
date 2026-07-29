@@ -112,6 +112,14 @@ struct SettingsScreen: View {
                 }
 
                 Section {
+                    Toggle("Use meshyy when available (beta)", isOn: $settings.meshyyTransport)
+                } header: {
+                    Text("Connection")
+                } footer: {
+                    Text("Keeps your session alive on the server, so it survives the app being suspended or the network dropping, and replays what you missed. Needs meshyyd on the host; without it nothing changes. Turn this off to get the normal SSH behaviour back.")
+                }
+
+                Section {
                     NavigationLink("Customize key bar") {
                         KeyBarSettingsView()
                     }

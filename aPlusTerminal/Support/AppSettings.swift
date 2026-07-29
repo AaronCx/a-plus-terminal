@@ -11,6 +11,16 @@ final class AppSettings {
         didSet { defaults.set(autoReattachMultiplexer, forKey: Keys.autoReattachMultiplexer) }
     }
 
+    /// Carry the pty byte stream over meshyy when the host runs `meshyyd`.
+    ///
+    /// OFF by default, and the toggle is the ONLY fallback: there is no runtime
+    /// switching between transports, because a session that changes transport mid-flight
+    /// is two different shells sharing one screen. Off = exactly this app without
+    /// meshyy in it.
+    var meshyyTransport: Bool {
+        didSet { defaults.set(meshyyTransport, forKey: Keys.meshyyTransport) }
+    }
+
     /// §4.3 — translate pan gestures into SGR mouse wheel events when the
     /// remote app requested mouse reporting.
     var scrollWheelBridge: Bool {
@@ -76,6 +86,7 @@ final class AppSettings {
             ?? defaults.object(forKey: Keys.legacyAutoReattachTmux) as? Bool
             ?? true
         self.scrollWheelBridge = defaults.object(forKey: Keys.scrollWheelBridge) as? Bool ?? true
+        self.meshyyTransport = defaults.bool(forKey: Keys.meshyyTransport)
         self.multiplexerHintShown = defaults.object(forKey: Keys.multiplexerHintShown) as? Bool
             ?? defaults.bool(forKey: Keys.legacyTmuxMouseHintShown)
         self.autoSendDictation = defaults.bool(forKey: Keys.autoSendDictation)
@@ -105,6 +116,7 @@ final class AppSettings {
         static let popOutSessions = "popOutSessions"
         static let autoPopOutOnAppSwitch = "autoPopOutOnAppSwitch"
         static let previewConsoleCapture = "previewConsoleCapture"
+        static let meshyyTransport = "meshyyTransport"
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"

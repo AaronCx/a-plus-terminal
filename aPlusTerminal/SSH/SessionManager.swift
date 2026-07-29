@@ -30,6 +30,8 @@ enum SessionState: Equatable {
 @Observable
 final class TerminalSession: Identifiable, Hashable {
     nonisolated let id = UUID()
+    /// Which meshyy session on this server this tab owns. See MeshyyTransport.sessionName.
+    nonisolated let meshyySlot: Int
 
     nonisolated static func == (lhs: TerminalSession, rhs: TerminalSession) -> Bool {
         lhs.id == rhs.id
@@ -79,6 +81,15 @@ final class TerminalSession: Identifiable, Hashable {
     var showMultiplexerHint = false
 
     private(set) var connection = SSHConnection()
+    /// The meshyy transport, when the toggle is on and the host has a daemon.
+    /// The SSH connection above stays live regardless; this replaces only the pty.
+    private(set) var meshyy: MeshyyTransport?
+    /// Why meshyy is not carrying this session, when it was asked to.
+    private(set) var meshyyUnavailable: String?
+    private var meshyyPumpTask: Task<Void, Never>?
+    /// The config the winning candidate connected with, so the SSH shell can still be
+    /// opened if the meshyy probe comes back empty.
+    private var lastCandidateConfig: SSHConnection.Configuration?
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore
@@ -157,8 +168,9 @@ final class TerminalSession: Identifiable, Hashable {
     private let outboxContinuation: AsyncStream<Outbound>.Continuation
     private var outboxTask: Task<Void, Never>?
 
-    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
+    init(server: Server, meshyySlot: Int = 0, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
         self.server = server
+        self.meshyySlot = meshyySlot
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.passwords = passwords
@@ -506,6 +518,13 @@ final class TerminalSession: Identifiable, Hashable {
         // a listener bound on the phone with nothing behind it, so every
         // teardown path has to take it down (preview brief §Phase 1).
         await stopPreview()
+        // DETACH, not shut down: the daemon keeps holding the pty and its ring buffer
+        // keeps filling, so what the shell says while the phone is asleep is still there
+        // to replay. Shutting down would end the session, which is what meshyy exists to
+        // avoid.
+        meshyyPumpTask?.cancel()
+        meshyyPumpTask = nil
+        await meshyy?.detach()
         await connection.disconnect()
         agentMonitor.reset()
         state = .suspended
@@ -621,6 +640,9 @@ final class TerminalSession: Identifiable, Hashable {
         outboxTask?.cancel()
         outboxContinuation.finish()
         await stopPreview()
+        // The user closed the tab, so end the session. Detaching would leave the daemon
+        // holding a shell nobody will reattach to, one per closed tab, forever.
+        await stopMeshyy(endSession: true)
         agentMonitor.reset()
         portDetector.reset()
         state = .closed
@@ -734,7 +756,10 @@ final class TerminalSession: Identifiable, Hashable {
         await stopPreview()
         await connection.disconnect()
 
-        let fresh = try await connectBestCandidate(auth: auth)
+        // ONE SHELL. Which transport carries the terminal is decided here, before any
+        // shell exists, and only the winner spawns one.
+        let wantsMeshyy = settings.meshyyTransport
+        let fresh = try await connectBestCandidate(auth: auth, openShell: !wantsMeshyy)
         connection = fresh
         // Clear whatever the dead PTY left on screen before the new shell and
         // tmux attach repaint — otherwise old and new frames overlay.
@@ -749,7 +774,84 @@ final class TerminalSession: Identifiable, Hashable {
         // reattach to a different window — must not inherit the previous
         // shell's working/waiting reading.
         agentMonitor.reset()
+
+        await stopMeshyy(endSession: false)
+        meshyyUnavailable = nil
+        if wantsMeshyy {
+            let size = currentWindowSize()
+            let result: Result<Void, MeshyyTransport.Unavailable>
+            if let existing = meshyy {
+                // Reattach keeps consumedOffset, which is what makes the daemon replay
+                // what was missed rather than showing a fresh screen.
+                result = await existing.reattach(
+                    over: fresh, sshHost: server.host, cols: size.cols, rows: size.rows
+                )
+            } else {
+                switch await MeshyyTransport.bootstrap(
+                    over: fresh, serverID: server.id, slot: meshyySlot,
+                    sshHost: server.host, cols: size.cols, rows: size.rows
+                ) {
+                case .success(let transport):
+                    meshyy = transport
+                    result = .success(())
+                case .failure(let reason):
+                    result = .failure(reason)
+                }
+            }
+            switch result {
+            case .success:
+                if let transport = meshyy {
+                    startMeshyyPump(reading: transport)
+                    return
+                }
+            case .failure(let reason):
+                // No daemon here, or it refused. Open the SSH shell that was
+                // deliberately not opened above. A CONNECT-time decision, not a
+                // mid-session switch: still exactly one shell.
+                meshyy = nil
+                meshyyUnavailable = reason.errorDescription
+                if let config = lastCandidateConfig {
+                    try await fresh.openShell(config)
+                }
+            }
+        }
         startPump(reading: fresh)
+    }
+
+    /// Tears down the meshyy transport without touching the SSH connection.
+    ///
+    /// `endSession: true` ends the remote shell too — for a tab the user closed. False
+    /// only drops the local pump, which a reconnect does before re-attaching.
+    private func stopMeshyy(endSession: Bool) async {
+        meshyyPumpTask?.cancel()
+        meshyyPumpTask = nil
+        guard endSession, let transport = meshyy else { return }
+        meshyy = nil
+        await transport.disconnect()
+    }
+
+    /// Reads pty bytes from meshyy into the emulator.
+    ///
+    /// Deliberately separate from `startPump`: an SSH channel ending means the shell
+    /// exited or the transport died, and drives reconnect. meshyy ending means the
+    /// resumable transport gave up, and there is no SSH shell behind it — that was the
+    /// point — so it is a dropped session like any other.
+    private func startMeshyyPump(reading transport: MeshyyTransport) {
+        meshyyPumpTask = Task { [weak self] in
+            for await chunk in transport.output {
+                guard let self, !Task.isCancelled else { return }
+                let bytes = [UInt8](chunk)
+                self.terminalView.feed(byteArray: ArraySlice(bytes))
+                self.agentMonitor.observe(bytes)
+                self.portDetector.observe(bytes)
+                self.pipInvalidate?()
+            }
+            guard let self, !Task.isCancelled, self.meshyy === transport else { return }
+            guard self.state == .connected else { return }
+            self.stopPreviewImmediately()
+            self.state = .reconnecting
+            Task { await self.reconnect(maxAttempts: 10) }
+        }
     }
 
     /// Walks the server's candidate hosts in order (last winner first within
@@ -764,7 +866,10 @@ final class TerminalSession: Identifiable, Hashable {
     /// host, where it still aborts the walk immediately (never quietly
     /// connect elsewhere past a MITM warning). A first connect with no pinned
     /// key does TOFU on whichever candidate connects first, exactly as today.
-    private func connectBestCandidate(auth: SSHConnection.AuthMethod) async throws -> SSHConnection {
+    private func connectBestCandidate(
+        auth: SSHConnection.AuthMethod,
+        openShell: Bool
+    ) async throws -> SSHConnection {
         var candidates = server.connectionCandidates
         if let preferred = preferredCandidateHost,
            let index = candidates.firstIndex(of: preferred), index > 0 {
@@ -794,8 +899,9 @@ final class TerminalSession: Identifiable, Hashable {
 
             let fresh = SSHConnection()
             do {
-                try await fresh.connect(config)
+                try await fresh.connect(config, openShell: openShell)
                 preferredCandidateHost = candidate
+                lastCandidateConfig = config
                 return fresh
             } catch {
                 if case SSHConnectionError.hostKeyMismatch = error {
@@ -828,6 +934,13 @@ final class TerminalSession: Identifiable, Hashable {
     /// Replays the real window size after connecting (§4.2 SIGWINCH contract).
     private func syncWindowSize() async {
         let size = currentWindowSize()
+        if let meshyy {
+            // Under meshyy the SSH connection has no pty, so resizing it alone would
+            // send this nowhere — and this call's whole job is making the pty match the
+            // screen before a multiplexer draws into it.
+            try? await meshyy.resize(cols: size.cols, rows: size.rows)
+            return
+        }
         try? await connection.resize(cols: size.cols, rows: size.rows)
     }
 
@@ -838,12 +951,22 @@ final class TerminalSession: Identifiable, Hashable {
             guard let self else { return }
             for await item in self.outboxStream {
                 guard !Task.isCancelled else { return }
+                // Whichever transport is carrying the pty.
+                let meshyy = self.meshyy
                 let connection = self.connection
                 switch item {
                 case .data(let data):
-                    try? await connection.send(data)
+                    if let meshyy {
+                        try? await meshyy.send(data)
+                    } else {
+                        try? await connection.send(data)
+                    }
                 case .resize(let cols, let rows):
-                    try? await connection.resize(cols: cols, rows: rows)
+                    if let meshyy {
+                        try? await meshyy.resize(cols: cols, rows: rows)
+                    } else {
+                        try? await connection.resize(cols: cols, rows: rows)
+                    }
                 }
             }
         }
@@ -974,6 +1097,15 @@ private final class SessionIO: TerminalViewDelegate {
 final class SessionManager {
     private(set) var sessions: [TerminalSession] = []
 
+    /// Lowest slot not already taken by a live tab on this server, so tab 0 resolves to
+    /// the same meshyy session across launches while two tabs still get two shells.
+    private func lowestFreeMeshyySlot(for server: Server) -> Int {
+        let taken = Set(sessions.filter { $0.server.id == server.id }.map(\.meshyySlot))
+        var slot = 0
+        while taken.contains(slot) { slot += 1 }
+        return slot
+    }
+
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore
@@ -1085,6 +1217,7 @@ final class SessionManager {
     func open(server: Server) -> TerminalSession {
         let session = TerminalSession(
             server: server,
+            meshyySlot: lowestFreeMeshyySlot(for: server),
             keyStore: keyStore,
             serverStore: serverStore,
             passwords: passwords,
