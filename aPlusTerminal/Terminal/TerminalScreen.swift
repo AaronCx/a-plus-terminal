@@ -13,6 +13,9 @@ struct TerminalScreen: View {
 
     let session: TerminalSession
 
+    /// Set when an automatic meshyy reconnect has taken long enough that the user
+    /// should be given the manual controls back.
+    @State private var meshyyReconnectStalled = false
     @State private var showDictation = false
     @State private var showPhotoPicker = false
     @State private var showFileImporter = false
@@ -111,12 +114,19 @@ struct TerminalScreen: View {
                         sessionManager.close(session)
                         dismiss()
                     }
-                } else if session.isUsingMeshyy {
-                    // meshyy reconnects itself, so there is no card and no choice to
-                    // make — the session is simply coming back. Showing "reattach or
-                    // fresh shell?" here would be asking the user to solve a problem
-                    // meshyy exists to have already solved.
+                } else if session.isUsingMeshyy, !meshyyReconnectStalled {
+                    // meshyy reconnects itself, so there is normally no choice to make.
+                    //
+                    // But it is only "normally". A reconnect that does not complete must
+                    // not leave a spinner with no way out — the first version of this
+                    // had no buttons at all, and a stalled reconnect after tapping in
+                    // from a Live Activity was a dead end with the session unreachable.
+                    // An automatic path still needs a manual one behind it.
                     ReconnectingView(serverName: session.server.name)
+                        .task {
+                            try? await Task.sleep(for: .seconds(8))
+                            if session.state == .suspended { meshyyReconnectStalled = true }
+                        }
                 } else {
                     // Cleanly paused (backgrounded long enough that iOS froze
                     // us). Reconnect queries the *live* sessions, then attaches
@@ -230,6 +240,7 @@ struct TerminalScreen: View {
             }
         }
         .onAppear {
+            if session.state == .connected { meshyyReconnectStalled = false }
             switch session.state {
             case .connected:
                 session.bridge.focus()
