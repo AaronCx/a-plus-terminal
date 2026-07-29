@@ -60,7 +60,13 @@ final class MeshyySessionPileUpTests: XCTestCase {
     }
 
     /// Opens a NEW session the way the app now does — the daemon allocates — and
-    /// returns the transport. Skips the suite cleanly when meshyy is not available.
+    /// returns the transport.
+    ///
+    /// Skips ONLY when no daemon is installed on this Mac. Every other failure —
+    /// a malformed handshake, a missing name echo, a refused attach — is a real
+    /// regression on a machine that HAS the daemon, and converting those into
+    /// skips would let the whole suite read green while guarding nothing (a
+    /// skipped test is not a passing one; see the repo's Xcode-gotchas notes).
     private func openNew(
         serverID: UUID, over ssh: SSHConnection
     ) async throws -> MeshyyTransport {
@@ -70,9 +76,22 @@ final class MeshyySessionPileUpTests: XCTestCase {
         switch result {
         case .success(let transport):
             return transport
+        case .failure(.daemonAbsent):
+            await ssh.disconnect()
+            throw XCTSkip("no meshyyd on this Mac — run ./scripts/meshyy-repro-setup.sh")
         case .failure(let reason):
             await ssh.disconnect()
-            throw XCTSkip("meshyy unavailable locally: \(reason.errorDescription ?? "?")")
+            throw ProbeFailure.bootstrap(reason.errorDescription ?? "\(reason)")
+        }
+    }
+
+    private enum ProbeFailure: Error, CustomStringConvertible {
+        case bootstrap(String)
+        var description: String {
+            switch self {
+            case .bootstrap(let detail):
+                "meshyyd is installed but the bootstrap failed: \(detail)"
+            }
         }
     }
 
@@ -191,7 +210,8 @@ final class MeshyySessionPileUpTests: XCTestCase {
         let output = (try? await ssh.runCommand(MeshyyTransport.listCommand())) ?? ""
         for line in output.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
-                  let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+                  let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rows = envelope["sessions"] as? [[String: Any]]
             else { continue }
             return rows.compactMap { row in
                 guard let name = row["name"] as? String, name.hasPrefix(prefix),

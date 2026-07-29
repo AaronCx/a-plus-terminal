@@ -33,7 +33,8 @@ test-meshyy-live: generate
 	$(XCBUILD) test-without-building \
 	  -only-testing:aPlusTerminalTests/MeshyyLiveTests \
 	  -only-testing:aPlusTerminalTests/MeshyySessionPileUpTests \
-	  -only-testing:aPlusTerminalTests/MeshyyResizeAtConnectTests
+	  -only-testing:aPlusTerminalTests/MeshyyResizeAtConnectTests \
+	  -only-testing:aPlusTerminalTests/MeshyySurvivorFlowTests
 
 clean:
 	rm -rf aPlusTerminal.xcodeproj build DerivedData

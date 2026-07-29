@@ -160,11 +160,14 @@ final class MeshyyTransport {
 
     /// This server's sessions, from the daemon's own table.
     ///
-    /// This is also the capability gate for the whole chosen-session flow: an older
-    /// `meshyyd` prints a human table here (it ignores `--json`), which fails to parse
-    /// — and the caller falls back to SSH BEFORE any bootstrap could create a session,
-    /// so an old daemon is never asked something it would misread. An older daemon
-    /// that does print JSON but lacks `attached_clients` is caught the same way.
+    /// This is also the capability gate for the whole chosen-session flow, and the
+    /// gate is the ENVELOPE, not the rows: `{"schema": 2, "sessions": [...]}` proves
+    /// the answering daemon reports what this flow needs even when the table is
+    /// empty — and an empty table is the normal state of a freshly-upgraded host,
+    /// exactly when the question matters. A bare array (an old serve behind an
+    /// upgraded binary), a human table (an old binary ignoring `--json`), or a
+    /// missing `attached_clients` all fail here, BEFORE any bootstrap could create
+    /// a session on a daemon that would misread the request.
     static func listGroup(
         over ssh: SSHConnection,
         serverID: UUID
@@ -176,13 +179,19 @@ final class MeshyyTransport {
             return .failure(.daemonAbsent)   // non-zero exit: no daemon here
         }
 
-        // Same tolerance as the bootstrap parser: an MOTD above the payload is not the
-        // daemon's fault. The payload is the first line that parses as a JSON array.
+        // Same tolerance as the bootstrap parser: an MOTD above the payload is not
+        // the daemon's fault. The payload is the first line that parses as JSON.
         let prefix = groupPrefix(serverID: serverID)
         for line in output.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
-                  let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+                  let parsed = try? JSONSerialization.jsonObject(with: data)
             else { continue }
+            guard let envelope = parsed as? [String: Any],
+                  envelope["schema"] as? Int ?? 0 >= 2,
+                  let rows = envelope["sessions"] as? [[String: Any]]
+            else {
+                return .failure(.daemonTooOld("its session list has no schema envelope"))
+            }
 
             var sessions: [RemoteSession] = []
             for row in rows {
@@ -312,6 +321,16 @@ final class MeshyyTransport {
             try await session.attach(bootstrap: response, sshHost: sshHost, timeout: .seconds(4))
         } catch {
             await transport.disconnect()
+            // The bootstrap already CREATED this session on the daemon. On the NEW
+            // path that shell is seconds old and provably nobody's, so a failed
+            // attach must take it back down — on a network where QUIC never works
+            // (UDP-filtered hotel Wi-Fi), every connect otherwise leaves one more
+            // orphan, and a host whose rc auto-attaches tmux collects one clamping
+            // client per attempt. The RESUME path never does this: that session
+            // predates this attempt and holds the user's work.
+            if expectingPrefix != nil {
+                _ = try? await ssh.runCommand(daemonCommand("kill \(name)"))
+            }
             return .failure(.connectFailed(error.localizedDescription))
         }
         return .success(transport)

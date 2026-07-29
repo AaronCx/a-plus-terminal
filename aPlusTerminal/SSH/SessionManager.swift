@@ -653,7 +653,12 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     func close() async {
-        // A connect parked on the survivor picker must not outlive its tab.
+        // .closed FIRST, before any await: a connect that has not yet reached the
+        // survivor picker checks this before parking, and a park that began after
+        // this line would otherwise wait on a continuation nobody will ever
+        // resume — with a live SSH connection leaked behind it.
+        state = .closed
+        // A connect already parked on the picker must not outlive its tab.
         chooseMeshyySession(.abort)
         pumpTask?.cancel()
         pumpTask = nil
@@ -665,7 +670,6 @@ final class TerminalSession: Identifiable, Hashable {
         await stopMeshyy(endSession: true)
         agentMonitor.reset()
         portDetector.reset()
-        state = .closed
         await connection.disconnect()
     }
 
@@ -675,6 +679,19 @@ final class TerminalSession: Identifiable, Hashable {
             do {
                 reattachChoicePending = false
                 try await establish()
+                // close() can interleave anywhere in establish's awaits. Setting
+                // .connected past it would resurrect a tab the manager already
+                // discarded — a zombie with a live connection and keepalive. The
+                // meshyy teardown here is NOT redundant with close()'s: close()
+                // ran while the bootstrap was still in flight and saw meshyy nil,
+                // so the transport establish just opened is exactly the one only
+                // this line knows about — left alone it keeps a live QUIC attach
+                // (and a daemon session pinned "attached") under a dead tab.
+                if state == .closed {
+                    await stopMeshyy(endSession: true)
+                    await connection.disconnect()
+                    return
+                }
                 state = .connected
                 lastError = nil
                 hostKeyConflict = nil
@@ -682,6 +699,11 @@ final class TerminalSession: Identifiable, Hashable {
                 // (especially a multiplexer attach) draws into it.
                 await syncWindowSize()
                 await applyReattach(intent)
+                return
+            } catch is CancellationError {
+                // The user closed the tab mid-connect (survivor picker up, or the
+                // park guard fired). Not an error, not retryable — the teardown
+                // already ran and the state is already .closed.
                 return
             } catch {
                 lastError = error.localizedDescription
@@ -807,7 +829,7 @@ final class TerminalSession: Identifiable, Hashable {
                     over: fresh, sshHost: server.host, cols: size.cols, rows: size.rows
                 )
             } else {
-                result = await openMeshyyChoosingSession(over: fresh, size: size)
+                result = try await openMeshyyChoosingSession(over: fresh, size: size)
             }
             switch result {
             case .success:
@@ -859,7 +881,7 @@ final class TerminalSession: Identifiable, Hashable {
     private func openMeshyyChoosingSession(
         over fresh: SSHConnection,
         size: (cols: Int, rows: Int)
-    ) async -> Result<Void, MeshyyTransport.Unavailable> {
+    ) async throws -> Result<Void, MeshyyTransport.Unavailable> {
         let remote: [MeshyyTransport.RemoteSession]
         switch await MeshyyTransport.listGroup(over: fresh, serverID: server.id) {
         case .failure(let reason):
@@ -872,6 +894,12 @@ final class TerminalSession: Identifiable, Hashable {
 
         var choice: MeshyyChoice = .new
         if !survivors.isEmpty {
+            // A close() can land between the SSH connect and this point. Its
+            // `.abort` resume has already come and gone, so parking NOW would wait
+            // on a continuation nobody will ever resume, holding a leaked SSH
+            // connection under a tab that no longer exists. close() sets .closed
+            // before anything else precisely so this check is race-free.
+            guard state != .closed else { throw CancellationError() }
             meshyySurvivors = survivors
             choice = await withCheckedContinuation { meshyyChoice = $0 }
             meshyySurvivors = nil
@@ -882,11 +910,25 @@ final class TerminalSession: Identifiable, Hashable {
         if case .resume(let name) = choice, meshyyNamesInUse().contains(name) {
             choice = .new
         }
+        // The other device is the claim this app cannot see: an iPad can adopt the
+        // same survivor between this picker appearing and the tap. Ask the daemon
+        // once more — one exec on the open connection — and fall back to a fresh
+        // session rather than silently sharing a shell across devices.
+        if case .resume(let name) = choice {
+            if case .success(let now) = await MeshyyTransport.listGroup(
+                over: fresh, serverID: server.id
+            ), !now.contains(where: { $0.name == name && $0.isResumable }) {
+                choice = .new
+            }
+        }
 
         let opened: Result<MeshyyTransport, MeshyyTransport.Unavailable>
         switch choice {
         case .abort:
-            return .failure(.connectFailed("the session closed while choosing"))
+            // The tab was closed while the picker was up. NOT a transport failure:
+            // the failure path would open the fallback SSH shell — a stray login on
+            // the server under a tab that is already gone.
+            throw CancellationError()
         case .new:
             opened = await MeshyyTransport.bootstrapNew(
                 over: fresh, serverID: server.id,
