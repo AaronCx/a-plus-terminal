@@ -58,6 +58,13 @@ final class MeshyyTransport {
     private let session: MeshyySession
     private var eventTask: Task<Void, Never>?
     private(set) var isFinished = false
+    /// Why the session ended, when it did.
+    ///
+    /// Recorded because a reconnect that happens on its own is invisible by design, and
+    /// an invisible reconnect that happens repeatedly is indistinguishable from a bug
+    /// with no evidence. `.ended` means the daemon or this client closed it; `.failed`
+    /// means the transport gave up. Those want completely different fixes.
+    private(set) var endReason: String?
 
     /// The session name, kept so every reattach lands on the SAME daemon session.
     private let name: String
@@ -240,11 +247,17 @@ final class MeshyyTransport {
                     // detector in the app, and duplicating it from the wire would give
                     // two sources of truth for the same badge.
                     break
-                case .ended, .failed:
+                case .ended(let reason):
+                    self.endReason = "session ended: \(reason)"
+                    self.finish()
+                    return
+                case .failed(let reason):
+                    self.endReason = "transport failed: \(reason)"
                     self.finish()
                     return
                 }
             }
+            self.endReason = self.endReason ?? "the event stream closed"
             self.finish()
         }
     }

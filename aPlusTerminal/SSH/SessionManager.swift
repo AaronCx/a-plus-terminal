@@ -879,8 +879,11 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     /// The meshyy session ended without the user closing it.
+    private(set) var lastMeshyyEnd: String?
+
     private func meshyyEnded() {
         guard state == .connected else { return }
+        lastMeshyyEnd = meshyy?.endReason
         meshyy = nil
         stopPreviewImmediately()
         state = .reconnecting

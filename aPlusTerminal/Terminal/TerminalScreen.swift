@@ -76,7 +76,18 @@ struct TerminalScreen: View {
                 // takes long enough to notice still is.
                 DelayedStatusCard(delay: .seconds(1.2)) {
                     statusCard {
-                        ProgressView("Reconnecting…")
+                        VStack(spacing: 6) {
+                            ProgressView("Reconnecting…")
+                            // Names the cause when there is one. A reconnect that keeps
+                            // happening with no stated reason is a bug report with no
+                            // evidence in it.
+                            if let reason = session.lastMeshyyEnd {
+                                Text(reason)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                        }
                     }
                 }
             case .suspended:
