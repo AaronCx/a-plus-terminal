@@ -99,7 +99,78 @@ final class MeshyySurvivorFlowTests: XCTestCase {
                        "expected the survivor plus one fresh session, got \(held)")
     }
 
+    /// THE resume regression: after a clean suspend and reconnect, the terminal
+    /// must still paint.
+    ///
+    /// A detach seals the transport's streams (`.ended` finishes the event pump and
+    /// the single-use output stream). Reattaching the SEALED transport succeeded on
+    /// the daemon's side — attach accepted, replay sent — while every byte landed in
+    /// a stream with no consumer: the tab said connected, keystrokes went out, and
+    /// the screen never changed again. The fix rebuilds the transport around the
+    /// same session (same consumedOffset, fresh plumbing); this drives the exact
+    /// user path — background past the grace window, foreground, reconnect.
+    func testOutputStillPaintsAfterSuspendAndReconnect() async throws {
+        let (session, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+
+        await session.connect()   // fresh group: no survivors, no picker
+        guard session.state == .connected, session.meshyy != nil else {
+            throw XCTSkip("no local meshyy session: \(session.meshyyUnavailable ?? "not connected")")
+        }
+
+        // The pipeline paints before — otherwise the later assertion proves nothing.
+        let before = try await ask(session, marker: "PAINT1")
+        XCTAssertEqual(before, "ok", "the session never painted at all: harness problem")
+
+        // The app's clean background path, then the paused-card reconnect.
+        await session.suspend()
+        XCTAssertEqual(session.state, .suspended)
+        await session.reconnect(maxAttempts: 1)
+        XCTAssertEqual(session.state, .connected, "reconnect failed: \(session.lastError ?? "?")")
+        XCTAssertNotNil(session.meshyy, "the reconnect fell back to SSH")
+
+        let after = try await ask(session, marker: "PAINT2")
+        XCTAssertEqual(after, "ok",
+                       "the reattached session went blind — replay and live output are "
+                           + "landing in a sealed stream with no consumer")
+    }
+
     // MARK: - Harness (same probe plumbing as MeshyyResizeAtConnectTests)
+
+    /// Runs a marker print in the session's shell and reads it back off the
+    /// rendered grid — the byte path the user actually sees. The marker is
+    /// assembled by printf so the echoed command cannot satisfy the scan.
+    private func ask(_ session: TerminalSession, marker: String) async throws -> String {
+        let head = String(marker.prefix(3)), tail = String(marker.dropFirst(3))
+        session.sendInput(Data("printf '%s%s:ok\\n' '\(head)' '\(tail)'\n".utf8))
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            if let value = Self.value(after: marker + ":", in: session.terminalView) {
+                return value
+            }
+            try await Task.sleep(for: .milliseconds(120))
+        }
+        return ""
+    }
+
+    /// Scans the rendered grid for `prefix` and returns the rest of that row.
+    private static func value(after prefix: String, in view: TerminalEmulatorView) -> String? {
+        let terminal = view.getTerminal()
+        for row in 0..<terminal.rows {
+            guard let line = terminal.getLine(row: row) else { continue }
+            var text = ""
+            for column in 0..<terminal.cols { text.append(line[column].getCharacter()) }
+            text = text.replacingOccurrences(of: "\0", with: " ")
+            guard let range = text.range(of: prefix) else { continue }
+            let value = text[range.upperBound...].trimmingCharacters(in: .whitespaces)
+            if !value.isEmpty { return value }
+        }
+        return nil
+    }
 
     private func poll(
         deadline seconds: TimeInterval, _ message: String,

@@ -336,6 +336,23 @@ final class MeshyyTransport {
         return .success(transport)
     }
 
+    /// A fresh transport around the SAME session, for reuse after this one sealed
+    /// itself.
+    ///
+    /// A detach (or a transport failure) yields `.ended`/`.failed`, the event pump
+    /// finishes, and `output` — a single-use AsyncStream — is closed for good. The
+    /// daemon-side session and this client's `consumedOffset` both survive, so the
+    /// RESUME point is intact; what cannot be revived is the plumbing. Reattaching
+    /// the sealed transport looked like it worked — the daemon accepted the attach
+    /// and replayed — but every byte landed in a stream with no consumer, and the
+    /// user typed into a terminal that never painted again. So a finished transport
+    /// is rebuilt: same session, same name, new stream, new pump.
+    func rebuilt() -> MeshyyTransport {
+        let fresh = MeshyyTransport(session: session, name: name)
+        fresh.startPump()
+        return fresh
+    }
+
     /// Re-attaches this transport over a new SSH connection, keeping its resume point.
     ///
     /// `MeshyySession` carries `consumedOffset` — how many bytes this client has drawn —

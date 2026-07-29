@@ -702,8 +702,12 @@ final class TerminalSession: Identifiable, Hashable {
                 return
             } catch is CancellationError {
                 // The user closed the tab mid-connect (survivor picker up, or the
-                // park guard fired). Not an error, not retryable — the teardown
-                // already ran and the state is already .closed.
+                // park guard fired). Not an error, not retryable. The teardown in
+                // close() ran, but if it ran while the dial was still in flight it
+                // disconnected the PREVIOUS connection object — the one establish
+                // assigned afterwards is this loop's to release, or the socket and
+                // its server-side login outlive the tab until the app exits.
+                await connection.disconnect()
                 return
             } catch {
                 lastError = error.localizedDescription
@@ -824,8 +828,15 @@ final class TerminalSession: Identifiable, Hashable {
             let result: Result<Void, MeshyyTransport.Unavailable>
             if let existing = meshyy {
                 // Reattach keeps consumedOffset, which is what makes the daemon replay
-                // what was missed rather than showing a fresh screen.
-                result = await existing.reattach(
+                // what was missed rather than showing a fresh screen. But a transport
+                // whose streams have finished — every suspend/detach and every QUIC
+                // failure seals them — must be REBUILT around the session first:
+                // reattaching the sealed one succeeds on the daemon's side and then
+                // delivers the replay into a stream nobody consumes, a terminal that
+                // never paints again under a tab that says connected.
+                let transport = existing.isFinished ? existing.rebuilt() : existing
+                meshyy = transport
+                result = await transport.reattach(
                     over: fresh, sshHost: server.host, cols: size.cols, rows: size.rows
                 )
             } else {
@@ -882,6 +893,12 @@ final class TerminalSession: Identifiable, Hashable {
         over fresh: SSHConnection,
         size: (cols: Int, rows: Int)
     ) async throws -> Result<Void, MeshyyTransport.Unavailable> {
+        // close() cannot cancel a dial already in flight; it can only mark the tab.
+        // Checking here — before the list, not just before the park — keeps a
+        // closed tab from allocating a daemon session it will immediately have to
+        // tear back down (the attemptLoop guard would catch it, but creating a
+        // shell just to kill it is work a race should not get to cause).
+        guard state != .closed else { throw CancellationError() }
         let remote: [MeshyyTransport.RemoteSession]
         switch await MeshyyTransport.listGroup(over: fresh, serverID: server.id) {
         case .failure(let reason):
@@ -906,10 +923,17 @@ final class TerminalSession: Identifiable, Hashable {
         }
         // Two tabs can show pickers offering the same survivor; the first resolve
         // claims it. Re-check here so the second silently gets a fresh session
-        // instead of a shared shell.
-        if case .resume(let name) = choice, meshyyNamesInUse().contains(name) {
-            choice = .new
+        // instead of a shared shell — and CLAIM before the awaits below, or the
+        // second tab's re-check races straight through the first tab's re-list
+        // window and both adopt one shell.
+        if case .resume(let name) = choice {
+            if meshyyNamesInUse().contains(name) {
+                choice = .new
+            } else {
+                meshyyPendingClaim = name
+            }
         }
+        defer { meshyyPendingClaim = nil }
         // The other device is the claim this app cannot see: an iPad can adopt the
         // same survivor between this picker appearing and the tap. Ask the daemon
         // once more — one exec on the open connection — and fall back to a fresh
@@ -935,11 +959,9 @@ final class TerminalSession: Identifiable, Hashable {
                 sshHost: server.host, cols: size.cols, rows: size.rows
             )
         case .resume(let name):
-            // Claimed for the whole open, so a second tab resolving the same
-            // survivor mid-bootstrap sees it taken; the transport's own name
-            // carries the claim from success onward.
-            meshyyPendingClaim = name
-            defer { meshyyPendingClaim = nil }
+            // Already claimed above, synchronously at resolve; the transport's own
+            // name carries the claim from success onward (the defer that clears
+            // the pending claim runs after `meshyy` is set below).
             opened = await MeshyyTransport.bootstrap(
                 resuming: name, over: fresh,
                 sshHost: server.host, cols: size.cols, rows: size.rows
