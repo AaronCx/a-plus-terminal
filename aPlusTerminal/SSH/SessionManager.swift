@@ -543,6 +543,20 @@ final class TerminalSession: Identifiable, Hashable {
         guard state == .connected else { return }
         pumpTask?.cancel()
         pumpTask = nil
+        // Abandon any reconnect that was in flight, and CLEAR the handle.
+        //
+        // `reconnect` single-flights on `reconnectLoop`, and only nils it after
+        // `await loop.value` returns. iOS freezing the process mid-reconnect means that
+        // line never runs, so the handle stays set for the life of the session — and
+        // every later attempt takes the `if let reconnectLoop { await …; return }` path,
+        // awaits a task that is dead or frozen, and returns WITHOUT reconnecting. The
+        // session then sits in .suspended forever.
+        //
+        // That is what "stuck on Reconnecting" was, on both the Live Activity and the
+        // app-switcher paths. A reconnect begun before a freeze is worthless after it
+        // anyway: its SSH connection is gone.
+        reconnectLoop?.cancel()
+        reconnectLoop = nil
         // Before the socket goes: a forward that outlives its SSHClient leaves
         // a listener bound on the phone with nothing behind it, so every
         // teardown path has to take it down (preview brief §Phase 1).

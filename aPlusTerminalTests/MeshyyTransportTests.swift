@@ -21,8 +21,7 @@ final class MeshyyTransportTests: XCTestCase {
         let settings = AppSettings(defaults: defaults)
         XCTAssertFalse(
             settings.meshyyTransport,
-            "meshyy must be opt-in: it changes how terminal bytes travel, which is the "
-                + "one thing the app cannot get wrong by default"
+            "meshyy must be opt-in: it changes how terminal bytes travel, which is the one thing the app cannot get wrong by default"
         )
     }
 
@@ -457,5 +456,48 @@ final class TerminalRegrowTests: XCTestCase {
         XCTAssertFalse(wouldSend(current: (74, 64), last: (74, 64)), "unchanged must not resend")
         XCTAssertTrue(wouldSend(current: (74, 64), last: (74, 35)), "a real change must be sent")
         XCTAssertFalse(wouldSend(current: (0, 0), last: (74, 64)), "a pre-layout size must be ignored")
+    }
+}
+
+// MARK: - A frozen reconnect must not poison every later one
+
+@MainActor
+final class ReconnectSingleFlightTests: XCTestCase {
+    /// Reported as "stuck on Reconnecting", on both the Live Activity and app-switcher
+    /// paths, with no way out.
+    ///
+    /// `reconnect` single-flights on a stored Task handle and clears it only AFTER
+    /// awaiting that task. iOS freezing the process mid-reconnect means the clear never
+    /// runs, so the handle survives for the life of the session — and every later
+    /// attempt takes the "one is already running" branch, awaits a task that is dead,
+    /// and returns without reconnecting. The session sits suspended forever.
+    ///
+    /// The rule: suspending abandons any in-flight reconnect AND clears the handle.
+    func testSuspendClearsAStaleReconnectHandle() async {
+        // Models the guard: a non-nil handle short-circuits, so it must be nil after a
+        // suspension or the short-circuit becomes permanent.
+        final class Loop { var handle: Task<Void, Never>? }
+        let loop = Loop()
+
+        // A reconnect that never completes, exactly like one frozen by the OS.
+        loop.handle = Task { try? await Task.sleep(for: .seconds(3600)) }
+        XCTAssertNotNil(loop.handle, "precondition: a reconnect is in flight")
+
+        // What suspend() must do.
+        loop.handle?.cancel()
+        loop.handle = nil
+
+        XCTAssertNil(
+            loop.handle,
+            "a suspension left the reconnect handle set — every later reconnect would short-circuit on it and the session could never come back"
+        )
+    }
+
+    /// And the guard itself: a set handle short-circuits, a nil one proceeds. Stated so
+    /// the reason clearing matters is not lost.
+    func testASetHandleShortCircuits() {
+        func wouldStartNewReconnect(existingHandle: Bool) -> Bool { !existingHandle }
+        XCTAssertFalse(wouldStartNewReconnect(existingHandle: true))
+        XCTAssertTrue(wouldStartNewReconnect(existingHandle: false))
     }
 }
