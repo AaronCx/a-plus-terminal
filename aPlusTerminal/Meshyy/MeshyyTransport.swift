@@ -94,8 +94,9 @@ final class MeshyyTransport {
     /// crosses an SSH exec channel and is interpreted by the remote shell, so an
     /// unconstrained name here would be a command-injection hole of the same class
     /// meshyy's own daemon rules forbid.
-    static func sessionName(for sessionID: UUID) -> String {
-        "aplus-" + sessionID.uuidString.lowercased().filter { $0.isHexDigit || $0 == "-" }
+    static func sessionName(serverID: UUID, slot: Int) -> String {
+        let host = serverID.uuidString.lowercased().filter { $0.isHexDigit || $0 == "-" }
+        return "aplus-\(host)-\(max(0, slot))"
     }
 
     /// Where `meshyyd` might be, in probe order.
@@ -136,12 +137,13 @@ final class MeshyyTransport {
     /// the caller's correct response is to carry on over SSH.
     static func bootstrap(
         over ssh: SSHConnection,
-        sessionID: UUID,
+        serverID: UUID,
+        slot: Int,
         sshHost: String,
         cols: Int,
         rows: Int
     ) async -> Result<MeshyyTransport, Unavailable> {
-        let name = sessionName(for: sessionID)
+        let name = sessionName(serverID: serverID, slot: slot)
 
         // A missing `meshyyd` exits non-zero, which Citadel surfaces as a thrown
         // CommandFailed. That is the common case, not a fault.

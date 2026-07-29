@@ -43,13 +43,13 @@ final class MeshyyTransportTests: XCTestCase {
     func testSessionNameIsStableForAServer() {
         let id = UUID()
         XCTAssertEqual(
-            MeshyyTransport.sessionName(for: id),
-            MeshyyTransport.sessionName(for: id),
+            MeshyyTransport.sessionName(serverID: id, slot: 0),
+            MeshyyTransport.sessionName(serverID: id, slot: 0),
             "the same server produced two different session names"
         )
         XCTAssertNotEqual(
-            MeshyyTransport.sessionName(for: id),
-            MeshyyTransport.sessionName(for: UUID()),
+            MeshyyTransport.sessionName(serverID: id, slot: 0),
+            MeshyyTransport.sessionName(serverID: UUID(), slot: 0),
             "two servers collided on one session name, so they would share a shell"
         )
     }
@@ -61,7 +61,7 @@ final class MeshyyTransportTests: XCTestCase {
     /// filtering keeps it that way if the source of the name ever changes.
     func testSessionNameCannotBeReadAsShellSyntax() {
         for _ in 0..<200 {
-            let name = MeshyyTransport.sessionName(for: UUID())
+            let name = MeshyyTransport.sessionName(serverID: UUID(), slot: 0)
             let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
             XCTAssertTrue(
                 name.unicodeScalars.allSatisfy { allowed.contains($0) },
@@ -193,7 +193,7 @@ extension MeshyyTransportTests {
     /// The session name is the only thing this side interpolates into a string a
     /// remote shell will interpret.
     func testOnlyTheFilteredSessionNameIsInterpolated() {
-        let name = MeshyyTransport.sessionName(for: UUID())
+        let name = MeshyyTransport.sessionName(serverID: UUID(), slot: 0)
         let command = MeshyyTransport.bootstrapCommand(session: name)
         XCTAssertTrue(command.contains("--session \(name) --json"))
 
@@ -307,20 +307,46 @@ final class SessionIdentityTests: XCTestCase {
     /// host resolved to the same daemon session and the second tab attached to the
     /// first tab's shell. Keyed on the tab now.
     func testEachTabGetsItsOwnSessionName() {
-        let tabA = UUID()
-        let tabB = UUID()
+        let server = UUID()
         XCTAssertNotEqual(
-            MeshyyTransport.sessionName(for: tabA),
-            MeshyyTransport.sessionName(for: tabB),
+            MeshyyTransport.sessionName(serverID: server, slot: 0),
+            MeshyyTransport.sessionName(serverID: server, slot: 1),
             "two tabs share a session name, so the second one lands in the first one's shell"
         )
     }
 
-    /// And the same tab must keep its name, or reattaching starts a new shell instead
-    /// of resuming the one that is still running.
-    func testATabKeepsItsNameAcrossReattaches() {
-        let tab = UUID()
-        XCTAssertEqual(MeshyyTransport.sessionName(for: tab), MeshyyTransport.sessionName(for: tab))
+    /// The name must be STABLE across app launches, not merely unique.
+    ///
+    /// It was keyed on the tab's UUID, which is regenerated every launch — so every
+    /// launch created a new daemon session with a new shell. Because the user's shell
+    /// rc auto-attaches tmux, each became another tmux client: six accumulated in one
+    /// evening, tmux sized the session to its SMALLEST client, and the terminal was
+    /// clamped to 39 rows regardless of what any client asked for. That was the black
+    /// region, and six clients renegotiating size was the flicker.
+    ///
+    /// A slot is derived from position, not identity, so tab 0 on a server resolves to
+    /// the same session tomorrow as it does today.
+    func testTheNameIsStableAcrossLaunches() {
+        let server = UUID()
+        XCTAssertEqual(
+            MeshyyTransport.sessionName(serverID: server, slot: 0),
+            MeshyyTransport.sessionName(serverID: server, slot: 0),
+            "a relaunch must reattach, not spawn a sibling shell"
+        )
+        XCTAssertNotEqual(
+            MeshyyTransport.sessionName(serverID: server, slot: 0),
+            MeshyyTransport.sessionName(serverID: UUID(), slot: 0),
+            "two servers must not share slot 0"
+        )
+    }
+
+    /// Still shell-safe with the slot appended.
+    func testSlottedNameCannotBeReadAsShellSyntax() {
+        for slot in [0, 1, 7, 99] {
+            let name = MeshyyTransport.sessionName(serverID: UUID(), slot: slot)
+            let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
+            XCTAssertTrue(name.unicodeScalars.allSatisfy { allowed.contains($0) }, name)
+        }
     }
 
     /// The quick-action keys moved into the ordinary key bar. Asserted because the

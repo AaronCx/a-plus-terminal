@@ -30,6 +30,8 @@ enum SessionState: Equatable {
 @Observable
 final class TerminalSession: Identifiable, Hashable {
     nonisolated let id = UUID()
+    /// Which meshyy session on this server this tab owns. See `lowestFreeMeshyySlot`.
+    nonisolated let meshyySlot: Int
 
     nonisolated static func == (lhs: TerminalSession, rhs: TerminalSession) -> Bool {
         lhs.id == rhs.id
@@ -179,8 +181,9 @@ final class TerminalSession: Identifiable, Hashable {
     private let outboxContinuation: AsyncStream<Outbound>.Continuation
     private var outboxTask: Task<Void, Never>?
 
-    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
+    init(server: Server, meshyySlot: Int = 0, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
         self.server = server
+        self.meshyySlot = meshyySlot
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.passwords = passwords
@@ -824,8 +827,8 @@ final class TerminalSession: Identifiable, Hashable {
             let size = currentWindowSize()
             let result = await MeshyyTransport.bootstrap(
                 over: fresh,
-                // The TAB's id, not the server's. See MeshyyTransport.sessionName.
-                sessionID: id,
+                serverID: server.id,
+                slot: meshyySlot,
                 sshHost: server.host,
                 cols: size.cols,
                 rows: size.rows
@@ -1166,6 +1169,26 @@ private final class SessionIO: TerminalViewDelegate {
 final class SessionManager {
     private(set) var sessions: [TerminalSession] = []
 
+    /// The lowest slot number not already taken by a live tab on this server.
+    ///
+    /// This is what makes a meshyy session name stable ACROSS APP LAUNCHES while still
+    /// being unique per tab, and both halves matter. Keying on the tab's UUID gave
+    /// uniqueness and nothing else: a fresh UUID every launch meant every launch
+    /// created a NEW daemon session with a NEW shell, and because the user's shell rc
+    /// auto-attaches tmux, each one became another tmux client. Six accumulated within
+    /// an evening. tmux then sized the session to its smallest client, so the terminal
+    /// was clamped to 39 rows no matter what any one client asked for — the black
+    /// region — and six clients renegotiating produced the flicker.
+    ///
+    /// A slot is derived, not stored: the first tab on a server is always slot 0, so a
+    /// relaunch reattaches to the session it left rather than spawning a sibling.
+    private func lowestFreeMeshyySlot(for server: Server) -> Int {
+        let taken = Set(sessions.filter { $0.server.id == server.id }.map(\.meshyySlot))
+        var slot = 0
+        while taken.contains(slot) { slot += 1 }
+        return slot
+    }
+
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore
@@ -1277,6 +1300,7 @@ final class SessionManager {
     func open(server: Server) -> TerminalSession {
         let session = TerminalSession(
             server: server,
+            meshyySlot: lowestFreeMeshyySlot(for: server),
             keyStore: keyStore,
             serverStore: serverStore,
             passwords: passwords,
