@@ -41,7 +41,7 @@ packages:
   # floating version could change resume arithmetic under a shipped build.
   Meshyy:
     url: https://github.com/AaronCx/meshyy.git
-    exactVersion: "0.1.6"
+    exactVersion: "0.1.7"
 targets:
   aPlusTerminal:
     type: application

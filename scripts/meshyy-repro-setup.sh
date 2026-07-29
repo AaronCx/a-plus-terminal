@@ -39,6 +39,11 @@ pathlib.Path(sys.argv[2]).write_text(base64.b64encode(key[:32]).decode())
 PY
 chmod 644 "$SEED"
 
+# KeyStore takes an OpenSSH PEM, so tests that drive a whole TerminalSession (rather
+# than an SSHConnection built by hand) need the key in that form too.
+cp "$KEY" /tmp/aplus-probe-key.pem
+chmod 644 /tmp/aplus-probe-key.pem
+
 # The simulator's NSUserName() is not necessarily this Mac's login name, and the
 # username is what sshd matches the key against — so state it rather than guess.
 printf '%s' "$USER" > /tmp/aplus-probe-user.txt

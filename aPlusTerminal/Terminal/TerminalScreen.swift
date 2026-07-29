@@ -91,6 +91,17 @@ struct TerminalScreen: View {
                     onStayInShell: { session.dismissReattachChoice() }
                 )
             }
+
+            // The daemon holds detached meshyy sessions for this server — the user
+            // decides whether this tab resumes one or starts fresh. Never guessed:
+            // guessing is exactly what used to drop new tabs into old shells.
+            if let survivors = session.meshyySurvivors {
+                MeshyySurvivorPickerView(
+                    survivors: survivors,
+                    onResume: { session.chooseMeshyySession(.resume($0)) },
+                    onNew: { session.chooseMeshyySession(.new) }
+                )
+            }
         }
         .navigationTitle(session.server.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -331,6 +342,69 @@ struct SessionPausedView: View {
 
 /// Live session picker shown over the reconnected shell when several sessions
 /// exist. `sessions` is a fresh query (no stale/closed entries).
+/// Detached meshyy sessions found on the server at connect time. The card the
+/// connect parks behind: each survivor is a shell still running exactly as it was
+/// left, and only a tap — never a guess — puts this tab into one.
+struct MeshyySurvivorPickerView: View {
+    let survivors: [MeshyyTransport.RemoteSession]
+    var onResume: (String) -> Void
+    var onNew: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text(survivors.count == 1 ? "A Session Is Still Running" : "Sessions Are Still Running")
+                .font(.headline)
+            Text("This server kept working while the app was away. Pick a session to resume, or start fresh.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(survivors) { survivor in
+                        Button { onResume(survivor.name) } label: {
+                            VStack(spacing: 2) {
+                                Label("Resume Session \(survivor.slot + 1)",
+                                      systemImage: "arrow.uturn.backward")
+                                Text(detail(for: survivor))
+                                    .font(.caption2)
+                                    .opacity(0.8)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Button(action: onNew) {
+                        Label("New Session", systemImage: "plus.rectangle").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: 320)
+            }
+            .frame(maxHeight: 300)
+        }
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding(24)
+    }
+
+    private func detail(for survivor: MeshyyTransport.RemoteSession) -> String {
+        var parts: [String] = []
+        if let last = survivor.lastOutputAt {
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .short
+            parts.append("active \(formatter.localizedString(for: last, relativeTo: Date()))")
+        }
+        if survivor.bufferedBytes > 0 {
+            parts.append(ByteCountFormatter.string(
+                fromByteCount: Int64(survivor.bufferedBytes), countStyle: .memory))
+        }
+        return parts.isEmpty ? "\(survivor.cols)×\(survivor.rows)" : parts.joined(separator: " · ")
+    }
+}
+
 struct ReattachPickerView: View {
     let sessions: [String]
     var onPick: (String) -> Void

@@ -28,6 +28,7 @@ final class MeshyyTransport {
         case daemonAbsent
         case malformedBootstrap(String)
         case protocolTooOld(daemon: Int, client: Int)
+        case daemonTooOld(String)
         case connectFailed(String)
 
         var errorDescription: String? {
@@ -38,10 +39,33 @@ final class MeshyyTransport {
                 return "meshyyd answered with something unreadable (\(detail)) — using SSH."
             case .protocolTooOld(let daemon, let client):
                 return "meshyyd speaks protocol \(daemon), this app speaks \(client) — using SSH."
+            case .daemonTooOld(let detail):
+                return "meshyyd on this host is too old (\(detail)) — using SSH."
             case .connectFailed(let detail):
                 return "Couldn't open the meshyy connection (\(detail)) — using SSH."
             }
         }
+    }
+
+    /// One session as the daemon reports it — `meshyyd list --json`, filtered to this
+    /// server's group. The DAEMON's truth, never this app's bookkeeping: the sessions
+    /// live there and outlive both tabs and app launches.
+    struct RemoteSession: Equatable, Identifiable {
+        let name: String
+        let slot: Int
+        let alive: Bool
+        /// Zero means detached — nothing anywhere is drawing this session.
+        let attachedClients: Int
+        let cols: Int
+        let rows: Int
+        /// Bytes sitting in the ring buffer. A rough "how much happened here".
+        let bufferedBytes: UInt64
+        let lastOutputAt: Date?
+
+        var id: String { name }
+
+        /// Detached and running — the ones worth offering back to the user.
+        var isResumable: Bool { alive && attachedClients == 0 }
     }
 
     /// Pty bytes, in arrival order, shaped exactly like `SSHConnection.output` so the
@@ -51,6 +75,9 @@ final class MeshyyTransport {
 
     private let session: MeshyySession
     private let name: String
+    /// Which daemon session this transport is bound to — the tab's claim, visible so
+    /// the manager can keep two tabs from adopting one survivor.
+    var sessionName: String { name }
     private var eventTask: Task<Void, Never>?
     private(set) var isFinished = false
 
@@ -82,8 +109,14 @@ final class MeshyyTransport {
     /// Constrained to a charset a shell cannot read as syntax: the command below crosses
     /// an SSH exec channel.
     static func sessionName(serverID: UUID, slot: Int) -> String {
+        groupPrefix(serverID: serverID) + String(max(0, slot))
+    }
+
+    /// The numbered-group prefix for one server — what `attach --new-in-group` and the
+    /// survivor listing are keyed on.
+    static func groupPrefix(serverID: UUID) -> String {
         let host = serverID.uuidString.lowercased().filter { $0.isHexDigit || $0 == "-" }
-        return "aplus-\(host)-\(max(0, slot))"
+        return "aplus-\(host)-"
     }
 
     /// Where `meshyyd` might be, in probe order.
@@ -115,26 +148,130 @@ final class MeshyyTransport {
         daemonCommand("attach --session \(session) --json")
     }
 
+    static func bootstrapNewCommand(serverID: UUID) -> String {
+        daemonCommand("attach --new-in-group \(groupPrefix(serverID: serverID)) --json")
+    }
+
+    static func listCommand() -> String {
+        daemonCommand("list --json")
+    }
+
+    // MARK: - Asking the daemon what it holds
+
+    /// This server's sessions, from the daemon's own table.
+    ///
+    /// This is also the capability gate for the whole chosen-session flow: an older
+    /// `meshyyd` prints a human table here (it ignores `--json`), which fails to parse
+    /// — and the caller falls back to SSH BEFORE any bootstrap could create a session,
+    /// so an old daemon is never asked something it would misread. An older daemon
+    /// that does print JSON but lacks `attached_clients` is caught the same way.
+    static func listGroup(
+        over ssh: SSHConnection,
+        serverID: UUID
+    ) async -> Result<[RemoteSession], Unavailable> {
+        let output: String
+        do {
+            output = try await ssh.runCommand(listCommand())
+        } catch {
+            return .failure(.daemonAbsent)   // non-zero exit: no daemon here
+        }
+
+        // Same tolerance as the bootstrap parser: an MOTD above the payload is not the
+        // daemon's fault. The payload is the first line that parses as a JSON array.
+        let prefix = groupPrefix(serverID: serverID)
+        for line in output.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+            else { continue }
+
+            var sessions: [RemoteSession] = []
+            for row in rows {
+                guard let name = row["name"] as? String, name.hasPrefix(prefix) else { continue }
+                guard let attached = row["attached_clients"] as? Int else {
+                    return .failure(.daemonTooOld("no attachment counts in its session list"))
+                }
+                guard let slot = Int(name.dropFirst(prefix.count)) else { continue }
+                let from = (row["buffered_from"] as? NSNumber)?.uint64Value ?? 0
+                let to = (row["buffered_to"] as? NSNumber)?.uint64Value ?? 0
+                sessions.append(RemoteSession(
+                    name: name,
+                    slot: slot,
+                    alive: row["alive"] as? Bool ?? false,
+                    attachedClients: attached,
+                    cols: row["cols"] as? Int ?? 0,
+                    rows: row["rows"] as? Int ?? 0,
+                    bufferedBytes: to > from ? to - from : 0,
+                    lastOutputAt: (row["last_output_at"] as? NSNumber)
+                        .map { Date(timeIntervalSince1970: $0.doubleValue) }
+                ))
+            }
+            return .success(sessions.sorted { $0.slot < $1.slot })
+        }
+        return .failure(.daemonTooOld("its session list is not JSON"))
+    }
+
+    /// The sessions worth offering the user: running, detached, and not already
+    /// drawn (or being adopted) by another tab. A dead shell is the reaper's
+    /// business; an attached one is someone else's screen.
+    static func offerableSurvivors(
+        in remote: [RemoteSession],
+        claimed: Set<String>
+    ) -> [RemoteSession] {
+        remote.filter { $0.isResumable && !claimed.contains($0.name) }
+    }
+
     // MARK: - Opening
+
+    /// Opens a NEW session, named by the daemon: the lowest free slot in this server's
+    /// group, allocated atomically where the sessions actually live. The one thing this
+    /// can never do is land in a session that already belonged to someone — which is
+    /// exactly what computing the slot from this app's open tabs used to do after a
+    /// force-quit, when the daemon's sessions had outlived every tab.
+    static func bootstrapNew(
+        over ssh: SSHConnection,
+        serverID: UUID,
+        sshHost: String,
+        cols: Int,
+        rows: Int
+    ) async -> Result<MeshyyTransport, Unavailable> {
+        await open(
+            command: bootstrapNewCommand(serverID: serverID),
+            expectingPrefix: groupPrefix(serverID: serverID),
+            over: ssh, sshHost: sshHost, cols: cols, rows: rows
+        )
+    }
+
+    /// Re-opens a specific surviving session the user chose to resume.
+    static func bootstrap(
+        resuming name: String,
+        over ssh: SSHConnection,
+        sshHost: String,
+        cols: Int,
+        rows: Int
+    ) async -> Result<MeshyyTransport, Unavailable> {
+        await open(
+            command: bootstrapCommand(session: name),
+            expectingPrefix: nil,
+            over: ssh, sshHost: sshHost, cols: cols, rows: rows
+        )
+    }
 
     /// Runs the §5.1 bootstrap over SSH and, on success, opens the meshyy session.
     ///
     /// Returns a reason rather than throwing for the expected cases: "this host has no
     /// daemon" is the majority of hosts, and the caller's correct response is to carry
     /// on over SSH.
-    static func bootstrap(
+    private static func open(
+        command: String,
+        expectingPrefix: String?,
         over ssh: SSHConnection,
-        serverID: UUID,
-        slot: Int,
         sshHost: String,
         cols: Int,
         rows: Int
     ) async -> Result<MeshyyTransport, Unavailable> {
-        let name = sessionName(serverID: serverID, slot: slot)
-
         let json: String
         do {
-            json = try await ssh.runCommand(bootstrapCommand(session: name))
+            json = try await ssh.runCommand(command)
         } catch {
             return .failure(.daemonAbsent)   // non-zero exit: no daemon here
         }
@@ -151,6 +288,18 @@ final class MeshyyTransport {
         // know a frame this client relies on.
         guard response.protocol >= Meshyy.protocolVersion else {
             return .failure(.protocolTooOld(daemon: response.protocol, client: Meshyy.protocolVersion))
+        }
+
+        // The name IS the allocation. A response without one, or with one outside the
+        // group asked for, is a daemon that did not understand `--new-in-group` —
+        // refuse rather than adopt whatever shell it made or found. (The listGroup
+        // gate normally catches an old daemon first; this is defence for the case
+        // where the binary changed between the two exec calls.)
+        guard let name = response.name,
+              expectingPrefix.map({ name.hasPrefix($0) }) ?? true
+        else {
+            return .failure(.daemonTooOld(
+                "it did not echo the allocated session name"))
         }
 
         let session = MeshyySession(size: TerminalSize(cols: cols, rows: rows))

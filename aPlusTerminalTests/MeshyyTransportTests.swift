@@ -35,6 +35,38 @@ final class MeshyyTransportTests: XCTestCase {
         XCTAssertTrue(reloaded.meshyyTransport, "the toggle did not survive a relaunch")
     }
 
+    // MARK: - The survivor picker's filter
+
+    private func remote(
+        _ name: String, slot: Int, alive: Bool = true, attached: Int = 0
+    ) -> MeshyyTransport.RemoteSession {
+        MeshyyTransport.RemoteSession(
+            name: name, slot: slot, alive: alive, attachedClients: attached,
+            cols: 80, rows: 24, bufferedBytes: 0, lastOutputAt: nil
+        )
+    }
+
+    /// What may be OFFERED is as load-bearing as what gets opened: a dead shell
+    /// resumes into a corpse, an attached one is someone else's live screen, and a
+    /// claimed one is another tab in this very app. Each exclusion is a separate
+    /// wrong-shell bug.
+    func testOnlyDetachedRunningUnclaimedSessionsAreOffered() {
+        let sessions = [
+            remote("aplus-x-0", slot: 0),                       // resumable
+            remote("aplus-x-1", slot: 1, alive: false),         // dead shell
+            remote("aplus-x-2", slot: 2, attached: 1),          // someone's screen
+            remote("aplus-x-3", slot: 3),                       // claimed by another tab
+            remote("aplus-x-4", slot: 4),                       // resumable
+        ]
+        let offered = MeshyyTransport.offerableSurvivors(
+            in: sessions, claimed: ["aplus-x-3"]
+        )
+        XCTAssertEqual(
+            offered.map(\.name), ["aplus-x-0", "aplus-x-4"],
+            "the picker must offer exactly the detached, running, unclaimed sessions"
+        )
+    }
+
     // MARK: - Session naming
 
     /// Resume is worthless if the name changes between launches — the daemon would

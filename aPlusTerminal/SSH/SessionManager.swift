@@ -30,8 +30,6 @@ enum SessionState: Equatable {
 @Observable
 final class TerminalSession: Identifiable, Hashable {
     nonisolated let id = UUID()
-    /// Which meshyy session on this server this tab owns. See MeshyyTransport.sessionName.
-    nonisolated let meshyySlot: Int
 
     nonisolated static func == (lhs: TerminalSession, rhs: TerminalSession) -> Bool {
         lhs.id == rhs.id
@@ -87,6 +85,27 @@ final class TerminalSession: Identifiable, Hashable {
     /// Why meshyy is not carrying this session, when it was asked to.
     private(set) var meshyyUnavailable: String?
     private var meshyyPumpTask: Task<Void, Never>?
+
+    /// Detached sessions the daemon holds for this server, set while the connect is
+    /// parked waiting for the user to choose — drives the survivor picker overlay.
+    /// Nil the rest of the time.
+    private(set) var meshyySurvivors: [MeshyyTransport.RemoteSession]?
+    /// What the user decided about the survivors.
+    enum MeshyyChoice {
+        case new
+        case resume(String)
+        /// The tab went away while the picker was up. Nothing to open.
+        case abort
+    }
+    @ObservationIgnored private var meshyyChoice: CheckedContinuation<MeshyyChoice, Never>?
+    /// A survivor this tab has chosen but not finished opening. The transport's own
+    /// name covers the claim once the bootstrap succeeds; this covers the seconds in
+    /// between, so a second tab resolving the same survivor sees it taken.
+    private(set) var meshyyPendingClaim: String?
+    /// Session names other live tabs are already drawing, injected by the manager.
+    /// Used twice: to keep an adopted survivor out of a second tab's picker, and to
+    /// re-check at resolve time (two pickers can be up at once).
+    @ObservationIgnored var meshyyNamesInUse: @MainActor () -> Set<String> = { [] }
     /// The config the winning candidate connected with, so the SSH shell can still be
     /// opened if the meshyy probe comes back empty.
     private var lastCandidateConfig: SSHConnection.Configuration?
@@ -168,9 +187,8 @@ final class TerminalSession: Identifiable, Hashable {
     private let outboxContinuation: AsyncStream<Outbound>.Continuation
     private var outboxTask: Task<Void, Never>?
 
-    init(server: Server, meshyySlot: Int = 0, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
+    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
         self.server = server
-        self.meshyySlot = meshyySlot
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.passwords = passwords
@@ -635,6 +653,8 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     func close() async {
+        // A connect parked on the survivor picker must not outlive its tab.
+        chooseMeshyySession(.abort)
         pumpTask?.cancel()
         pumpTask = nil
         outboxTask?.cancel()
@@ -787,16 +807,7 @@ final class TerminalSession: Identifiable, Hashable {
                     over: fresh, sshHost: server.host, cols: size.cols, rows: size.rows
                 )
             } else {
-                switch await MeshyyTransport.bootstrap(
-                    over: fresh, serverID: server.id, slot: meshyySlot,
-                    sshHost: server.host, cols: size.cols, rows: size.rows
-                ) {
-                case .success(let transport):
-                    meshyy = transport
-                    result = .success(())
-                case .failure(let reason):
-                    result = .failure(reason)
-                }
+                result = await openMeshyyChoosingSession(over: fresh, size: size)
             }
             switch result {
             case .success:
@@ -833,6 +844,78 @@ final class TerminalSession: Identifiable, Hashable {
             }
         }
         startPump(reading: fresh)
+    }
+
+    /// Opens meshyy for a tab that has no transport yet: ask the daemon what it holds,
+    /// let the user choose when there is a choice, then open exactly what was chosen.
+    ///
+    /// The deleted alternative computed a slot from this app's OPEN TABS. The sessions
+    /// live on the daemon and outlive both tabs and app launches, so after a force-quit
+    /// "new session" resolved to whichever old shell the app had forgotten first — the
+    /// user was silently dropped into a different session per tab, which read as
+    /// random. The daemon's table is the only truth about what exists, the daemon
+    /// itself allocates what is genuinely new, and a surviving session is only ever
+    /// entered because the user tapped it.
+    private func openMeshyyChoosingSession(
+        over fresh: SSHConnection,
+        size: (cols: Int, rows: Int)
+    ) async -> Result<Void, MeshyyTransport.Unavailable> {
+        let remote: [MeshyyTransport.RemoteSession]
+        switch await MeshyyTransport.listGroup(over: fresh, serverID: server.id) {
+        case .failure(let reason):
+            return .failure(reason)
+        case .success(let sessions):
+            remote = sessions
+        }
+
+        let survivors = MeshyyTransport.offerableSurvivors(in: remote, claimed: meshyyNamesInUse())
+
+        var choice: MeshyyChoice = .new
+        if !survivors.isEmpty {
+            meshyySurvivors = survivors
+            choice = await withCheckedContinuation { meshyyChoice = $0 }
+            meshyySurvivors = nil
+        }
+        // Two tabs can show pickers offering the same survivor; the first resolve
+        // claims it. Re-check here so the second silently gets a fresh session
+        // instead of a shared shell.
+        if case .resume(let name) = choice, meshyyNamesInUse().contains(name) {
+            choice = .new
+        }
+
+        let opened: Result<MeshyyTransport, MeshyyTransport.Unavailable>
+        switch choice {
+        case .abort:
+            return .failure(.connectFailed("the session closed while choosing"))
+        case .new:
+            opened = await MeshyyTransport.bootstrapNew(
+                over: fresh, serverID: server.id,
+                sshHost: server.host, cols: size.cols, rows: size.rows
+            )
+        case .resume(let name):
+            // Claimed for the whole open, so a second tab resolving the same
+            // survivor mid-bootstrap sees it taken; the transport's own name
+            // carries the claim from success onward.
+            meshyyPendingClaim = name
+            defer { meshyyPendingClaim = nil }
+            opened = await MeshyyTransport.bootstrap(
+                resuming: name, over: fresh,
+                sshHost: server.host, cols: size.cols, rows: size.rows
+            )
+        }
+        switch opened {
+        case .success(let transport):
+            meshyy = transport
+            return .success(())
+        case .failure(let reason):
+            return .failure(reason)
+        }
+    }
+
+    /// The picker's answer. Safe to call spuriously; only the parked connect listens.
+    func chooseMeshyySession(_ choice: MeshyyChoice) {
+        meshyyChoice?.resume(returning: choice)
+        meshyyChoice = nil
     }
 
     /// Tears down the meshyy transport without touching the SSH connection.
@@ -1114,13 +1197,11 @@ private final class SessionIO: TerminalViewDelegate {
 final class SessionManager {
     private(set) var sessions: [TerminalSession] = []
 
-    /// Lowest slot not already taken by a live tab on this server, so tab 0 resolves to
-    /// the same meshyy session across launches while two tabs still get two shells.
-    private func lowestFreeMeshyySlot(for server: Server) -> Int {
-        let taken = Set(sessions.filter { $0.server.id == server.id }.map(\.meshyySlot))
-        var slot = 0
-        while taken.contains(slot) { slot += 1 }
-        return slot
+    /// Daemon session names live tabs are drawing right now. What keeps two tabs from
+    /// adopting one survivor; the daemon itself keeps "new" sessions distinct.
+    private func meshyyNamesInUse() -> Set<String> {
+        Set(sessions.compactMap { $0.meshyy?.sessionName })
+            .union(sessions.compactMap(\.meshyyPendingClaim))
     }
 
     private let keyStore: KeyStore
@@ -1234,13 +1315,13 @@ final class SessionManager {
     func open(server: Server) -> TerminalSession {
         let session = TerminalSession(
             server: server,
-            meshyySlot: lowestFreeMeshyySlot(for: server),
             keyStore: keyStore,
             serverStore: serverStore,
             passwords: passwords,
             settings: settings,
             profiles: profiles
         )
+        session.meshyyNamesInUse = { [weak self] in self?.meshyyNamesInUse() ?? [] }
         session.onStateChange = { [weak self, weak session] in
             self?.refreshActivity()
             // State drives the pop-out's chip too — multicast into the
