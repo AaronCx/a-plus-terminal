@@ -253,6 +253,14 @@ final class MeshyyTransport {
                 switch event {
                 case .output(let bytes):
                     self.outputContinuation.yield(Data(bytes))
+                case .geometryReset:
+                    // The replay carried the scroll region of whichever client produced
+                    // it — `ESC[1;24r` from a 24-row session confines a 60-row terminal
+                    // to its top 24 rows, and that is the black lower half. These bytes
+                    // release it. They go to the emulator like any other, but they are
+                    // NOT part of the resumed stream and meshyy never counts them.
+                    self.outputContinuation.yield(Data(TerminalGeometry.reset))
+
                 case .screenRebuilt, .termios, .screenMode, .agent, .quickActions, .reconnecting:
                     // Not this type's business. Agent status already has a local
                     // detector in the app, and duplicating it from the wire would give
