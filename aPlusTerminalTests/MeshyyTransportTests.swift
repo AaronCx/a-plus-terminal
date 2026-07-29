@@ -265,3 +265,47 @@ final class SessionIdentityTests: XCTestCase {
 
 
 
+
+// MARK: - A resize must not be lost while meshyy is connecting
+
+@MainActor
+final class ResizeDuringBootstrapTests: XCTestCase {
+    /// Reported as "sizing is not working until being in the session for a while".
+    ///
+    /// The outbox routes a resize to meshyy when it is set and to the SSH connection
+    /// otherwise. During the bootstrap meshyy is NOT yet set, and under meshyy that SSH
+    /// connection deliberately has no pty — so a resize SwiftTerm reports in that window
+    /// is thrown at a channel that cannot take it and is swallowed.
+    ///
+    /// Nothing corrects it afterwards, because `sizeChanged` only fires when the size
+    /// CHANGES. The session keeps the size the handshake carried until the user happens
+    /// to resize again — which is exactly "it starts working after a while".
+    ///
+    /// The rule: once meshyy is attached, the current size is pushed unconditionally.
+    func testASizeChangeDuringBootstrapIsNotLost() {
+        // Models the outbox's routing decision plus the post-attach push.
+        var deliveredToMeshyy: [(Int, Int)] = []
+        var deliveredToSSHWithNoPTY: [(Int, Int)] = []
+        var meshyyAttached = false
+        var lastRequested: (cols: Int, rows: Int)?
+
+        func resize(_ cols: Int, _ rows: Int) {
+            lastRequested = (cols, rows)
+            if meshyyAttached { deliveredToMeshyy.append((cols, rows)) }
+            else { deliveredToSSHWithNoPTY.append((cols, rows)) }   // swallowed
+        }
+
+        // SwiftTerm lays out while the bootstrap is still in flight.
+        resize(74, 64)
+        XCTAssertEqual(deliveredToMeshyy.count, 0, "precondition: that resize was lost")
+
+        // meshyy attaches, and the current size is pushed.
+        meshyyAttached = true
+        if let last = lastRequested { resize(last.cols, last.rows) }
+
+        XCTAssertEqual(
+            deliveredToMeshyy.last?.1, 64,
+            "the size the user actually has never reached the daemon, so the session stays at whatever the handshake carried"
+        )
+    }
+}

@@ -802,6 +802,19 @@ final class TerminalSession: Identifiable, Hashable {
             case .success:
                 if let transport = meshyy {
                     startMeshyyPump(reading: transport)
+                    // Push the CURRENT size now that meshyy exists.
+                    //
+                    // The outbox routes a resize to meshyy if it is set and to the SSH
+                    // connection otherwise — and while the bootstrap is in flight,
+                    // meshyy is not set yet and that connection has no pty, so any
+                    // resize SwiftTerm reports in that window is thrown at a channel
+                    // that cannot take it and is swallowed. The session then keeps
+                    // whatever size the handshake carried, for good: `sizeChanged` only
+                    // fires when the size CHANGES, so nothing ever corrects it.
+                    //
+                    // The daemon applies resizes correctly — verified with `stty size`
+                    // across a resize — so this is purely about the app not losing one.
+                    await syncWindowSize()
                     return
                 }
             case .failure(let reason):
@@ -810,9 +823,13 @@ final class TerminalSession: Identifiable, Hashable {
                 // mid-session switch: still exactly one shell.
                 meshyy = nil
                 meshyyUnavailable = reason.errorDescription
-                if let config = lastCandidateConfig {
-                    try await fresh.openShell(config)
+                guard let config = lastCandidateConfig else {
+                    // Cannot open a shell without the config the candidate used, and
+                    // pumping a connection that has no pty ends the session instantly —
+                    // which the user sees as being bounced straight back to the list.
+                    throw SessionError.noCredentials
                 }
+                try await fresh.openShell(config)
             }
         }
         startPump(reading: fresh)
