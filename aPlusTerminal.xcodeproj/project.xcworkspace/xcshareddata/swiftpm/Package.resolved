@@ -32,8 +32,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/AaronCx/meshyy.git",
       "state" : {
-        "revision" : "6dac28475f179a7e24bf6faa3a0c95756e30fb52",
-        "version" : "0.1.8"
+        "revision" : "175164446422f2e80c3321c4981569232078226f",
+        "version" : "0.1.11"
       }
     },
     {

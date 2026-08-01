@@ -126,7 +126,13 @@ struct TerminalScreen: View {
         }
         .sheet(isPresented: $showDictation) {
             DictationSheet { text, appendReturn in
-                session.sendInput(Data((appendReturn ? text + "\n" : text).utf8))
+                // CARRIAGE RETURN, not newline. Every other Enter in the app sends
+                // CR (SwiftTerm's `returnByteSequence`), and a raw-mode TUI — an
+                // agent's permission prompt, which is exactly what dictation is for
+                // — reads LF as a literal line feed rather than Enter. In a cooked
+                // shell both happen to submit, which is why this survived: it broke
+                // only where it mattered most.
+                session.sendInput(Data((appendReturn ? text + "\r" : text).utf8))
             }
         }
         .sheet(isPresented: $showPreview, onDismiss: {

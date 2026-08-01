@@ -756,7 +756,13 @@ final class TerminalSession: Identifiable, Hashable {
     private func applyReattach(_ intent: ReattachIntent) async {
         func attach(_ session: String) async {
             guard let cmd = MultiplexerController.attachCommand(resolvedMultiplexer, target: session) else { return }
-            try? await connection.send(cmd)
+            // Through the outbox, which routes to whichever transport carries the
+            // pty. Writing to `connection` directly sent this to the SSH connection
+            // — and under meshyy that connection is deliberately opened with NO
+            // pty, so the multiplexer attach was swallowed on every meshyy
+            // reconnect: the user came back to a bare login shell instead of their
+            // session, with nothing logged and nothing to see.
+            sendInput(Data(cmd.utf8))
         }
 
         switch intent {
