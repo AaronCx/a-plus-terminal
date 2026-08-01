@@ -56,6 +56,11 @@ final class MeshyyTransport {
         let alive: Bool
         /// Zero means detached — nothing anywhere is drawing this session.
         let attachedClients: Int
+        /// How long the daemon has gone without hearing from the attached client,
+        /// or nil when nobody is attached. A client the daemon still counts but
+        /// has not heard from in seconds is almost always a corpse: a force-quit
+        /// app's QUIC peer survives on the daemon until its idle timeout.
+        let clientQuietFor: TimeInterval?
         let cols: Int
         let rows: Int
         /// Bytes sitting in the ring buffer. A rough "how much happened here".
@@ -64,8 +69,27 @@ final class MeshyyTransport {
 
         var id: String { name }
 
-        /// Detached and running — the ones worth offering back to the user.
-        var isResumable: Bool { alive && attachedClients == 0 }
+        /// A client that has gone silent for longer than this is treated as gone.
+        ///
+        /// The client heartbeat is one second, so a live client is never quiet for
+        /// four — while a force-quit one stays counted until the daemon's 30s idle
+        /// timeout. That gap is the whole bug: relaunch inside it and your own
+        /// abandoned session looks like somebody else's live screen, so it is
+        /// filtered out of the picker and a NEW session opens instead. Wait past
+        /// it and the next session behaves, which is exactly the "my first session
+        /// doesn't prompt but the rest do" report.
+        static let staleClientThreshold: TimeInterval = 4
+
+        /// Nobody is drawing this session: either nothing is attached, or what is
+        /// attached stopped speaking long enough ago to be a corpse.
+        var isUnattended: Bool {
+            if attachedClients == 0 { return true }
+            guard let quiet = clientQuietFor else { return false }
+            return quiet >= Self.staleClientThreshold
+        }
+
+        /// Running and unattended — the ones worth offering back to the user.
+        var isResumable: Bool { alive && isUnattended }
     }
 
     /// Pty bytes, in arrival order, shaped exactly like `SSHConnection.output` so the
@@ -207,6 +231,8 @@ final class MeshyyTransport {
                     slot: slot,
                     alive: row["alive"] as? Bool ?? false,
                     attachedClients: attached,
+                    clientQuietFor: (row["client_quiet_ms"] as? NSNumber)
+                        .map { $0.doubleValue / 1000 },
                     cols: row["cols"] as? Int ?? 0,
                     rows: row["rows"] as? Int ?? 0,
                     bufferedBytes: to > from ? to - from : 0,

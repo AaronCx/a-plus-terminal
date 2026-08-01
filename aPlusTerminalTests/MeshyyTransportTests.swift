@@ -38,11 +38,12 @@ final class MeshyyTransportTests: XCTestCase {
     // MARK: - The survivor picker's filter
 
     private func remote(
-        _ name: String, slot: Int, alive: Bool = true, attached: Int = 0
+        _ name: String, slot: Int, alive: Bool = true, attached: Int = 0,
+        quiet: TimeInterval? = nil
     ) -> MeshyyTransport.RemoteSession {
         MeshyyTransport.RemoteSession(
             name: name, slot: slot, alive: alive, attachedClients: attached,
-            cols: 80, rows: 24, bufferedBytes: 0, lastOutputAt: nil
+            clientQuietFor: quiet, cols: 80, rows: 24, bufferedBytes: 0, lastOutputAt: nil
         )
     }
 
@@ -64,6 +65,35 @@ final class MeshyyTransportTests: XCTestCase {
         XCTAssertEqual(
             offered.map(\.name), ["aplus-x-0", "aplus-x-4"],
             "the picker must offer exactly the detached, running, unclaimed sessions"
+        )
+    }
+
+    /// THE FIRST-SESSION BUG. A force-quit app's QUIC peer survives on the daemon
+    /// until its idle timeout (30s), still counted in `attached_clients` — so on a
+    /// quick relaunch the user's OWN abandoned session looked like somebody else's
+    /// live screen, was filtered out of the picker, and a new session opened
+    /// silently instead. Wait past the timeout and the next session prompts
+    /// normally, which is exactly the "my first session doesn't ask but the rest
+    /// do" report.
+    func testAnAttachedButLongSilentClientDoesNotHideASurvivor() {
+        let live = remote("aplus-y-0", slot: 0, attached: 1, quiet: 0.5)
+        let corpse = remote("aplus-y-1", slot: 1, attached: 1, quiet: 12)
+        let offered = MeshyyTransport.offerableSurvivors(in: [live, corpse], claimed: [])
+
+        XCTAssertEqual(offered.map(\.name), ["aplus-y-1"], """
+            a client silent for 12s is a force-quit corpse the transport has not \
+            reaped and its session must be offered back; one silent for 0.5s is a \
+            live screen and must not be
+            """)
+    }
+
+    /// The threshold has to sit above the client's own heartbeat with room to
+    /// spare, or a healthy-but-briefly-stalled client gets its session offered to
+    /// another device — the shared-shell outcome, arriving from the other side.
+    func testStaleThresholdIsSafelyAboveTheHeartbeat() {
+        XCTAssertGreaterThanOrEqual(
+            MeshyyTransport.RemoteSession.staleClientThreshold, 3,
+            "a 1s heartbeat needs at least three misses of headroom before a live client is called dead"
         )
     }
 

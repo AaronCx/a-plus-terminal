@@ -223,6 +223,8 @@ final class MeshyySessionPileUpTests: XCTestCase {
                     slot: slot,
                     alive: row["alive"] as? Bool ?? false,
                     attachedClients: row["attached_clients"] as? Int ?? .max,
+                    clientQuietFor: (row["client_quiet_ms"] as? NSNumber)
+                        .map { $0.doubleValue / 1000 },
                     cols: row["cols"] as? Int ?? 0,
                     rows: row["rows"] as? Int ?? 0,
                     bufferedBytes: 0,
