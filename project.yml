@@ -12,7 +12,7 @@ settings:
     # One source of truth for both targets — the app and widget MUST ship with
     # identical versions or App Store Connect rejects the upload.
     CURRENT_PROJECT_VERSION: 58
-    MARKETING_VERSION: "1.0.3"
+    MARKETING_VERSION: "1.0.4"
 packages:
   # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
   # floats to the latest matching tag, so CI and each developer could silently
