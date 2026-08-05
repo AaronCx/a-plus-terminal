@@ -35,7 +35,15 @@ struct SessionActivityAttributes: ActivityAttributes {
     }
 
     struct ContentState: Codable, Hashable {
-        /// Most recent first, capped at 3 for the expanded Island view.
+        /// OPEN order — first-opened at the top — capped at 3 for the
+        /// expanded Island view.
+        ///
+        /// This was newest-first, and with several sessions up it put the
+        /// LATEST one where the user's first session belongs. Rows in a list
+        /// of otherwise-identical server names are identified by position —
+        /// "my first session is the top one" — so a tap on the top row landed
+        /// in whichever session happened to be youngest. The user counts
+        /// sessions in the order they opened them; the Activity now does too.
         var sessions: [SessionSummary]
         /// Count of *open* sessions (connected, connecting, reconnecting, or
         /// paused) — everything except closed. Named "active" for payload
@@ -46,10 +54,15 @@ struct SessionActivityAttributes: ActivityAttributes {
         /// from older builds decode.
         var pausedCount: Int? = nil
 
-        /// Newest-first, top 3, with the totals preserved in `activeCount`
-        /// and `pausedCount`.
+        /// Open order (oldest first), top 3, with the totals preserved in
+        /// `activeCount` and `pausedCount`. `startedAt` is set once at session
+        /// init and never on reconnect, so this order cannot shuffle while
+        /// sessions live — the tie-break by id only pins two sessions opened
+        /// in the same instant (tests do this; fingers cannot).
         static func make(from summaries: [SessionSummary]) -> ContentState {
-            let sorted = summaries.sorted { $0.startedAt > $1.startedAt }
+            let sorted = summaries.sorted {
+                ($0.startedAt, $0.id.uuidString) < ($1.startedAt, $1.id.uuidString)
+            }
             return ContentState(
                 sessions: Array(sorted.prefix(3)),
                 activeCount: summaries.count,
@@ -66,7 +79,11 @@ struct SessionActivityAttributes: ActivityAttributes {
             activeCount > 0 && (pausedCount ?? 0) == activeCount
         }
 
-        var mostRecentSessionID: UUID? {
+        /// Where a single-target tap (compact / minimal Island) lands: the
+        /// top row — the user's FIRST session, same as the list order, so
+        /// every presentation of the Activity agrees on what "the top
+        /// session" means.
+        var primarySessionID: UUID? {
             sessions.first?.id
         }
     }

@@ -75,7 +75,7 @@ struct SessionLiveActivity: Widget {
     }
 
     private func deepLink(for state: SessionActivityAttributes.ContentState) -> URL? {
-        state.mostRecentSessionID.map { URL.sessionDeepLink(id: $0) }
+        state.primarySessionID.map { URL.sessionDeepLink(id: $0) }
     }
 }
 

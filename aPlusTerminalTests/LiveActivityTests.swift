@@ -12,23 +12,37 @@ final class SessionActivityContentStateTests: XCTestCase {
         )
     }
 
-    func testCapsAtThreeNewestFirstButCountsAll() {
+    func testListsSessionsInTheOrderTheUserOpenedThem() {
         let now = Date()
-        let summaries = (0..<5).map { offset in
+        // Built shuffled so the assertion is about SORTING, not pass-through.
+        let summaries = [3, 0, 4, 2, 1].map { offset in
             summary(name: "s\(offset)", startedAt: now.addingTimeInterval(Double(offset)))
         }
         let state = SessionActivityAttributes.ContentState.make(from: summaries)
 
         XCTAssertEqual(state.activeCount, 5)
-        XCTAssertEqual(state.sessions.map(\.name), ["s4", "s3", "s2"], "expanded view shows the 3 most recent")
-        XCTAssertEqual(state.mostRecentSessionID, state.sessions.first?.id)
+        XCTAssertEqual(state.sessions.map(\.name), ["s0", "s1", "s2"],
+                       "the top row is the FIRST session the user opened — they "
+                           + "identify rows by position, and newest-first sent a tap "
+                           + "on the top row into the youngest session instead")
+        XCTAssertEqual(state.primarySessionID, state.sessions.first?.id,
+                       "the compact-Island tap lands where the top row does")
+    }
+
+    func testOrderIsStableWhenSessionsStartInTheSameInstant() {
+        let now = Date()
+        let twins = (0..<3).map { _ in summary(name: "twin", startedAt: now) }
+        let once = SessionActivityAttributes.ContentState.make(from: twins)
+        let again = SessionActivityAttributes.ContentState.make(from: twins.reversed())
+        XCTAssertEqual(once.sessions.map(\.id), again.sessions.map(\.id),
+                       "same-instant sessions must not swap rows between refreshes")
     }
 
     func testEmptyState() {
         let state = SessionActivityAttributes.ContentState.make(from: [])
         XCTAssertEqual(state.activeCount, 0)
         XCTAssertTrue(state.sessions.isEmpty)
-        XCTAssertNil(state.mostRecentSessionID)
+        XCTAssertNil(state.primarySessionID)
     }
 
     func testConnectedFlag() {
@@ -61,17 +75,18 @@ final class SessionActivityContentStateTests: XCTestCase {
 
     func testPausedCountCoversAllSessionsNotJustTheCappedThree() {
         // The display list is capped at 3, but allPaused drives the stale
-        // horizon and must reflect EVERY open session: an older-but-live
-        // session outside the top 3 means the content is not all-paused.
+        // horizon and must reflect EVERY open session: a live session outside
+        // the displayed three means the content is not all-paused. The list is
+        // in OPEN order, so the session outside the cap is the newest.
         let now = Date()
-        let oldestLive = summary(name: "live", startedAt: now.addingTimeInterval(-100), state: "connected")
-        let newerPaused = (0..<3).map { offset in
+        let newestLive = summary(name: "live", startedAt: now.addingTimeInterval(100), state: "connected")
+        let olderPaused = (0..<3).map { offset in
             summary(name: "p\(offset)", startedAt: now.addingTimeInterval(Double(offset)), state: "suspended")
         }
-        let state = SessionActivityAttributes.ContentState.make(from: newerPaused + [oldestLive])
+        let state = SessionActivityAttributes.ContentState.make(from: [newestLive] + olderPaused)
         XCTAssertEqual(state.activeCount, 4)
         XCTAssertEqual(state.sessions.count, 3)
-        XCTAssertTrue(state.sessions.allSatisfy(\.isPaused), "the 3 newest are the paused ones")
+        XCTAssertTrue(state.sessions.allSatisfy(\.isPaused), "open order displays the 3 oldest — the paused ones")
         XCTAssertEqual(state.pausedCount, 3)
         XCTAssertFalse(state.allPaused, "the live session outside the cap must still count")
     }
