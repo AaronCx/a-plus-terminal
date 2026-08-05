@@ -139,6 +139,113 @@ final class MeshyySurvivorFlowTests: XCTestCase {
                            + "landing in a sealed stream with no consumer")
     }
 
+    /// THE ASK: with meshyy on, coming back to the app puts you back in your
+    /// session — no card, no tap.
+    ///
+    /// The paused card asks a question that only exists over SSH, where the shell
+    /// died with the connection and the user must choose between reattaching a
+    /// multiplexer and starting fresh. Under meshyy the daemon held their shell
+    /// the whole time, so the question has one answer and asking it is friction.
+    func testForegroundAutomaticallyResumesAMeshyySession() async throws {
+        let (manager, session, server, _) = try makeManagedMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+
+        // `manager.open` already started a connect. Calling connect() again here
+        // ran a SECOND one concurrently and the daemon allocated two sessions —
+        // a harness bug that reads exactly like the wormhole this suite exists to
+        // guard against. Wait for the manager's own connect instead.
+        try await poll(deadline: 25, "the manager's connect never completed") {
+            session.state == .connected
+        }
+        guard session.usesMeshyy else {
+            throw XCTSkip("no local meshyy session: \(session.meshyyUnavailable ?? "not connected")")
+        }
+        let name = try XCTUnwrap(session.meshyy?.sessionName)
+
+        // The app goes to the background long enough for iOS to freeze it.
+        await session.suspend()
+        XCTAssertEqual(session.state, .suspended)
+
+        manager.appWillEnterForeground()
+
+        try await poll(deadline: 25, "foregrounding never brought the session back") {
+            session.state == .connected
+        }
+        XCTAssertEqual(session.meshyy?.sessionName, name,
+                       "resumed a different session than the one the user was in")
+        let held = try await liveGroupNames(withPrefix: prefix)
+        XCTAssertEqual(held, [name],
+                       "resuming minted an extra session instead of returning to the old one: \(held)")
+    }
+
+    /// And after a RELAUNCH, where the tab itself is gone: the server remembers
+    /// which session was its terminal, so a single survivor that matches goes
+    /// straight back rather than through the picker.
+    func testARelaunchReturnsToTheRememberedSessionWithoutAsking() async throws {
+        let (_, first, server, store) = try makeManagedMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock { await self.killSessions(withPrefix: prefix) }
+
+        try await poll(deadline: 25, "the manager's connect never completed") {
+            first.state == .connected
+        }
+        guard first.usesMeshyy else {
+            throw XCTSkip("no local meshyy session: \(first.meshyyUnavailable ?? "not connected")")
+        }
+        let name = try XCTUnwrap(first.meshyy?.sessionName)
+        await first.suspend()          // app is force-quit: detached, nothing local left
+
+        // Wait for the daemon to report it detached, or the next connect would
+        // (correctly) treat it as someone else's live screen. `poll` takes a
+        // synchronous predicate, so the async lookup happens here.
+        var detached = false
+        let detachBy = Date().addingTimeInterval(15)
+        while Date() < detachBy, !detached {
+            let ssh = try await connectSSH()
+            if case .success(let rows) = await MeshyyTransport.listGroup(
+                over: ssh, serverID: server.id
+            ) {
+                detached = rows.contains { $0.name == name && $0.isResumable }
+            }
+            await ssh.disconnect()
+            if !detached { try await Task.sleep(for: .milliseconds(300)) }
+        }
+        XCTAssertTrue(detached, "the daemon never reported the session detached")
+
+        // A fresh launch: a new session object on the SAME stored server.
+        let (_, second, _, _) = try makeManagedMeshyySession(
+            reusing: (store: store, id: server.id))
+        addTeardownBlock { await second.close() }
+        var settled = false
+        let by = Date().addingTimeInterval(25)
+        while Date() < by, !settled {
+            settled = second.state == .connected || second.meshyySurvivors != nil
+            if !settled { try await Task.sleep(for: .milliseconds(200)) }
+        }
+        XCTAssertTrue(settled, """
+            the relaunched session never connected — state=\(second.state), \
+            meshyy=\(second.meshyy?.sessionName ?? "nil"), \
+            unavailable=\(second.meshyyUnavailable ?? "nil"), \
+            error=\(second.lastError ?? "nil"), \
+            remembered=\(second.server.lastMeshyySession ?? "nil")
+            """)
+        guard settled else { return }
+
+        if let offered = second.meshyySurvivors {
+            second.chooseMeshyySession(.new)   // unpark, or the suite hangs here
+            XCTFail("""
+                the picker appeared for a session the server already remembered \
+                (offered \(offered.map(\.name)), remembered \(name))
+                """)
+        }
+        XCTAssertEqual(second.meshyy?.sessionName, name,
+                       "a relaunch did not return to the remembered session")
+    }
+
     // MARK: - Harness (same probe plumbing as MeshyyResizeAtConnectTests)
 
     /// Runs a marker print in the session's shell and reads it back off the
@@ -272,6 +379,77 @@ final class MeshyySurvivorFlowTests: XCTestCase {
     private static var probeUser: String {
         (try? String(contentsOfFile: "/tmp/aplus-probe-user.txt", encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? NSUserName()
+    }
+
+    /// The same probe session, but owned by a real `SessionManager` — needed for
+    /// anything that goes through the app-lifecycle path rather than the session
+    /// alone. `reusing` models a relaunch: same stored server, new session object.
+    private func makeManagedMeshyySession(
+        reusing existing: (store: ServerStore, id: UUID)? = nil
+    ) throws -> (SessionManager, TerminalSession, Server, ServerStore) {
+        let pem = try probeKeyPEM()
+        let suffix = UUID().uuidString
+        let temporary = FileManager.default.temporaryDirectory
+
+        let keyStore = KeyStore(
+            secrets: InMemorySecretStore(),
+            metadataURL: temporary.appendingPathComponent("mk-\(suffix).json")
+        )
+        let key = try keyStore.importKey(named: "probe", openSSHPrivateKey: pem)
+        // A relaunch must read the SAME store the previous run wrote to, or the
+        // remembered session name is not actually being tested — the first version
+        // of this harness built a fresh store per call and the "relaunch" parked on
+        // a picker forever, which is a harness bug that reads exactly like a
+        // product one.
+        let serverStore: ServerStore
+        var entry: Server
+        if let existing {
+            serverStore = existing.store
+            guard var stored = serverStore.servers.first(where: { $0.id == existing.id }) else {
+                throw XCTSkip("the stored server vanished between launches")
+            }
+            // A relaunch gets a fresh in-memory keychain, so the stored key id
+            // points at a key this process does not have — re-point it at the one
+            // just imported. Everything else about the stored server, including
+            // the remembered meshyy session under test, is left exactly as the
+            // previous launch wrote it.
+            stored.keyID = key.id
+            serverStore.update(stored)
+            entry = stored
+        } else {
+            serverStore = ServerStore(
+                fileURL: temporary.appendingPathComponent("ms-\(suffix).json")
+            )
+            entry = Server(name: "probe", host: "127.0.0.1", username: Self.probeUser)
+            entry.keyID = key.id
+            serverStore.add(entry)
+        }
+
+        let settings = AppSettings(defaults: UserDefaults(suiteName: "MeshyyManaged-\(suffix)")!)
+        settings.meshyyTransport = true
+
+        let manager = SessionManager(
+            keyStore: keyStore, serverStore: serverStore,
+            passwords: PasswordStore(secrets: InMemorySecretStore()),
+            settings: settings,
+            profiles: ProfileStore(
+                agents: [],
+                multiplexers: [MultiplexerProfile(id: "none", displayName: "None (raw shell)")]
+            )
+        )
+        let session = manager.open(server: entry)
+        session.terminalView.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
+        session.terminalView.layoutIfNeeded()
+        return (manager, session, entry, serverStore)
+    }
+
+    private func probeKeyPEM() throws -> String {
+        guard let pem = try? String(contentsOfFile: "/tmp/aplus-probe-key.pem", encoding: .utf8),
+              pem.contains("PRIVATE KEY")
+        else {
+            throw XCTSkip("no probe key PEM — run ./scripts/meshyy-repro-setup.sh")
+        }
+        return pem
     }
 
     private func makeMeshyySession() throws -> (TerminalSession, Server) {

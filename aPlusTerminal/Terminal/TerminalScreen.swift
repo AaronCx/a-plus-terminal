@@ -65,6 +65,15 @@ struct TerminalScreen: View {
                         sessionManager.close(session)
                         dismiss()
                     }
+                } else if session.usesMeshyy {
+                    // meshyy resumes itself (see appWillEnterForeground), so this
+                    // is the moment between foregrounding and the reattach
+                    // landing. Showing the paused card here would offer a choice
+                    // that is already being made — and its "Fresh Shell" button
+                    // would throw away the very session meshyy exists to keep.
+                    statusCard {
+                        ProgressView("Resuming your session…")
+                    }
                 } else {
                     // Cleanly paused (backgrounded long enough that iOS froze
                     // us). Reconnect queries the *live* sessions, then attaches
