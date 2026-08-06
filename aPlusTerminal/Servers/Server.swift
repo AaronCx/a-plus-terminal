@@ -47,6 +47,11 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     /// Last multiplexer session attached on this server (for auto-reattach,
     /// §4.1). Migrated from the older `lastTmuxTarget` key.
     var lastMultiplexerTarget: String?
+    /// The meshyy session this server's terminal was last using, so a relaunch
+    /// can return to it instead of asking. Cleared when the daemon no longer has
+    /// it: a name that no longer exists is worse than none, because resuming it
+    /// would silently create a new shell under an old name.
+    var lastMeshyySession: String?
     /// Per-server agent profile id (nil → global default, typically "auto").
     var agentProfileID: String?
     /// Per-server multiplexer profile id (nil → global default, "tmux").
@@ -96,7 +101,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
     // fields are never re-written.
     private enum CodingKeys: String, CodingKey {
         case id, name, host, port, username, group, keyID, passwordRef
-        case lastMultiplexerTarget, agentProfileID, multiplexerProfileID
+        case lastMultiplexerTarget, lastMeshyySession, agentProfileID, multiplexerProfileID
         case knownHostKey, macAddress, lastKnownAddress
         case kind, vncAuthMethod, cursorBridgeSSHServerID
     }
@@ -110,7 +115,8 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
          kind: ServerKind = .ssh, vncAuthMethod: VNCAuthMethod? = nil,
          cursorBridgeSSHServerID: UUID? = nil,
          group: String? = nil, keyID: UUID? = nil, passwordRef: UUID? = nil,
-         lastMultiplexerTarget: String? = nil, agentProfileID: String? = nil,
+         lastMultiplexerTarget: String? = nil, lastMeshyySession: String? = nil,
+         agentProfileID: String? = nil,
          multiplexerProfileID: String? = nil, knownHostKey: String? = nil, macAddress: String? = nil,
          lastKnownAddress: String? = nil) {
         self.id = id
@@ -125,6 +131,7 @@ struct Server: Codable, Identifiable, Equatable, Hashable {
         self.keyID = keyID
         self.passwordRef = passwordRef
         self.lastMultiplexerTarget = lastMultiplexerTarget
+        self.lastMeshyySession = lastMeshyySession
         self.agentProfileID = agentProfileID
         self.multiplexerProfileID = multiplexerProfileID
         self.knownHostKey = knownHostKey

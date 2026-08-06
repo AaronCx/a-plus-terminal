@@ -1,5 +1,5 @@
 {
-  "originHash" : "8e056ed43aecd431bcfae4106b40d215f0823c131f5c5bfa19d0c46780c49539",
+  "originHash" : "da8fa0e814aa269d2067c6913dd2d7e6e7165ecc0c0cb7d6d46a1daae1e092fd",
   "pins" : [
     {
       "identity" : "bigint",
@@ -25,6 +25,15 @@
       "location" : "https://github.com/royalapplications/CryptoSwift.git",
       "state" : {
         "revision" : "a59b4d91ebb22011656c830f874fe7152e183a57"
+      }
+    },
+    {
+      "identity" : "meshyy",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/AaronCx/meshyy.git",
+      "state" : {
+        "revision" : "8c58cb0ce2e2a8e060112ded601a27c24967ce7e",
+        "version" : "0.1.12"
       }
     },
     {

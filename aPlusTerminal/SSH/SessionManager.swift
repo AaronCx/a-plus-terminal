@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftTerm
 import Observation
 import Citadel
+import WidgetKit
 
 enum SessionState: Equatable {
     case connecting
@@ -79,6 +80,40 @@ final class TerminalSession: Identifiable, Hashable {
     var showMultiplexerHint = false
 
     private(set) var connection = SSHConnection()
+    /// The meshyy transport, when the toggle is on and the host has a daemon.
+    /// The SSH connection above stays live regardless; this replaces only the pty.
+    private(set) var meshyy: MeshyyTransport?
+    /// Why meshyy is not carrying this session, when it was asked to.
+    private(set) var meshyyUnavailable: String?
+    /// True when meshyy is carrying this session's pty — the transport survives a
+    /// suspend, so this stays true across the background/foreground cycle and is
+    /// what decides whether returning is automatic or a question.
+    var usesMeshyy: Bool { meshyy != nil }
+    private var meshyyPumpTask: Task<Void, Never>?
+
+    /// Detached sessions the daemon holds for this server, set while the connect is
+    /// parked waiting for the user to choose — drives the survivor picker overlay.
+    /// Nil the rest of the time.
+    private(set) var meshyySurvivors: [MeshyyTransport.RemoteSession]?
+    /// What the user decided about the survivors.
+    enum MeshyyChoice {
+        case new
+        case resume(String)
+        /// The tab went away while the picker was up. Nothing to open.
+        case abort
+    }
+    @ObservationIgnored private var meshyyChoice: CheckedContinuation<MeshyyChoice, Never>?
+    /// A survivor this tab has chosen but not finished opening. The transport's own
+    /// name covers the claim once the bootstrap succeeds; this covers the seconds in
+    /// between, so a second tab resolving the same survivor sees it taken.
+    private(set) var meshyyPendingClaim: String?
+    /// Session names other live tabs are already drawing, injected by the manager.
+    /// Used twice: to keep an adopted survivor out of a second tab's picker, and to
+    /// re-check at resolve time (two pickers can be up at once).
+    @ObservationIgnored var meshyyNamesInUse: @MainActor () -> Set<String> = { [] }
+    /// The config the winning candidate connected with, so the SSH shell can still be
+    /// opened if the meshyy probe comes back empty.
+    private var lastCandidateConfig: SSHConnection.Configuration?
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore
@@ -506,6 +541,13 @@ final class TerminalSession: Identifiable, Hashable {
         // a listener bound on the phone with nothing behind it, so every
         // teardown path has to take it down (preview brief §Phase 1).
         await stopPreview()
+        // DETACH, not shut down: the daemon keeps holding the pty and its ring buffer
+        // keeps filling, so what the shell says while the phone is asleep is still there
+        // to replay. Shutting down would end the session, which is what meshyy exists to
+        // avoid.
+        meshyyPumpTask?.cancel()
+        meshyyPumpTask = nil
+        await meshyy?.detach()
         await connection.disconnect()
         agentMonitor.reset()
         state = .suspended
@@ -616,14 +658,23 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     func close() async {
+        // .closed FIRST, before any await: a connect that has not yet reached the
+        // survivor picker checks this before parking, and a park that began after
+        // this line would otherwise wait on a continuation nobody will ever
+        // resume — with a live SSH connection leaked behind it.
+        state = .closed
+        // A connect already parked on the picker must not outlive its tab.
+        chooseMeshyySession(.abort)
         pumpTask?.cancel()
         pumpTask = nil
         outboxTask?.cancel()
         outboxContinuation.finish()
         await stopPreview()
+        // The user closed the tab, so end the session. Detaching would leave the daemon
+        // holding a shell nobody will reattach to, one per closed tab, forever.
+        await stopMeshyy(endSession: true)
         agentMonitor.reset()
         portDetector.reset()
-        state = .closed
         await connection.disconnect()
     }
 
@@ -633,6 +684,19 @@ final class TerminalSession: Identifiable, Hashable {
             do {
                 reattachChoicePending = false
                 try await establish()
+                // close() can interleave anywhere in establish's awaits. Setting
+                // .connected past it would resurrect a tab the manager already
+                // discarded — a zombie with a live connection and keepalive. The
+                // meshyy teardown here is NOT redundant with close()'s: close()
+                // ran while the bootstrap was still in flight and saw meshyy nil,
+                // so the transport establish just opened is exactly the one only
+                // this line knows about — left alone it keeps a live QUIC attach
+                // (and a daemon session pinned "attached") under a dead tab.
+                if state == .closed {
+                    await stopMeshyy(endSession: true)
+                    await connection.disconnect()
+                    return
+                }
                 state = .connected
                 lastError = nil
                 hostKeyConflict = nil
@@ -640,6 +704,15 @@ final class TerminalSession: Identifiable, Hashable {
                 // (especially a multiplexer attach) draws into it.
                 await syncWindowSize()
                 await applyReattach(intent)
+                return
+            } catch is CancellationError {
+                // The user closed the tab mid-connect (survivor picker up, or the
+                // park guard fired). Not an error, not retryable. The teardown in
+                // close() ran, but if it ran while the dial was still in flight it
+                // disconnected the PREVIOUS connection object — the one establish
+                // assigned afterwards is this loop's to release, or the socket and
+                // its server-side login outlive the tab until the app exits.
+                await connection.disconnect()
                 return
             } catch {
                 lastError = error.localizedDescription
@@ -686,9 +759,26 @@ final class TerminalSession: Identifiable, Hashable {
     /// stale explicit/auto target) consults the *live* session list so the user
     /// never sees or lands in a session that was closed since the drop.
     private func applyReattach(_ intent: ReattachIntent) async {
+        // NOTHING to reattach under meshyy. The daemon held the shell the whole
+        // time and the transport's own reattach just restored it, scrollback and
+        // all — so the multiplexer is already exactly where the user left it.
+        //
+        // Sending the attach command anyway is not a harmless no-op: it starts
+        // ANOTHER multiplexer client inside the session on every reconnect. That
+        // is how one server ended up with six tmux clients on one session, and a
+        // multiplexer sizes itself to its smallest client, so the extras clamp
+        // the terminal for the live one.
+        guard meshyy == nil else { return }
+
         func attach(_ session: String) async {
             guard let cmd = MultiplexerController.attachCommand(resolvedMultiplexer, target: session) else { return }
-            try? await connection.send(cmd)
+            // Through the outbox, which routes to whichever transport carries the
+            // pty. Writing to `connection` directly sent this to the SSH connection
+            // — and under meshyy that connection is deliberately opened with NO
+            // pty, so the multiplexer attach was swallowed on every meshyy
+            // reconnect: the user came back to a bare login shell instead of their
+            // session, with nothing logged and nothing to see.
+            sendInput(Data(cmd.utf8))
         }
 
         switch intent {
@@ -734,7 +824,10 @@ final class TerminalSession: Identifiable, Hashable {
         await stopPreview()
         await connection.disconnect()
 
-        let fresh = try await connectBestCandidate(auth: auth)
+        // ONE SHELL. Which transport carries the terminal is decided here, before any
+        // shell exists, and only the winner spawns one.
+        let wantsMeshyy = settings.meshyyTransport
+        let fresh = try await connectBestCandidate(auth: auth, openShell: !wantsMeshyy)
         connection = fresh
         // Clear whatever the dead PTY left on screen before the new shell and
         // tmux attach repaint — otherwise old and new frames overlay.
@@ -749,7 +842,241 @@ final class TerminalSession: Identifiable, Hashable {
         // reattach to a different window — must not inherit the previous
         // shell's working/waiting reading.
         agentMonitor.reset()
+
+        await stopMeshyy(endSession: false)
+        meshyyUnavailable = nil
+        if wantsMeshyy {
+            let size = currentWindowSize()
+            let result: Result<Void, MeshyyTransport.Unavailable>
+            if let existing = meshyy {
+                // Reattach keeps consumedOffset, which is what makes the daemon replay
+                // what was missed rather than showing a fresh screen. But a transport
+                // whose streams have finished — every suspend/detach and every QUIC
+                // failure seals them — must be REBUILT around the session first:
+                // reattaching the sealed one succeeds on the daemon's side and then
+                // delivers the replay into a stream nobody consumes, a terminal that
+                // never paints again under a tab that says connected.
+                let transport = existing.isFinished ? existing.rebuilt() : existing
+                meshyy = transport
+                result = await transport.reattach(
+                    over: fresh, sshHost: server.host, cols: size.cols, rows: size.rows
+                )
+            } else {
+                result = try await openMeshyyChoosingSession(over: fresh, size: size)
+            }
+            switch result {
+            case .success:
+                if let transport = meshyy {
+                    startMeshyyPump(reading: transport)
+                    // Push the CURRENT size now that meshyy exists.
+                    //
+                    // The outbox routes a resize to meshyy if it is set and to the SSH
+                    // connection otherwise — and while the bootstrap is in flight,
+                    // meshyy is not set yet and that connection has no pty, so any
+                    // resize SwiftTerm reports in that window is thrown at a channel
+                    // that cannot take it and is swallowed. The session then keeps
+                    // whatever size the handshake carried, for good: `sizeChanged` only
+                    // fires when the size CHANGES, so nothing ever corrects it.
+                    //
+                    // The daemon applies resizes correctly — verified with `stty size`
+                    // across a resize — so this is purely about the app not losing one.
+                    await syncWindowSize()
+                    return
+                }
+            case .failure(let reason):
+                // No daemon here, or it refused. Open the SSH shell that was
+                // deliberately not opened above. A CONNECT-time decision, not a
+                // mid-session switch: still exactly one shell.
+                meshyy = nil
+                meshyyUnavailable = reason.errorDescription
+                guard let config = lastCandidateConfig else {
+                    // Cannot open a shell without the config the candidate used, and
+                    // pumping a connection that has no pty ends the session instantly —
+                    // which the user sees as being bounced straight back to the list.
+                    throw SessionError.noCredentials
+                }
+                try await fresh.openShell(config)
+            }
+        }
         startPump(reading: fresh)
+    }
+
+    /// Opens meshyy for a tab that has no transport yet: ask the daemon what it holds,
+    /// let the user choose when there is a choice, then open exactly what was chosen.
+    ///
+    /// The deleted alternative computed a slot from this app's OPEN TABS. The sessions
+    /// live on the daemon and outlive both tabs and app launches, so after a force-quit
+    /// "new session" resolved to whichever old shell the app had forgotten first — the
+    /// user was silently dropped into a different session per tab, which read as
+    /// random. The daemon's table is the only truth about what exists, the daemon
+    /// itself allocates what is genuinely new, and a surviving session is only ever
+    /// entered because the user tapped it.
+    private func openMeshyyChoosingSession(
+        over fresh: SSHConnection,
+        size: (cols: Int, rows: Int)
+    ) async throws -> Result<Void, MeshyyTransport.Unavailable> {
+        // close() cannot cancel a dial already in flight; it can only mark the tab.
+        // Checking here — before the list, not just before the park — keeps a
+        // closed tab from allocating a daemon session it will immediately have to
+        // tear back down (the attemptLoop guard would catch it, but creating a
+        // shell just to kill it is work a race should not get to cause).
+        guard state != .closed else { throw CancellationError() }
+        let remote: [MeshyyTransport.RemoteSession]
+        switch await MeshyyTransport.listGroup(over: fresh, serverID: server.id) {
+        case .failure(let reason):
+            return .failure(reason)
+        case .success(let sessions):
+            remote = sessions
+        }
+
+        let survivors = MeshyyTransport.offerableSurvivors(in: remote, claimed: meshyyNamesInUse())
+
+        var choice: MeshyyChoice = .new
+        // The session this server was last on, if it is still sitting there
+        // detached: resume it without asking. That is what "put me back where I
+        // was" means after a relaunch, and the picker's whole purpose — not
+        // guessing which shell is the user's — is served better by a name the
+        // user's own last session wrote down than by a prompt.
+        //
+        // The picker still appears for everything else: no remembered session, a
+        // remembered one that is gone, or other survivors alongside it that the
+        // user may have meant instead.
+        if let remembered = server.lastMeshyySession,
+           survivors.count == 1, survivors[0].name == remembered {
+            return await openRemembered(remembered, over: fresh, size: size)
+        }
+        if !survivors.isEmpty {
+            // A close() can land between the SSH connect and this point. Its
+            // `.abort` resume has already come and gone, so parking NOW would wait
+            // on a continuation nobody will ever resume, holding a leaked SSH
+            // connection under a tab that no longer exists. close() sets .closed
+            // before anything else precisely so this check is race-free.
+            guard state != .closed else { throw CancellationError() }
+            meshyySurvivors = survivors
+            choice = await withCheckedContinuation { meshyyChoice = $0 }
+            meshyySurvivors = nil
+        }
+        // Two tabs can show pickers offering the same survivor; the first resolve
+        // claims it. Re-check here so the second silently gets a fresh session
+        // instead of a shared shell — and CLAIM before the awaits below, or the
+        // second tab's re-check races straight through the first tab's re-list
+        // window and both adopt one shell.
+        if case .resume(let name) = choice {
+            if meshyyNamesInUse().contains(name) {
+                choice = .new
+            } else {
+                meshyyPendingClaim = name
+            }
+        }
+        defer { meshyyPendingClaim = nil }
+        // The other device is the claim this app cannot see: an iPad can adopt the
+        // same survivor between this picker appearing and the tap. Ask the daemon
+        // once more — one exec on the open connection — and fall back to a fresh
+        // session rather than silently sharing a shell across devices.
+        if case .resume(let name) = choice {
+            if case .success(let now) = await MeshyyTransport.listGroup(
+                over: fresh, serverID: server.id
+            ), !now.contains(where: { $0.name == name && $0.isResumable }) {
+                choice = .new
+            }
+        }
+
+        let opened: Result<MeshyyTransport, MeshyyTransport.Unavailable>
+        switch choice {
+        case .abort:
+            // The tab was closed while the picker was up. NOT a transport failure:
+            // the failure path would open the fallback SSH shell — a stray login on
+            // the server under a tab that is already gone.
+            throw CancellationError()
+        case .new:
+            opened = await MeshyyTransport.bootstrapNew(
+                over: fresh, serverID: server.id,
+                sshHost: server.host, cols: size.cols, rows: size.rows
+            )
+        case .resume(let name):
+            // Already claimed above, synchronously at resolve; the transport's own
+            // name carries the claim from success onward (the defer that clears
+            // the pending claim runs after `meshyy` is set below).
+            opened = await MeshyyTransport.bootstrap(
+                resuming: name, over: fresh,
+                sshHost: server.host, cols: size.cols, rows: size.rows
+            )
+        }
+        switch opened {
+        case .success(let transport):
+            meshyy = transport
+            // Remember it, so the next LAUNCH can come back here without asking.
+            // The tab is gone after a force-quit; this is the only thing that
+            // survives to say which of a server's sessions was the user's.
+            if server.lastMeshyySession != transport.sessionName {
+                server.lastMeshyySession = transport.sessionName
+                serverStore.update(server)
+            }
+            return .success(())
+        case .failure(let reason):
+            return .failure(reason)
+        }
+    }
+
+    /// Resumes a remembered session directly, with the same claim discipline the
+    /// picker path uses.
+    private func openRemembered(
+        _ name: String, over fresh: SSHConnection, size: (cols: Int, rows: Int)
+    ) async -> Result<Void, MeshyyTransport.Unavailable> {
+        meshyyPendingClaim = name
+        defer { meshyyPendingClaim = nil }
+        switch await MeshyyTransport.bootstrap(
+            resuming: name, over: fresh,
+            sshHost: server.host, cols: size.cols, rows: size.rows
+        ) {
+        case .success(let transport):
+            meshyy = transport
+            return .success(())
+        case .failure(let reason):
+            return .failure(reason)
+        }
+    }
+
+    /// The picker's answer. Safe to call spuriously; only the parked connect listens.
+    func chooseMeshyySession(_ choice: MeshyyChoice) {
+        meshyyChoice?.resume(returning: choice)
+        meshyyChoice = nil
+    }
+
+    /// Tears down the meshyy transport without touching the SSH connection.
+    ///
+    /// `endSession: true` ends the remote shell too — for a tab the user closed. False
+    /// only drops the local pump, which a reconnect does before re-attaching.
+    private func stopMeshyy(endSession: Bool) async {
+        meshyyPumpTask?.cancel()
+        meshyyPumpTask = nil
+        guard endSession, let transport = meshyy else { return }
+        meshyy = nil
+        await transport.disconnect()
+    }
+
+    /// Reads pty bytes from meshyy into the emulator.
+    ///
+    /// Deliberately separate from `startPump`: an SSH channel ending means the shell
+    /// exited or the transport died, and drives reconnect. meshyy ending means the
+    /// resumable transport gave up, and there is no SSH shell behind it — that was the
+    /// point — so it is a dropped session like any other.
+    private func startMeshyyPump(reading transport: MeshyyTransport) {
+        meshyyPumpTask = Task { [weak self] in
+            for await chunk in transport.output {
+                guard let self, !Task.isCancelled else { return }
+                let bytes = [UInt8](chunk)
+                self.terminalView.feed(byteArray: ArraySlice(bytes))
+                self.agentMonitor.observe(bytes)
+                self.portDetector.observe(bytes)
+                self.pipInvalidate?()
+            }
+            guard let self, !Task.isCancelled, self.meshyy === transport else { return }
+            guard self.state == .connected else { return }
+            self.stopPreviewImmediately()
+            self.state = .reconnecting
+            Task { await self.reconnect(maxAttempts: 10) }
+        }
     }
 
     /// Walks the server's candidate hosts in order (last winner first within
@@ -764,7 +1091,10 @@ final class TerminalSession: Identifiable, Hashable {
     /// host, where it still aborts the walk immediately (never quietly
     /// connect elsewhere past a MITM warning). A first connect with no pinned
     /// key does TOFU on whichever candidate connects first, exactly as today.
-    private func connectBestCandidate(auth: SSHConnection.AuthMethod) async throws -> SSHConnection {
+    private func connectBestCandidate(
+        auth: SSHConnection.AuthMethod,
+        openShell: Bool
+    ) async throws -> SSHConnection {
         var candidates = server.connectionCandidates
         if let preferred = preferredCandidateHost,
            let index = candidates.firstIndex(of: preferred), index > 0 {
@@ -794,8 +1124,9 @@ final class TerminalSession: Identifiable, Hashable {
 
             let fresh = SSHConnection()
             do {
-                try await fresh.connect(config)
+                try await fresh.connect(config, openShell: openShell)
                 preferredCandidateHost = candidate
+                lastCandidateConfig = config
                 return fresh
             } catch {
                 if case SSHConnectionError.hostKeyMismatch = error {
@@ -828,6 +1159,13 @@ final class TerminalSession: Identifiable, Hashable {
     /// Replays the real window size after connecting (§4.2 SIGWINCH contract).
     private func syncWindowSize() async {
         let size = currentWindowSize()
+        if let meshyy {
+            // Under meshyy the SSH connection has no pty, so resizing it alone would
+            // send this nowhere — and this call's whole job is making the pty match the
+            // screen before a multiplexer draws into it.
+            try? await meshyy.resize(cols: size.cols, rows: size.rows)
+            return
+        }
         try? await connection.resize(cols: size.cols, rows: size.rows)
     }
 
@@ -838,12 +1176,22 @@ final class TerminalSession: Identifiable, Hashable {
             guard let self else { return }
             for await item in self.outboxStream {
                 guard !Task.isCancelled else { return }
+                // Whichever transport is carrying the pty.
+                let meshyy = self.meshyy
                 let connection = self.connection
                 switch item {
                 case .data(let data):
-                    try? await connection.send(data)
+                    if let meshyy {
+                        try? await meshyy.send(data)
+                    } else {
+                        try? await connection.send(data)
+                    }
                 case .resize(let cols, let rows):
-                    try? await connection.resize(cols: cols, rows: rows)
+                    if let meshyy {
+                        try? await meshyy.resize(cols: cols, rows: rows)
+                    } else {
+                        try? await connection.resize(cols: cols, rows: rows)
+                    }
                 }
             }
         }
@@ -974,6 +1322,13 @@ private final class SessionIO: TerminalViewDelegate {
 final class SessionManager {
     private(set) var sessions: [TerminalSession] = []
 
+    /// Daemon session names live tabs are drawing right now. What keeps two tabs from
+    /// adopting one survivor; the daemon itself keeps "new" sessions distinct.
+    private func meshyyNamesInUse() -> Set<String> {
+        Set(sessions.compactMap { $0.meshyy?.sessionName })
+            .union(sessions.compactMap(\.meshyyPendingClaim))
+    }
+
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore
@@ -1091,6 +1446,7 @@ final class SessionManager {
             settings: settings,
             profiles: profiles
         )
+        session.meshyyNamesInUse = { [weak self] in self?.meshyyNamesInUse() ?? [] }
         session.onStateChange = { [weak self, weak session] in
             self?.refreshActivity()
             // State drives the pop-out's chip too — multicast into the
@@ -1177,6 +1533,12 @@ final class SessionManager {
                 )
             }
         activityController.update(with: summaries)
+        // Same summaries, mirrored to the App Group so the home-screen widget
+        // can show live sessions. Piggy-backing on this method rather than
+        // adding another observer means the widget can never disagree with the
+        // Live Activity: one computation, two consumers.
+        SessionSnapshotStore.write(summaries)
+        WidgetCenter.shared.reloadTimelines(ofKind: LiveSessionsWidgetKind)
     }
 
     func session(for id: UUID) -> TerminalSession? {
@@ -1282,8 +1644,20 @@ final class SessionManager {
         // bump that bypasses that coalescing.
         refreshActivity()
         activityController.refreshStaleHorizon()
-        // Do NOT auto-reconnect: a session that was suspended in the background
-        // shows a paused card so the user picks reattach-tmux vs. fresh shell.
+
+        // meshyy sessions resume themselves.
+        //
+        // The paused card asks a question that only exists over SSH: the shell
+        // died with the connection, so the user must choose between reattaching a
+        // multiplexer and starting fresh. Under meshyy the daemon held THEIR shell
+        // the whole time — same scrollback, same cursor, same running command —
+        // so there is nothing to decide and a tap to make. Coming back should just
+        // put them back.
+        //
+        // SSH sessions keep the card: over there the choice is real.
+        for session in sessions where session.state == .suspended && session.usesMeshyy {
+            Task { await session.reconnect(maxAttempts: 3) }
+        }
     }
 
     /// Proactive wind-down, run INSIDE `graceTask` when the remaining
