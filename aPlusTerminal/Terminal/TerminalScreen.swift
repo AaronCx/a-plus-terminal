@@ -150,6 +150,15 @@ struct TerminalScreen: View {
             // with no UI attached to it. (stopPreview is idempotent, so the
             // Done path calling it first is harmless.)
             Task { await session.stopPreview() }
+            // Give the terminal its focus back. Presenting the sheet resigned
+            // it, and SwiftTerm told the running program so (a mode-1004
+            // focus-out escape). Nothing on the dismiss path restored either
+            // half, so the program behind the terminal — an agent chat is
+            // where it shows — kept behaving as an unfocused window: scroll
+            // wheel input ignored, first tap swallowed by the refocus. The
+            // .onAppear refocus never runs here because a sheet does not
+            // detach the screen underneath it.
+            session.bridge.focus()
         }) {
             PreviewScreen(session: session, initialPort: previewPort)
         }

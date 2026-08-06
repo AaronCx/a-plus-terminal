@@ -56,7 +56,13 @@ struct LiveSessionsProvider: TimelineProvider {
 
     private func makeEntry() -> LiveSessionsEntry {
         let snapshot = SessionSnapshotStore.read()
-        let stale = SessionSnapshotStore.isStale(snapshot)
+        // Staleness only means something when the snapshot CLAIMS something.
+        // An empty snapshot going old is still true — an app that is not
+        // running cannot have open sessions — and tagging the widget's most
+        // common resting state ("No open sessions", app closed half an hour
+        // ago) with a warning teaches the user to ignore the tag before the
+        // one time it matters.
+        let stale = !snapshot.sessions.isEmpty && SessionSnapshotStore.isStale(snapshot)
         // A stale snapshot lists sessions that almost certainly no longer
         // exist. Offering them as live would send the user into a session the
         // app has to recreate; showing the servers instead is honest and still
@@ -64,7 +70,14 @@ struct LiveSessionsProvider: TimelineProvider {
         let sessions = stale ? [] : snapshot.sessions
 
         var rows = sessions
-            .sorted { $0.startedAt > $1.startedAt }
+            // OPEN order, first-opened on top — the same contract the Live
+            // Activity ships in this build, argued there: rows of identical
+            // server names are identified by position, so every surface must
+            // agree on what "the top session" means. This widget briefly said
+            // the opposite (newest-first), which put a DIFFERENT session on
+            // top of the home screen than on the lock screen of the same
+            // phone.
+            .sorted { ($0.startedAt, $0.id.uuidString) < ($1.startedAt, $1.id.uuidString) }
             .map { summary in
                 LiveSessionsEntry.Row(
                     id: summary.id,
