@@ -96,6 +96,8 @@ final class MeshyyTransport {
     /// session's pump does not need to know which transport it is reading.
     let output: AsyncStream<Data>
     private let outputContinuation: AsyncStream<Data>.Continuation
+    /// Set before the output stream finishes iff the pty child exited cleanly.
+    private(set) var cleanExitStatus: Int32?
 
     private let session: MeshyySession
     private let name: String
@@ -437,8 +439,33 @@ final class MeshyyTransport {
                     // output, so the resume offset is untouched.
                     self.outputContinuation.yield(Data(TerminalGeometry.reset))
 
+                case .modes(let active):
+                    // The daemon's record of what the running program believes
+                    // about its terminal — mouse reporting, SGR encoding,
+                    // focus events, bracketed paste, cursor keys. A fresh
+                    // emulator (relaunch, auto-resume) starts with all of it
+                    // off, and the arming escapes are consumed history the
+                    // ring no longer holds: measured, mouse mode stayed off
+                    // after every relaunch while tmux believed it was on, so
+                    // scroll input simply vanished. Locally synthesized like
+                    // the geometry reset above — never counted as resumed
+                    // output — and idempotent on an emulator that already
+                    // agrees.
+                    self.outputContinuation.yield(Self.modeEscapes(active: active))
+
                 case .screenRebuilt, .termios, .screenMode, .agent, .quickActions, .reconnecting:
                     break   // not this type's business
+
+                case .exited(let status):
+                    // The user's shell ended — `exit`, or their program did.
+                    // Remembered so the session can tell this apart from a
+                    // dead transport when the output stream finishes: one is
+                    // a tab to close, the other a connection to win back.
+                    // Recovering THIS one is how `exit` used to respawn a
+                    // fresh shell nobody asked for.
+                    self.cleanExitStatus = status
+                    self.finish()
+                    return
 
                 case .ended, .failed:
                     self.finish()
@@ -455,6 +482,35 @@ final class MeshyyTransport {
 
     func resize(cols: Int, rows: Int) async throws {
         try await session.resize(to: TerminalSize(cols: cols, rows: rows))
+    }
+
+    /// DECSET for what the program has on, DECRST for what it has off —
+    /// asserting the daemon's whole record corrects an emulator in either
+    /// direction (a suspended one can hold a mode the program dropped while
+    /// nobody watched).
+    ///
+    /// The mouse trio is special: 1000/1002/1003 are one emulator state, not
+    /// three — an emulator treats `?1002l` as "mouse off" even when it was
+    /// armed by `?1000h`. Naively resetting the inactive siblings therefore
+    /// DISARMED the very mode being asserted (measured: the arming test went
+    /// red the moment this synthesis went live). Within the family: set the
+    /// actives, and reset only when the whole family is off.
+    static func modeEscapes(active: Set<Int>) -> Data {
+        var out = ""
+        let mouseFamily: [Int] = [1000, 1002, 1003]
+        if mouseFamily.contains(where: active.contains) {
+            for mode in mouseFamily where active.contains(mode) {
+                out += "\u{1B}[?\(mode)h"
+            }
+        } else {
+            for mode in mouseFamily {
+                out += "\u{1B}[?\(mode)l"
+            }
+        }
+        for mode in [1, 1004, 1006, 2004] {
+            out += "\u{1B}[?\(mode)\(active.contains(mode) ? "h" : "l")"
+        }
+        return Data(out.utf8)
     }
 
     /// Ends the session, and the shell behind it. For a tab the user closed.

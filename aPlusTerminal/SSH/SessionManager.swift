@@ -1074,6 +1074,23 @@ final class TerminalSession: Identifiable, Hashable {
             guard let self, !Task.isCancelled, self.meshyy === transport else { return }
             guard self.state == .connected else { return }
             self.stopPreviewImmediately()
+            // The stream ends for two opposite reasons, and only the transport
+            // knows which: the user's shell EXITED (a finished session — close
+            // the tab, exactly like SSH's clean channel close), or the
+            // transport died under a live shell (a drop — win it back).
+            // Reconnecting after an exit bootstrapped a brand-new daemon
+            // session, so `exit` respawned instead of closing.
+            if transport.cleanExitStatus != nil {
+                self.meshyy = nil
+                // The session this name pointed at is gone; a relaunch must
+                // not try to walk back into it.
+                if self.server.lastMeshyySession != nil {
+                    self.server.lastMeshyySession = nil
+                    self.serverStore.update(self.server)
+                }
+                self.state = .closed
+                return
+            }
             self.state = .reconnecting
             Task { await self.reconnect(maxAttempts: 10) }
         }
