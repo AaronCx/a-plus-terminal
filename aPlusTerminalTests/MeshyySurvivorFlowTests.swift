@@ -246,6 +246,79 @@ final class MeshyySurvivorFlowTests: XCTestCase {
                        "a relaunch did not return to the remembered session")
     }
 
+    /// THE preview-return bug: leaving a sheet must give the terminal its
+    /// focus back, all the way down to the mode-1004 escapes the running
+    /// program sees.
+    ///
+    /// Presenting the preview resigns the terminal, and SwiftTerm dutifully
+    /// sends the program a focus-OUT. Nothing on the dismiss path restored
+    /// focus, so an agent chat — which enables focus reporting — carried on as
+    /// an unfocused window: wheel input ignored, first tap swallowed by the
+    /// refocus. This drives resign→focus against a REAL pty with 1004 enabled
+    /// and asserts the program received focus-out then focus-in, which is
+    /// precisely what the sheet's onDismiss fix must produce.
+    func testFocusRoundTripReachesTheProgramAsMode1004Escapes() async throws {
+        let (session, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+        await session.connect()
+        guard session.state == .connected, session.meshyy != nil else {
+            throw XCTSkip("no local meshyy session: \(session.meshyyUnavailable ?? "not connected")")
+        }
+
+        // becomeFirstResponder is refused outside a key window — a test that
+        // skips the window would "pass" without ever exercising focus.
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1000, height: 700))
+        window.rootViewController = UIViewController()
+        window.rootViewController?.view.addSubview(session.terminalView)
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+
+        // Arm focus reporting first, and PROVE the emulator consumed it before
+        // anything else happens: the marker renders on the same ordered
+        // pipeline, so once it is on the grid the ?1004h before it has been
+        // processed. (SwiftTerm's armed flag itself is internal.)
+        session.sendInput(Data("printf '\\e[?1004h'\n".utf8))
+        let armed = try await ask(session, marker: "ARMED1004")
+        XCTAssertEqual(armed, "ok", "the session never echoed the arming marker")
+
+        // The far side: transcribe everything the program receives, verbatim.
+        let log = "/tmp/aplus-focus-\(UUID().uuidString.prefix(8)).log"
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: log) }
+        session.sendInput(Data("cat -v > \(log)\n".utf8))
+        try await poll(deadline: 10, "the transcriber never started") {
+            FileManager.default.fileExists(atPath: log)
+        }
+
+        session.bridge.focus()            // a clean baseline: focused
+        try await Task.sleep(for: .milliseconds(300))
+        session.bridge.dismissKeyboard()  // what presenting the sheet does
+        try await Task.sleep(for: .milliseconds(300))
+        session.bridge.focus()            // what the fixed onDismiss does
+        // TWO ^Ds, deliberately: the pty is canonical, so the first only
+        // delivers the partial line (the escapes) to cat; the second, on an
+        // empty line, is the EOF that makes cat exit and flush its stdio
+        // buffer to the file. One ^D left the transcript forever empty.
+        session.sendInput(Data([0x04]))
+        try await Task.sleep(for: .milliseconds(200))
+        session.sendInput(Data([0x04]))
+
+        // cat -v renders ESC as ^[ — focus-out ^[[O, focus-in ^[[I.
+        var transcript = ""
+        try await poll(deadline: 10, "the focus escapes never reached the program") {
+            transcript = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+            return transcript.contains("^[[O") && transcript.range(of: "^[[I") != nil
+        }
+        let outAt = try XCTUnwrap(transcript.range(of: "^[[O"), "no focus-out")
+        let backIn = transcript[outAt.upperBound...].contains("^[[I")
+        XCTAssertTrue(backIn,
+                      "the program was told the terminal unfocused and never re-focused "
+                          + "— the unfocused-chat state the preview return left behind")
+    }
+
     // MARK: - Harness (same probe plumbing as MeshyyResizeAtConnectTests)
 
     /// Runs a marker print in the session's shell and reads it back off the

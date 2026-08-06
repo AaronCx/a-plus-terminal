@@ -1,4 +1,5 @@
 import ActivityKit
+import WidgetKit
 import Foundation
 import UIKit
 
@@ -106,6 +107,15 @@ final class SessionActivityController {
             object: nil,
             queue: nil
         ) { _ in
+            // The widget's snapshot dies with the sessions. Ending the
+            // Activity below already tells the LOCK screen the truth; without
+            // this line the HOME screen kept lying — the App Group file still
+            // said "connected", so the widget showed green LIVE rows for a
+            // process that no longer existed, for up to the full stale window.
+            // A local file write, so it goes first: it cannot be cut short by
+            // the terminate deadline the Activity IPC below races.
+            SessionSnapshotStore.write([])
+            WidgetCenter.shared.reloadTimelines(ofKind: LiveSessionsWidgetKind)
             // Best-effort: the system gives ~5s on terminate. The 3s wait may
             // not always flush under IPC pressure, but a force-quit orphan is
             // also covered by the staleDate mechanism above.

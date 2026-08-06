@@ -698,6 +698,30 @@ final class SessionSnapshotStoreTests: XCTestCase {
         .init(id: UUID(), name: name, state: state, startedAt: started, agentStatus: agent)
     }
 
+    /// The home screen must not outlive the process: willTerminate ends the
+    /// lock screen's Activity, and the widget's snapshot has to die with it —
+    /// or the widget shows green LIVE rows for a process that no longer
+    /// exists, for up to the full stale window.
+    func testTerminatingTheAppZeroesTheSnapshot() async throws {
+        guard SessionSnapshotStore.write([summary("Mac mini")]) else {
+            throw XCTSkip("no App Group container in this test host")
+        }
+        addTeardownBlock { SessionSnapshotStore.write([]) }
+        XCTAssertFalse(SessionSnapshotStore.read().sessions.isEmpty, "seed write vanished")
+
+        NotificationCenter.default.post(
+            name: UIApplication.willTerminateNotification, object: nil)
+
+        // The observer's Activity flush runs on a detached task; the snapshot
+        // write itself is synchronous and first, so this settles immediately.
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, !SessionSnapshotStore.read().sessions.isEmpty {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertTrue(SessionSnapshotStore.read().sessions.isEmpty,
+                      "the terminate path left the widget claiming live sessions")
+    }
+
     func testSnapshotRoundTripsThroughJSON() throws {
         let sessions = [summary("Mac mini"), summary("homelab", state: "suspended")]
         let snapshot = SessionSnapshotStore.Snapshot(sessions: sessions, updatedAt: Date())
