@@ -319,6 +319,150 @@ final class MeshyySurvivorFlowTests: XCTestCase {
                           + "— the unfocused-chat state the preview return left behind")
     }
 
+    /// THE cold-emulator repro (build 62, "can't scroll in tmux at all under
+    /// meshyy"): a program announces its input modes ONCE. An app-side
+    /// emulator built after that moment (force-quit, relaunch, auto-resume)
+    /// starts with everything off — and once enough output has flowed, the
+    /// arming escapes have aged out of the ring, so the resume replay cannot
+    /// re-teach it. Without the daemon's modes frame the fresh emulator
+    /// treats a mouse-armed session as mouse-off, and scroll input vanishes.
+    ///
+    /// tmux is deliberately absent: it coalesces flooded output to screen
+    /// rate, so it cannot age a 4 MiB ring inside a test, and the machinery
+    /// under test — the daemon's mode record reaching a fresh emulator — is
+    /// the same whoever armed the modes.
+    func testAFreshEmulatorResumingAFloodedSessionLearnsItsModes() async throws {
+        let (first, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock { await self.killSessions(withPrefix: prefix) }
+
+        await first.connect()
+        guard first.state == .connected, first.meshyy != nil else {
+            throw XCTSkip("no local meshyy session: \(first.meshyyUnavailable ?? "not connected")")
+        }
+        let name = try XCTUnwrap(first.meshyy?.sessionName)
+
+        // The program arms mouse + SGR + bracketed paste, and the first
+        // emulator (which lives through the stream) sees it.
+        first.sendInput(Data("printf '\\033[?1000;1006h\\033[?2004h'\n".utf8))
+        try await poll(deadline: 15, "the first emulator never armed mouse reporting") {
+            first.terminalView.getTerminal().mouseMode != .off
+        }
+
+        // Start the flood, THEN die: with no client attached the ring ingests
+        // at pty speed. The output the user missed while away is exactly what
+        // ages the arming escapes out of the replay window.
+        first.sendInput(Data("(sleep 1; seq 1 900000 | tail -c 6000000) &\n".utf8))
+        // The suspend seals the transport; the command must have LANDED
+        // first, or it dies in the outbox and the flood never starts. The
+        // shell's job-start echo ("[1] 12345") is the proof it landed.
+        try await poll(deadline: 10, "the flood job never echoed") {
+            Self.value(after: "[1]", in: first.terminalView) != nil
+        }
+        await first.suspend()
+
+        // The ring's own arithmetic says when the escapes are gone: a 4 MiB
+        // window that has taken 6 MB since attach no longer reaches them.
+        var flooded = false
+        let floodBy = Date().addingTimeInterval(90)
+        while Date() < floodBy, !flooded {
+            let ssh = try await connectSSH()
+            if case .success(let rows) = await MeshyyTransport.listGroup(
+                over: ssh, serverID: server.id
+            ), let row = rows.first(where: { $0.name == name }) {
+                flooded = row.bufferedBytes >= 4 * 1024 * 1024
+            }
+            await ssh.disconnect()
+            if !flooded { try await Task.sleep(for: .seconds(2)) }
+        }
+        XCTAssertTrue(flooded, "the ring never filled — the repro is not reproducing")
+
+        // And the daemon must consider the survivor unattended (the 4 s
+        // stale-client window) before the relaunch connects, or it allocates
+        // a fresh sibling instead of offering the resume.
+        var resumable = false
+        let resumeBy = Date().addingTimeInterval(20)
+        while Date() < resumeBy, !resumable {
+            let ssh = try await connectSSH()
+            if case .success(let rows) = await MeshyyTransport.listGroup(
+                over: ssh, serverID: server.id
+            ) { resumable = rows.contains { $0.name == name && $0.isResumable } }
+            await ssh.disconnect()
+            if !resumable { try await Task.sleep(for: .milliseconds(500)) }
+        }
+        XCTAssertTrue(resumable, "the daemon never reported the survivor detached")
+
+        // Relaunch: a brand-new session object — new emulator — resumes the
+        // same daemon session by name.
+        let (second, _) = try makeMeshyySession(reusing: server)
+        addTeardownBlock { await second.close() }
+        let connecting = Task { await second.connect() }
+        var parked = false
+        let parkBy = Date().addingTimeInterval(30)
+        while Date() < parkBy {
+            if second.meshyySurvivors != nil { parked = true; break }
+            if second.state == .connected || second.lastError != nil { break }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        if parked { second.chooseMeshyySession(.resume(name)) }
+        await connecting.value
+        XCTAssertEqual(second.state, .connected, """
+            the relaunch never connected — parked=\(parked), \
+            meshyy=\(second.meshyy?.sessionName ?? "nil"), \
+            unavailable=\(second.meshyyUnavailable ?? "nil"), \
+            error=\(second.lastError ?? "nil")
+            """)
+        XCTAssertEqual(second.meshyy?.sessionName, name,
+                       "the relaunch landed somewhere other than the survivor")
+
+        // The program still has mouse on; the fresh emulator must know it.
+        try await poll(deadline: 15, "COLD EMULATOR: the program armed mouse reporting, "
+                           + "the resumed emulator never learned it — scroll is dead here") {
+            second.terminalView.getTerminal().mouseMode != .off
+        }
+    }
+
+    /// Typing `exit` must end the tab — not "recover" the session into a
+    /// fresh shell. The daemon has said which ending this is since 0.1.16;
+    /// this drives the whole path: real shell, real exit, and asserts the
+    /// session closes, nothing respawns on the daemon, and the remembered
+    /// session name is forgotten (a relaunch must not walk back into a dead
+    /// name).
+    func testTypingExitClosesTheTabInsteadOfRespawning() async throws {
+        let (session, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock { await self.killSessions(withPrefix: prefix) }
+
+        await session.connect()
+        guard session.state == .connected, session.meshyy != nil else {
+            throw XCTSkip("no local meshyy session: \(session.meshyyUnavailable ?? "not connected")")
+        }
+        XCTAssertNotNil(session.server.lastMeshyySession, "bootstrap should remember the session")
+
+        session.sendInput(Data("exit\n".utf8))
+
+        try await poll(deadline: 15, "exit never closed the session — state=\(session.state)") {
+            session.state == .closed
+        }
+        XCTAssertNil(session.meshyy, "a closed tab holds no transport")
+        XCTAssertNil(session.server.lastMeshyySession,
+                     "the dead session's name must be forgotten, or a relaunch resumes a ghost")
+
+        // The daemon's table is the assertion that can't be argued with: exit
+        // used to mint a REPLACEMENT session here. The daemon deliberately
+        // keeps the EXITED session's record until its slot is reused (a
+        // detached client may still come collect the tail), so the assertion
+        // is "nothing alive", not "nothing at all".
+        try await Task.sleep(for: .seconds(2))
+        let ssh = try await connectSSH()
+        var alive: [String] = []
+        if case .success(let rows) = await MeshyyTransport.listGroup(over: ssh, serverID: server.id) {
+            alive = rows.filter(\.alive).map(\.name)
+        }
+        await ssh.disconnect()
+        XCTAssertEqual(alive, [], "exit respawned something: \(alive)")
+    }
+
     // MARK: - Harness (same probe plumbing as MeshyyResizeAtConnectTests)
 
     /// Runs a marker print in the session's shell and reads it back off the
@@ -525,7 +669,7 @@ final class MeshyySurvivorFlowTests: XCTestCase {
         return pem
     }
 
-    private func makeMeshyySession() throws -> (TerminalSession, Server) {
+    private func makeMeshyySession(reusing existing: Server? = nil) throws -> (TerminalSession, Server) {
         guard let pem = try? String(contentsOfFile: "/tmp/aplus-probe-key.pem", encoding: .utf8),
               pem.contains("PRIVATE KEY")
         else {
@@ -543,7 +687,9 @@ final class MeshyySurvivorFlowTests: XCTestCase {
         let serverStore = ServerStore(
             fileURL: temporary.appendingPathComponent("servers-\(suffix).json")
         )
-        var entry = Server(name: "probe", host: "127.0.0.1", username: Self.probeUser)
+        // `reusing` models a relaunch at the session level: the SAME server
+        // identity (its id is the daemon group prefix), fresh everything else.
+        var entry = existing ?? Server(name: "probe", host: "127.0.0.1", username: Self.probeUser)
         entry.keyID = key.id
         serverStore.add(entry)
 
