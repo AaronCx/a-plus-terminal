@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftTerm
 import Observation
 import Citadel
+import WidgetKit
 
 enum SessionState: Equatable {
     case connecting
@@ -1532,6 +1533,12 @@ final class SessionManager {
                 )
             }
         activityController.update(with: summaries)
+        // Same summaries, mirrored to the App Group so the home-screen widget
+        // can show live sessions. Piggy-backing on this method rather than
+        // adding another observer means the widget can never disagree with the
+        // Live Activity: one computation, two consumers.
+        SessionSnapshotStore.write(summaries)
+        WidgetCenter.shared.reloadTimelines(ofKind: LiveSessionsWidgetKind)
     }
 
     func session(for id: UUID) -> TerminalSession? {

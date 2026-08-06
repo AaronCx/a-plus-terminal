@@ -685,3 +685,124 @@ private final class BlockedRecorder: @unchecked Sendable {
         throw XCTSkip("nothing was blocked within \(timeout)s")
     }
 }
+
+// MARK: - Sessions widget
+
+/// The home-screen widget renders from a file, because a widget extension runs
+/// in its own process and can see none of the app's memory. These pin the two
+/// things that would break silently: the snapshot round-trip, and the deep
+/// links each row taps through to.
+final class SessionSnapshotStoreTests: XCTestCase {
+    private func summary(_ name: String, state: String = "connected",
+                         started: Date = Date(), agent: String? = nil) -> SessionActivityAttributes.SessionSummary {
+        .init(id: UUID(), name: name, state: state, startedAt: started, agentStatus: agent)
+    }
+
+    func testSnapshotRoundTripsThroughJSON() throws {
+        let sessions = [summary("Mac mini"), summary("homelab", state: "suspended")]
+        let snapshot = SessionSnapshotStore.Snapshot(sessions: sessions, updatedAt: Date())
+        let decoded = try JSONDecoder().decode(
+            SessionSnapshotStore.Snapshot.self, from: JSONEncoder().encode(snapshot))
+        XCTAssertEqual(decoded.sessions.map(\.name), ["Mac mini", "homelab"])
+        XCTAssertEqual(decoded.sessions.map(\.state), ["connected", "suspended"])
+    }
+
+    /// A snapshot the app has not refreshed is a list of sessions that probably
+    /// no longer exist — the widget must be able to tell.
+    func testStalenessIsDecidedByAge() {
+        let now = Date()
+        let fresh = SessionSnapshotStore.Snapshot(sessions: [], updatedAt: now.addingTimeInterval(-60))
+        let old = SessionSnapshotStore.Snapshot(
+            sessions: [], updatedAt: now.addingTimeInterval(-SessionSnapshotStore.staleAfter - 1))
+        XCTAssertFalse(SessionSnapshotStore.isStale(fresh, now: now))
+        XCTAssertTrue(SessionSnapshotStore.isStale(old, now: now))
+        XCTAssertTrue(SessionSnapshotStore.isStale(.empty, now: now), "never-written must read as stale")
+    }
+
+    func testEmptySnapshotHasNoSessions() {
+        XCTAssertTrue(SessionSnapshotStore.Snapshot.empty.sessions.isEmpty)
+    }
+}
+
+final class LiveSessionsWidgetRowTests: XCTestCase {
+    /// Tapping a live session must land in *that* session — the route the Live
+    /// Activity already uses.
+    func testSessionRowLinksToTheSessionDeepLink() throws {
+        let id = UUID()
+        let row = LiveSessionsEntry.Row(
+            id: id, name: "Mac mini",
+            kind: .session(state: "connected", startedAt: Date(), agent: nil))
+        let url = try XCTUnwrap(row.url)
+        XCTAssertEqual(url.scheme, "aplusterminal")
+        XCTAssertEqual(url.host, "session")
+        XCTAssertEqual(url.lastPathComponent, id.uuidString)
+        XCTAssertTrue(row.isSession)
+    }
+
+    /// Tapping a server with nothing open must *start* a session, which is the
+    /// connect route an App Intent uses — not the session route, which would
+    /// silently do nothing for an id no session has.
+    func testIdleServerRowLinksToTheConnectDeepLink() throws {
+        let id = UUID()
+        let row = LiveSessionsEntry.Row(id: id, name: "vps", kind: .idleServer)
+        let url = try XCTUnwrap(row.url)
+        XCTAssertEqual(url.host, "connect")
+        XCTAssertEqual(url.lastPathComponent, id.uuidString)
+        XCTAssertFalse(row.isSession)
+    }
+
+    /// Both URLs have to survive the app's own router, or the widget taps land
+    /// nowhere.
+    @MainActor
+    func testBothRoutesAreAcceptedByTheRouter() throws {
+        let sessionID = UUID(), serverID = UUID()
+        let router = DeepLinkRouter()
+
+        let sessionRow = LiveSessionsEntry.Row(
+            id: sessionID, name: "a", kind: .session(state: "connected", startedAt: Date(), agent: nil))
+        router.handle(try XCTUnwrap(sessionRow.url))
+        XCTAssertEqual(router.targetSessionID, sessionID)
+        XCTAssertEqual(router.selectedTab, .terminal)
+
+        let serverRow = LiveSessionsEntry.Row(id: serverID, name: "b", kind: .idleServer)
+        router.handle(try XCTUnwrap(serverRow.url))
+        XCTAssertEqual(router.connectServerID, serverID)
+    }
+
+    func testEntryCountsOnlyOpenSessions() {
+        let entry = LiveSessionsEntry(date: Date(), rows: [
+            .init(id: UUID(), name: "a", kind: .session(state: "connected", startedAt: Date(), agent: nil)),
+            .init(id: UUID(), name: "b", kind: .session(state: "suspended", startedAt: Date(), agent: nil)),
+            .init(id: UUID(), name: "c", kind: .idleServer),
+        ], stale: false)
+        XCTAssertEqual(entry.sessionCount, 2, "idle servers are not open sessions")
+    }
+}
+
+/// The write path itself, through the real App Group container. A wrong group
+/// identifier or a missing entitlement fails in exactly one way — the widget
+/// shows nothing, forever, with no error anywhere — so it is worth one test
+/// that actually touches the container the extension will read from.
+final class SessionSnapshotContainerTests: XCTestCase {
+    func testWriteThenReadThroughTheAppGroupContainer() throws {
+        guard let url = SessionSnapshotStore.fileURL() else {
+            XCTFail("no App Group container — the widget could never read a snapshot")
+            return
+        }
+        let original = try? Data(contentsOf: url)
+        defer {
+            if let original { try? original.write(to: url) } else { try? FileManager.default.removeItem(at: url) }
+        }
+
+        let id = UUID()
+        let written = SessionSnapshotStore.write([
+            .init(id: id, name: "container-check", state: "connected", startedAt: Date(), agentStatus: nil)
+        ])
+        XCTAssertTrue(written, "could not write into the App Group container")
+
+        let read = SessionSnapshotStore.read()
+        XCTAssertEqual(read.sessions.first?.id, id)
+        XCTAssertEqual(read.sessions.first?.name, "container-check")
+        XCTAssertFalse(SessionSnapshotStore.isStale(read), "a snapshot just written must not read as stale")
+    }
+}

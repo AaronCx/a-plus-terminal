@@ -113,6 +113,7 @@ targets:
       - aPlusTerminalWidgets
       # Shared with the app target — must compile identically in both.
       - path: aPlusTerminal/LiveActivity/SessionActivityAttributes.swift
+      - path: aPlusTerminal/LiveActivity/SessionSnapshotStore.swift
       - path: aPlusTerminal/Servers/Server.swift
       - path: aPlusTerminal/Servers/ServerStore.swift
       - path: aPlusTerminal/Network/Reachability.swift
