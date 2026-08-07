@@ -463,6 +463,80 @@ final class MeshyySurvivorFlowTests: XCTestCase {
         XCTAssertEqual(alive, [], "exit respawned something: \(alive)")
     }
 
+    /// THE quick-actions pipeline, end to end against the real daemon: a
+    /// Claude Code-shaped permission prompt produces a palette offer in the
+    /// app's state, one tap sends the profile's bytes through MeshyyKit's
+    /// gate to the pty, and a tap that lands after the prompt moved on is
+    /// refused quietly with the palette withdrawn.
+    func testAPermissionPromptOffersAPaletteAndOneTapAnswersIt() async throws {
+        let (session, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+        await session.connect()
+        guard session.state == .connected, session.meshyy != nil else {
+            throw XCTSkip("no local meshyy session: \(session.meshyyUnavailable ?? "not connected")")
+        }
+
+        // The far side: print the prompt the claude-code profile matches, then
+        // transcribe whatever a tap sends. The daemon's monitor needs the
+        // marker ("esc to interrupt"), the prompt text, and ~2s of quiet to
+        // call the agent waiting and offer the actions.
+        let log = "/tmp/aplus-qa-\(UUID().uuidString.prefix(8)).log"
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: log) }
+        // \047 is printf's octal apostrophe — an ASCII quote cannot sit
+        // inside the single-quoted printf, and the profile matches ASCII
+        // "don't", not a typographic quote.
+        session.sendInput(Data(("printf 'claude code — esc to interrupt\\n"
+            + "Do you want to make this edit?\\n 1. Yes\\n 2. Yes, and "
+            + "don\\047t ask again\\n 3. No, and tell Claude what to do\\n'; "
+            + "cat -v > \(log)\n").utf8))
+
+        try await poll(deadline: 20, "the daemon never offered the palette — "
+                           + "status/marker detection did not fire") {
+            !session.offeredQuickActions.isEmpty
+        }
+        XCTAssertEqual(session.offeredQuickActions.map(\.label),
+                       ["Yes", "Yes, always", "No"],
+                       "labels must be the PROFILE's, in the profile's order")
+
+        // One tap. The profile's approve-once sends "1\r"; cat's transcript
+        // is the proof the byte crossed the whole path.
+        let sent = await session.performQuickAction(id: "approve-once")
+        XCTAssertTrue(sent, "the gate refused a live tap: "
+                          + (session.lastQuickActionRefusal ?? "no reason recorded"))
+        // cat's file output is stdio-buffered: the transcript only exists
+        // once cat exits, so EOF it. ONE ^D — the tap's CR completed the
+        // line, so the empty-line ^D is the EOF. A second ^D lands in the
+        // SHELL and exits the whole session (the first run of this test did
+        // exactly that, and the exit-closes-the-tab feature dutifully closed
+        // the tab under the assertion).
+        try await Task.sleep(for: .milliseconds(400))
+        session.sendInput(Data([0x04]))
+        try await poll(deadline: 10, "the tap's bytes never reached the pty") {
+            (try? String(contentsOfFile: log, encoding: .utf8))?.contains("1") == true
+        }
+
+        // The moment passes: flood the tail so the prompt is gone and the
+        // daemon withdraws the offer.
+        // Enough to push the prompt text clean out of the daemon's match
+        // tail — 300 lines left "do you want" inside the window and the
+        // offer stood.
+        session.sendInput(Data("seq 1 5000\n".utf8))
+        try await poll(deadline: 20, "the withdrawal never reached the app") {
+            session.offeredQuickActions.isEmpty
+        }
+
+        // A tap that lands late is refused QUIETLY: false, no send, palette
+        // stays empty. (The daemon-side transcript can gain nothing new —
+        // cat already exited, so a leaked send would land in the shell.)
+        let late = await session.performQuickAction(id: "approve-once")
+        XCTAssertFalse(late, "a tap after the prompt moved on must be refused")
+        XCTAssertTrue(session.offeredQuickActions.isEmpty)
+    }
+
     // MARK: - Harness (same probe plumbing as MeshyyResizeAtConnectTests)
 
     /// Runs a marker print in the session's shell and reads it back off the

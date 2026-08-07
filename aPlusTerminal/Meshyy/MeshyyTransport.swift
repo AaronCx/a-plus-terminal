@@ -2,6 +2,14 @@ import Foundation
 import MeshyyCore
 import MeshyyKit
 
+/// A quick action as the UI sees it: an id to send back and a label to draw.
+/// Deliberately NOT MeshyyCore's type — the view layer gets exactly what it
+/// may use and nothing it could misuse.
+struct MeshyyQuickAction: Equatable, Identifiable {
+    let id: String
+    let label: String
+}
+
 /// Carries the pty byte stream over meshyy instead of over the SSH channel.
 ///
 /// **Scope, deliberately small.** meshyy replaces the pty and nothing else. The SSH
@@ -98,6 +106,11 @@ final class MeshyyTransport {
     private let outputContinuation: AsyncStream<Data>.Continuation
     /// Set before the output stream finishes iff the pty child exited cleanly.
     private(set) var cleanExitStatus: Int32?
+    /// The daemon's current offer: one-tap answers to whatever the agent is
+    /// waiting on. Labels come from the PROFILE, never from remote output —
+    /// that separation is the security property, and it is why the app must
+    /// not hardcode its own y/n row here. Empty means withdrawn.
+    var onQuickActions: (@MainActor ([MeshyyQuickAction]) -> Void)?
 
     private let session: MeshyySession
     private let name: String
@@ -453,7 +466,19 @@ final class MeshyyTransport {
                     // agrees.
                     self.outputContinuation.yield(Self.modeEscapes(active: active))
 
-                case .screenRebuilt, .termios, .screenMode, .agent, .quickActions, .reconnecting:
+                case .quickActions(let actions):
+                    // The whole M6 tier-1 integration used to be this case
+                    // discarding the frame. The daemon already did the hard
+                    // part — matching the prompt, gating on waiting, and
+                    // withdrawing on any screen change.
+                    let offered = actions.map {
+                        MeshyyQuickAction(id: $0.id, label: $0.label)
+                    }
+                    Task { @MainActor [weak self] in
+                        self?.onQuickActions?(offered)
+                    }
+
+                case .screenRebuilt, .termios, .screenMode, .agent, .reconnecting:
                     break   // not this type's business
 
                 case .exited(let status):
@@ -511,6 +536,19 @@ final class MeshyyTransport {
             out += "\u{1B}[?\(mode)\(active.contains(mode) ? "h" : "l")"
         }
         return Data(out.utf8)
+    }
+
+    /// One tap on the palette. Routed through MeshyyKit's tested gate — never
+    /// raw keystrokes from the app — so a tap that lands after the prompt
+    /// moved on is REFUSED rather than typed into whatever the agent is doing
+    /// now ("the view was right when the user tapped and wrong by the time
+    /// the tap arrived").
+    func performQuickAction(id: String) async throws {
+        // Resolved against the SHARED default profile table (MeshyyCore) —
+        // the same table the daemon offered from, so ids and bytes have one
+        // source of truth and the wire never carries bytes. Tier-1 ids
+        // (y/n/digits) resolve too: the generic profile carries them.
+        try await session.performQuickAction(id: id, from: MeshyyCore.AgentProfile.defaults)
     }
 
     /// Ends the session, and the shell behind it. For a tab the user closed.
