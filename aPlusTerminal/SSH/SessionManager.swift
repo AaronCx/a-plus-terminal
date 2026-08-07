@@ -89,6 +89,51 @@ final class TerminalSession: Identifiable, Hashable {
     /// suspend, so this stays true across the background/foreground cycle and is
     /// what decides whether returning is automatic or a question.
     var usesMeshyy: Bool { meshyy != nil }
+
+    /// The daemon's current one-tap offer, empty when nothing is waiting.
+    /// Rendered as the palette above the accessory bar; labels are from the
+    /// agent profile, never from remote output.
+    var offeredQuickActions: [MeshyyQuickAction] = []
+    /// Why the last palette tap was refused, nil after a success. The refusal
+    /// is quiet in the UI by design; the reason must still exist somewhere a
+    /// debugger (and a test) can read, or dead buttons ship undiagnosable.
+    private(set) var lastQuickActionRefusal: String?
+
+    /// Answers a palette tap through MeshyyKit's tested gate. Returns whether
+    /// the send actually happened — a tap that lands after the prompt moved
+    /// on is refused QUIETLY: the palette just goes away, nothing was typed
+    /// into whatever the agent went on to do, and no dialog interrupts.
+    func performQuickAction(id: String) async -> Bool {
+        guard let meshyy else { return false }
+        // The tap must name an action that is CURRENTLY offered: a tap is
+        // only ever born from a visible button, so if the offer is gone by
+        // the time the tap runs, the moment has passed — refuse quietly.
+        // MeshyyKit's status gate stays underneath as defense-in-depth; this
+        // guard is the one that tracks what the user could actually see.
+        guard offeredQuickActions.contains(where: { $0.id == id }) else {
+            lastQuickActionRefusal = "the offer was already withdrawn"
+            return false
+        }
+        do {
+            try await meshyy.performQuickAction(id: id)
+            lastQuickActionRefusal = nil
+            return true
+        } catch {
+            lastQuickActionRefusal = "\(error)"
+            offeredQuickActions = []
+            return false
+        }
+    }
+
+    /// Everything a freshly adopted transport must be wired to. One place,
+    /// because the transport is born in three places (new, resumed,
+    /// remembered) and rebuilt in a fourth (reattach) — a callback wired at
+    /// two of the four is a bug that looks like a flaky feature.
+    private func wire(_ transport: MeshyyTransport) {
+        transport.onQuickActions = { [weak self] actions in
+            self?.offeredQuickActions = actions
+        }
+    }
     private var meshyyPumpTask: Task<Void, Never>?
 
     /// Detached sessions the daemon holds for this server, set while the connect is
@@ -858,6 +903,7 @@ final class TerminalSession: Identifiable, Hashable {
                 // never paints again under a tab that says connected.
                 let transport = existing.isFinished ? existing.rebuilt() : existing
                 meshyy = transport
+                wire(transport)
                 result = await transport.reattach(
                     over: fresh, sshHost: server.host, cols: size.cols, rows: size.rows
                 )
@@ -1005,6 +1051,7 @@ final class TerminalSession: Identifiable, Hashable {
         switch opened {
         case .success(let transport):
             meshyy = transport
+            wire(transport)
             // Remember it, so the next LAUNCH can come back here without asking.
             // The tab is gone after a force-quit; this is the only thing that
             // survives to say which of a server's sessions was the user's.
@@ -1031,6 +1078,7 @@ final class TerminalSession: Identifiable, Hashable {
         ) {
         case .success(let transport):
             meshyy = transport
+            wire(transport)
             return .success(())
         case .failure(let reason):
             return .failure(reason)
@@ -1082,6 +1130,9 @@ final class TerminalSession: Identifiable, Hashable {
             // session, so `exit` respawned instead of closing.
             if transport.cleanExitStatus != nil {
                 self.meshyy = nil
+                // A dead session offers nothing. Leaving the palette up wires
+                // a live-looking button to a shell that no longer exists.
+                self.offeredQuickActions = []
                 // The session this name pointed at is gone; a relaunch must
                 // not try to walk back into it.
                 if self.server.lastMeshyySession != nil {
@@ -1091,6 +1142,7 @@ final class TerminalSession: Identifiable, Hashable {
                 self.state = .closed
                 return
             }
+            self.offeredQuickActions = []   // stale until the reattach re-offers
             self.state = .reconnecting
             Task { await self.reconnect(maxAttempts: 10) }
         }

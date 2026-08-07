@@ -125,6 +125,31 @@ struct TerminalScreen: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if session.state == .connected {
+                // The agent is waiting and the daemon has one-tap answers for
+                // it. Above the accessory bar — thumb height, where the
+                // answer keys would otherwise have to be hunted on the
+                // keyboard. Labels come from the agent profile via the
+                // daemon; the app draws them and adds nothing.
+                if !session.offeredQuickActions.isEmpty {
+                    QuickActionPaletteBar(
+                        actions: session.offeredQuickActions,
+                        onTap: { id in
+                            Task {
+                                if await session.performQuickAction(id: id) {
+                                    // Blind one-tap action: the tap has no
+                                    // visible echo until the agent reacts, so
+                                    // the confirmation is felt, not seen.
+                                    await UINotificationFeedbackGenerator()
+                                        .notificationOccurred(.success)
+                                }
+                                // Refusal is deliberately silent: the prompt
+                                // moved on, the palette withdraws, nothing
+                                // was sent. An error dialog would interrupt
+                                // the very flow the palette exists to speed.
+                            }
+                        }
+                    )
+                }
                 KeyAccessoryBar(
                     bridge: session.bridge,
                     onMic: { showDictation = true },
