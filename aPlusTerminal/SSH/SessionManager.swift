@@ -90,6 +90,10 @@ final class TerminalSession: Identifiable, Hashable {
     /// what decides whether returning is automatic or a question.
     var usesMeshyy: Bool { meshyy != nil }
 
+    /// A daemon session NAME this tab must resume — set by a notification's
+    /// deep link before connect. Names outlive tabs; honored exactly once.
+    @ObservationIgnored var requestedMeshyySession: String?
+
     /// The daemon's current one-tap offer, empty when nothing is waiting.
     /// Rendered as the palette above the accessory bar; labels are from the
     /// agent profile, never from remote output.
@@ -98,6 +102,27 @@ final class TerminalSession: Identifiable, Hashable {
     /// is quiet in the UI by design; the reason must still exist somewhere a
     /// debugger (and a test) can read, or dead buttons ship undiagnosable.
     private(set) var lastQuickActionRefusal: String?
+
+    /// Last agent status this session alerted on, for transition detection.
+    @ObservationIgnored private var alertedAgentStatus: AgentActivityMonitor.Status = .none
+    /// Seams for the alert shell, injectable so tests never touch
+    /// UNUserNotificationCenter. Defaults post through AgentAlertCenter.
+    @ObservationIgnored var postAgentAlert: (AgentAlertPolicy.Trigger) -> Void = { _ in }
+    @ObservationIgnored var appIsActive: () -> Bool = {
+        UIApplication.shared.applicationState == .active
+    }
+
+    /// Every observed agent-status change funnels here — from the SSH byte
+    /// heuristic and from meshyy's daemon events alike — so the notification
+    /// decision exists exactly once.
+    func noteAgentStatus(_ status: AgentActivityMonitor.Status) {
+        defer { alertedAgentStatus = status }
+        if status != .none {
+            AgentAlertCenter.shared.agentDetected()
+        }
+        guard status == .waiting, alertedAgentStatus != .waiting else { return }
+        postAgentAlert(.becameWaiting)
+    }
 
     /// Answers a palette tap through MeshyyKit's tested gate. Returns whether
     /// the send actually happened — a tap that lands after the prompt moved
@@ -930,6 +955,16 @@ final class TerminalSession: Identifiable, Hashable {
                     return
                 }
             case .failure(let reason):
+                // A link that named a session the daemon no longer holds does
+                // NOT fall back: the user tapped a notification about a
+                // specific session, and opening any shell under that tap is
+                // the silent swap this refusal exists to prevent. Say so and
+                // stop.
+                if case .linkedSessionGone = reason {
+                    meshyy = nil
+                    throw SessionError.meshyyLinkGone(reason.errorDescription
+                        ?? "That session has ended.")
+                }
                 // No daemon here, or it refused. Open the SSH shell that was
                 // deliberately not opened above. A CONNECT-time decision, not a
                 // mid-session switch: still exactly one shell.
@@ -976,6 +1011,19 @@ final class TerminalSession: Identifiable, Hashable {
         }
 
         let survivors = MeshyyTransport.offerableSurvivors(in: remote, claimed: meshyyNamesInUse())
+
+        // A deep link named a specific session (a notification tap). It is
+        // honored or REFUSED — never silently downgraded to a fresh shell:
+        // sessions live on the daemon and outlive tabs, so a link can
+        // outlive its session, and opening something else under the user's
+        // tap is the slot bug's failure class worn as a convenience.
+        if let requested = requestedMeshyySession {
+            requestedMeshyySession = nil
+            if survivors.contains(where: { $0.name == requested }) {
+                return await openRemembered(requested, over: fresh, size: size)
+            }
+            return .failure(.linkedSessionGone(requested))
+        }
 
         var choice: MeshyyChoice = .new
         // The session this server was last on, if it is still sitting there
@@ -1116,6 +1164,7 @@ final class TerminalSession: Identifiable, Hashable {
                 let bytes = [UInt8](chunk)
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
+                self.noteAgentStatus(self.agentMonitor.status)
                 self.portDetector.observe(bytes)
                 self.pipInvalidate?()
             }
@@ -1273,6 +1322,7 @@ final class TerminalSession: Identifiable, Hashable {
                 let bytes = [UInt8](chunk)
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
+                self.noteAgentStatus(self.agentMonitor.status)
                 // Source A of the preview's port detection. Cheap by
                 // construction: it byte-scans for "://" and only then does
                 // any String work, so a firehose costs a memchr per chunk.
@@ -1320,6 +1370,9 @@ final class TerminalSession: Identifiable, Hashable {
         /// Every candidate host failed — carries the addresses tried, in
         /// order, so the user sees exactly what was attempted.
         case allCandidatesFailed([String])
+        /// A deep link named a daemon session that no longer exists. Not a
+        /// connection failure — the honest message, with nothing opened.
+        case meshyyLinkGone(String)
 
         var errorDescription: String? {
             switch self {
@@ -1329,6 +1382,8 @@ final class TerminalSession: Identifiable, Hashable {
                 return "Couldn't load the configured SSH key (\(detail)). Re-import it in Settings → Manage Keys."
             case .allCandidatesFailed(let hosts):
                 return "Tried \(hosts.joined(separator: ", ")) — none reachable."
+            case .meshyyLinkGone(let message):
+                return message
             }
         }
     }
@@ -1379,7 +1434,13 @@ private final class SessionIO: TerminalViewDelegate {
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
     func scrolled(source: TerminalView, position: Double) {}
-    func bell(source: TerminalView) {}
+    func bell(source: TerminalView) {
+        // Agents ring the bell on completion. Same funnel, same policy, same
+        // rate limit as the waiting transition — a bell storm is still a storm.
+        Task { @MainActor [weak session] in
+            session?.postAgentAlert(.bell)
+        }
+    }
     func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
 }
@@ -1516,6 +1577,19 @@ final class SessionManager {
             profiles: profiles
         )
         session.meshyyNamesInUse = { [weak self] in self?.meshyyNamesInUse() ?? [] }
+        session.postAgentAlert = { [weak self, weak session] trigger in
+            guard let self, let session else { return }
+            AgentAlertCenter.shared.agentNeedsYou(
+                sessionID: session.id,
+                serverID: session.server.id,
+                serverName: session.server.name,
+                meshyySessionName: session.meshyy?.sessionName,
+                agentName: session.agentMonitor.detected?.displayName,
+                trigger: trigger,
+                appIsActive: session.appIsActive(),
+                pipIsShowing: self.pipKeepsProcessAlive()
+            )
+        }
         session.onStateChange = { [weak self, weak session] in
             self?.refreshActivity()
             // State drives the pop-out's chip too — multicast into the
@@ -1552,6 +1626,7 @@ final class SessionManager {
     func close(_ session: TerminalSession) {
         sessions.removeAll { $0.id == session.id }
         Task { await session.close() }
+        AgentAlertCenter.shared.sessionClosed(session.id)
         refreshActivity()
         pipSessionClosed?(session)
     }

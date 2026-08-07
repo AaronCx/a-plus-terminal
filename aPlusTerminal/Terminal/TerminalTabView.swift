@@ -131,11 +131,15 @@ struct TerminalTabView: View {
             .onChange(of: router.connectServerID) { _, _ in
                 consumeConnectRequest()
             }
+            .onChange(of: router.targetServerSession?.name) { _, _ in
+                consumeServerSessionLink()
+            }
             .onAppear {
                 // A cold-launch deep link (or App Intent) can land before this
                 // view observes changes — consume whatever is already pending.
                 consumeDeepLink()
                 consumeConnectRequest()
+                consumeServerSessionLink()
             }
             .task {
                 await reachability.refresh(serverStore.servers)
@@ -273,6 +277,36 @@ struct TerminalTabView: View {
             result.append((title: name, servers: grouped[name] ?? []))
         }
         return result
+    }
+
+    /// Notification tap → the NAMED daemon session on a server (PR 3 of the
+    /// product brief). The name outlives tabs; the flow is: an open tab
+    /// already on that session wins, else a new tab that resumes it, and a
+    /// name the daemon no longer holds is SAID OUT LOUD — never silently
+    /// swapped for a fresh shell, which is the slot bug's failure class worn
+    /// as a convenience.
+    private func consumeServerSessionLink() {
+        guard let target = router.targetServerSession else { return }
+        router.targetServerSession = nil
+        // An open tab already attached to that daemon session: just focus it.
+        if let existing = sessionManager.sessions.first(where: {
+            $0.server.id == target.server && $0.meshyy?.sessionName == target.name
+        }) {
+            deepLinkLog.debug("consume: focusing named session \(target.name, privacy: .public)")
+            router.selectedTab = .terminal
+            path = [existing]
+            return
+        }
+        guard let server = serverStore.servers.first(where: { $0.id == target.server }) else {
+            deepLinkLog.debug("consume: no server for \(target.server.uuidString, privacy: .public)")
+            return
+        }
+        deepLinkLog.debug("consume: opening \(server.name, privacy: .public) to resume \(target.name, privacy: .public)")
+        router.selectedTab = .terminal
+        let session = sessionManager.open(server: server)
+        session.requestedMeshyySession = target.name
+        path = [session]
+        Task { await session.connect() }
     }
 
     /// Live Activity tap → land inside the session (§4.5). After an app

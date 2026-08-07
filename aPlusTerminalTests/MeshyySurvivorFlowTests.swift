@@ -537,6 +537,51 @@ final class MeshyySurvivorFlowTests: XCTestCase {
         XCTAssertTrue(session.offeredQuickActions.isEmpty)
     }
 
+    /// A notification's deep link names a daemon session; connecting with the
+    /// request honored must land in EXACTLY that session.
+    func testARequestedSessionNameIsHonored() async throws {
+        let (session, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+        let survivor = try await plantSurvivor(serverID: server.id)
+
+        session.requestedMeshyySession = survivor
+        await session.connect()
+        guard session.meshyyUnavailable == nil || session.state == .connected else {
+            throw XCTSkip("no local meshyyd: \(session.meshyyUnavailable ?? "")")
+        }
+        XCTAssertEqual(session.state, .connected)
+        XCTAssertEqual(session.meshyy?.sessionName, survivor,
+                       "the link named \(survivor); the tab went elsewhere")
+        let held = try await liveGroupNames(withPrefix: prefix)
+        XCTAssertEqual(held, [survivor], "honoring a link must not mint a sibling")
+    }
+
+    /// The link outlived its session: REFUSED with the reason on the tab —
+    /// never a silent fresh shell under the user's tap.
+    func testALinkToAGoneSessionSaysSoAndOpensNothing() async throws {
+        let (session, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+
+        session.requestedMeshyySession = "\(prefix)-7"   // never existed
+        await session.connect()
+
+        XCTAssertNotEqual(session.state, .connected,
+                          "a dead link produced a live session — the silent swap")
+        let reason = session.meshyyUnavailable ?? session.lastError ?? ""
+        XCTAssertTrue(reason.contains("ended") || reason.contains("session"),
+                      "the user was not told why: \(reason.isEmpty ? "nothing" : reason)")
+        let held = try await liveGroupNames(withPrefix: prefix)
+        XCTAssertEqual(held, [], "a refused link still opened something: \(held)")
+    }
+
     // MARK: - Harness (same probe plumbing as MeshyyResizeAtConnectTests)
 
     /// Runs a marker print in the session's shell and reads it back off the

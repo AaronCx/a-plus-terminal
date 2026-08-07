@@ -38,11 +38,18 @@ final class MeshyyTransport {
         case protocolTooOld(daemon: Int, client: Int)
         case daemonTooOld(String)
         case connectFailed(String)
+        /// A deep link named a session the daemon no longer holds. Its own
+        /// case because the honest UX is different: nothing is wrong with
+        /// meshyy — the session ended between the notification and the tap.
+        case linkedSessionGone(String)
 
         var errorDescription: String? {
             switch self {
             case .daemonAbsent:
                 return "meshyyd isn't installed on this host — using SSH."
+            case .linkedSessionGone(let name):
+                return "That session has ended. It was \(name) on the daemon; "
+                    + "nothing else was opened in its place."
             case .malformedBootstrap(let detail):
                 return "meshyyd answered with something unreadable (\(detail)) — using SSH."
             case .protocolTooOld(let daemon, let client):

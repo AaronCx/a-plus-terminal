@@ -1,5 +1,6 @@
 import AppIntents
 import SwiftUI
+import UserNotifications
 import os
 
 let deepLinkLog = Logger(subsystem: "com.aaroncx.aplusterminal", category: "deeplink")
@@ -58,6 +59,12 @@ struct APlusTerminalApp: App {
         // While a pop-out is live, the background wind-down must not kill
         // the sessions it is monitoring…
         sessions.pipKeepsProcessAlive = { [weak pip] in pip?.isActive ?? false }
+        // Agent alerts: a notification tap routes its deep link through the
+        // same router every other entry point uses.
+        UNUserNotificationCenter.current().delegate = AgentAlertCenter.shared
+        AgentAlertCenter.shared.openURL = { [weak router] url in
+            router?.handle(url)
+        }
         vncMonitors.pipKeepsProcessAlive = { [weak pip] in pip?.isActive ?? false }
         // …and when the pop-out ends while still backgrounded, the normal
         // grace window starts at that moment instead.
@@ -165,6 +172,10 @@ final class DeepLinkRouter: @unchecked Sendable {
     /// Set when an App Intent (or aplusterminal://connect/<uuid>) asks to
     /// open a session to a saved server; TerminalTabView consumes it.
     var connectServerID: UUID?
+    /// aplusterminal://server/<id>/session/<name> — attach the NAMED daemon
+    /// session on that server. The name outlives tabs, which is what lets a
+    /// notification link land in the right session after the tab is gone.
+    var targetServerSession: (server: UUID, name: String)?
 
     func requestConnect(toServer id: UUID) {
         deepLinkLog.debug("router: connect request \(id.uuidString, privacy: .public)")
@@ -195,6 +206,15 @@ final class DeepLinkRouter: @unchecked Sendable {
         case "connect":
             guard let id = UUID(uuidString: url.lastPathComponent) else { break }
             requestConnect(toServer: id)
+            return
+        case "server":
+            // /<serverUUID>/session/<name>
+            let parts = url.pathComponents.filter { $0 != "/" }
+            guard parts.count == 3, parts[1] == "session",
+                  let serverID = UUID(uuidString: parts[0]) else { break }
+            deepLinkLog.debug("router: server=\(serverID.uuidString, privacy: .public) session=\(parts[2], privacy: .public)")
+            selectedTab = .terminal
+            targetServerSession = (server: serverID, name: parts[2])
             return
         default:
             break
