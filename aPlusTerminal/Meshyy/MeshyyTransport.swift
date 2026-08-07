@@ -118,6 +118,10 @@ final class MeshyyTransport {
     /// that separation is the security property, and it is why the app must
     /// not hardcode its own y/n row here. Empty means withdrawn.
     var onQuickActions: (@MainActor ([MeshyyQuickAction]) -> Void)?
+    /// The daemon's read of the agent — termios- and alt-screen-aware, so it
+    /// is ground truth where the app's byte-burst heuristic is a guess. The
+    /// heuristic stays as the SSH path's fallback.
+    var onAgentStatus: (@MainActor (AgentActivityMonitor.Status, String?) -> Void)?
 
     private let session: MeshyySession
     private let name: String
@@ -485,7 +489,17 @@ final class MeshyyTransport {
                         self?.onQuickActions?(offered)
                     }
 
-                case .screenRebuilt, .termios, .screenMode, .agent, .reconnecting:
+                case .agent(let kind, _, let detail):
+                    let status: AgentActivityMonitor.Status = switch kind {
+                    case .waiting: .waiting
+                    case .working: .working
+                    default: .none
+                    }
+                    Task { @MainActor [weak self] in
+                        self?.onAgentStatus?(status, detail)
+                    }
+
+                case .screenRebuilt, .termios, .screenMode, .reconnecting:
                     break   // not this type's business
 
                 case .exited(let status):

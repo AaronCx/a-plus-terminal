@@ -103,6 +103,23 @@ final class TerminalSession: Identifiable, Hashable {
     /// debugger (and a test) can read, or dead buttons ship undiagnosable.
     private(set) var lastQuickActionRefusal: String?
 
+    /// The daemon's read of the agent, when meshyy carries this session.
+    /// Ground truth (termios- and alt-screen-aware) where the byte-burst
+    /// heuristic is a guess; nil over SSH or before the first event.
+    private(set) var daemonAgentStatus: AgentActivityMonitor.Status?
+    private(set) var daemonAgentName: String?
+
+    /// What the surfaces show: the daemon's read when there is one, the
+    /// heuristic otherwise (the SSH path's fallback, per the brief).
+    var effectiveAgentStatus: AgentActivityMonitor.Status {
+        if usesMeshyy, let daemonAgentStatus { return daemonAgentStatus }
+        return agentMonitor.status
+    }
+    var effectiveAgentName: String? {
+        if usesMeshyy, let daemonAgentName { return daemonAgentName }
+        return agentMonitor.detected?.displayName
+    }
+
     /// Last agent status this session alerted on, for transition detection.
     @ObservationIgnored private var alertedAgentStatus: AgentActivityMonitor.Status = .none
     /// Seams for the alert shell, injectable so tests never touch
@@ -157,6 +174,13 @@ final class TerminalSession: Identifiable, Hashable {
     private func wire(_ transport: MeshyyTransport) {
         transport.onQuickActions = { [weak self] actions in
             self?.offeredQuickActions = actions
+        }
+        transport.onAgentStatus = { [weak self] status, name in
+            guard let self else { return }
+            self.daemonAgentStatus = status
+            self.daemonAgentName = name
+            self.noteAgentStatus(status)
+            self.onStateChange?()   // repaint the rows that show it
         }
     }
     private var meshyyPumpTask: Task<Void, Never>?
@@ -1164,7 +1188,9 @@ final class TerminalSession: Identifiable, Hashable {
                 let bytes = [UInt8](chunk)
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
-                self.noteAgentStatus(self.agentMonitor.status)
+                // No noteAgentStatus here: under meshyy the daemon's agent
+                // events drive the alert funnel — feeding the heuristic too
+                // would race two readers of the same shell into double edges.
                 self.portDetector.observe(bytes)
                 self.pipInvalidate?()
             }
