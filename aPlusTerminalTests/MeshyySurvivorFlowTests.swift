@@ -635,6 +635,92 @@ final class MeshyySurvivorFlowTests: XCTestCase {
                        "the race minted something beside the survivor: \(held)")
     }
 
+    /// THE "no previous window" repro: swipe-scroll sends SGR wheel events at
+    /// coordinates computed against the APP's grid. tmux binds wheel-on-the-
+    /// status-line to previous/next-window — so if the app believes MORE rows
+    /// than the pty actually has, a low swipe's row clamps onto tmux's status
+    /// line and switches windows instead of scrolling ("no previous window",
+    /// yellow message bar). The invariant this pins: after connect and after
+    /// every resize settle, app emulator, daemon pty, and tmux agree on rows.
+    func testGeometryAgreesAcrossAppDaemonAndTmux() async throws {
+        let (session, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+        await session.connect()
+        guard session.state == .connected, session.meshyy != nil else {
+            throw XCTSkip("no local meshyy session: \(session.meshyyUnavailable ?? "not connected")")
+        }
+        let name = try XCTUnwrap(session.meshyy?.sessionName)
+
+        let socket = "aplus-geo-\(UUID().uuidString.prefix(6))"
+        addTeardownBlock {
+            _ = try? await self.connectSSH().runCommand(
+                "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH tmux -L \(socket) kill-server 2>/dev/null")
+        }
+        session.sendInput(Data("tmux -L \(socket) new-session -s geo \\; set -g mouse on\n".utf8))
+        try await Task.sleep(for: .seconds(2))
+
+        func daemonSize() async throws -> (cols: Int, rows: Int)? {
+            let ssh = try await connectSSH()
+            defer { Task { await ssh.disconnect() } }
+            if case .success(let rows) = await MeshyyTransport.listGroup(over: ssh, serverID: server.id),
+               let row = rows.first(where: { $0.name == name }) {
+                return (row.cols, row.rows)
+            }
+            return nil
+        }
+        func tmuxRows() async throws -> Int? {
+            let ssh = try await connectSSH()
+            defer { Task { await ssh.disconnect() } }
+            // window_height, targeted: client_height needs a client context an
+            // exec channel does not have. The window tracks the attached
+            // client's size, which is the geometry tmux actually draws with —
+            // status line included, so the drawable window is client rows - 1.
+            // SSH exec channels get a bare PATH that misses Homebrew — the
+            // interactive session finds tmux, the query channel did not, and
+            // every probe read as nil.
+            let out = (try? await ssh.runCommand(
+                "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
+                + "tmux -L \(socket) display -t geo -p '#{window_height}'")) ?? ""
+            return Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        func assertAgreement(_ label: String) async throws {
+            let app = (session.terminalView.getTerminal().cols, session.terminalView.getTerminal().rows)
+            var daemon: (cols: Int, rows: Int)?
+            var tmux: Int?
+            let deadline = Date().addingTimeInterval(10)
+            repeat {
+                daemon = try await daemonSize()
+                tmux = try await tmuxRows()
+                // tmux's window is its client height minus the status line.
+                if daemon?.cols == app.0, daemon?.rows == app.1, tmux == app.1 - 1 { return }
+                try await Task.sleep(for: .milliseconds(400))
+            } while Date() < deadline
+            XCTFail("\(label): app=\(app) daemon=\(String(describing: daemon)) "
+                    + "tmuxRows=\(String(describing: tmux)) — a taller app than pty sends "
+                    + "wheel events onto tmux's status line: window switch, not scroll")
+        }
+
+        try await assertAgreement("after connect")
+
+        // The keyboard cycle through the REAL path: the view resizes, SwiftTerm
+        // recomputes the grid, the delegate sends the remote resize — exactly
+        // what showing/dismissing the keyboard does.
+        let frame = session.terminalView.frame
+        session.terminalView.frame = CGRect(x: 0, y: 0, width: frame.width, height: frame.height - 220)
+        session.terminalView.layoutIfNeeded()
+        try await Task.sleep(for: .seconds(1))
+        try await assertAgreement("keyboard up")
+        session.terminalView.frame = frame
+        session.terminalView.layoutIfNeeded()
+        try await Task.sleep(for: .seconds(1))
+        try await assertAgreement("keyboard dismissed")
+    }
+
     // MARK: - Harness (same probe plumbing as MeshyyResizeAtConnectTests)
 
     /// Runs a marker print in the session's shell and reads it back off the

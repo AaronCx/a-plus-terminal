@@ -62,6 +62,21 @@ struct ScrollBridgeCore {
         return data
     }
 
+    /// The 1-based row a wheel event should claim for a touch at `y` in a
+    /// view of `height` with `rows` rows — clamped OFF the bottom row.
+    ///
+    /// tmux's default binds wheel-on-the-status-line to previous/next-window,
+    /// and the status line is the bottom row — so a swipe that drifts low
+    /// switched windows instead of scrolling ("no previous window" in the
+    /// message bar). A scroll gesture means "scroll the CONTENT"; the content
+    /// never includes the bottom row of a multiplexer, and no TUI puts its
+    /// scrollable region there. Aiming one row up costs nothing anywhere.
+    static func wheelRow(forY y: CGFloat, height: CGFloat, rows: Int) -> Int {
+        guard rows > 1, height > 0 else { return 1 }
+        let raw = min(max(Int(y / (height / CGFloat(rows))) + 1, 1), rows)
+        return min(raw, rows - 1)
+    }
+
     static func arrowEvents(up: Bool, ticks: Int, applicationCursor: Bool) -> Data {
         let key: TerminalKey = up ? .up : .down
         let bytes = key.bytes(applicationCursor: applicationCursor)
@@ -231,7 +246,8 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
     private func cellCoordinate(for point: CGPoint, in view: UIView, cols: Int, rows: Int) -> (col: Int, row: Int) {
         guard cols > 0, rows > 0, view.bounds.width > 0, view.bounds.height > 0 else { return (1, 1) }
         let col = min(max(Int(point.x / (view.bounds.width / CGFloat(cols))) + 1, 1), cols)
-        let row = min(max(Int(point.y / (view.bounds.height / CGFloat(rows))) + 1, 1), rows)
+        // Never the bottom row — see ScrollBridgeCore.wheelRow.
+        let row = ScrollBridgeCore.wheelRow(forY: point.y, height: view.bounds.height, rows: rows)
         return (col, row)
     }
 }

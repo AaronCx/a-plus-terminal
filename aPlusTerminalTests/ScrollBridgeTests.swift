@@ -2,6 +2,22 @@ import XCTest
 @testable import aPlusTerminal
 
 final class ScrollBridgeCoreTests: XCTestCase {
+
+    func testWheelEventsNeverTargetTheBottomRow() {
+        // tmux binds wheel-on-the-status-line (the bottom row) to
+        // previous/next-window — the "no previous window" report was a swipe
+        // drifting low and switching windows instead of scrolling.
+        let height: CGFloat = 460, rows = 46
+        // A touch in the very last cell claims the row above it.
+        XCTAssertEqual(ScrollBridgeCore.wheelRow(forY: height - 1, height: height, rows: rows), rows - 1)
+        XCTAssertEqual(ScrollBridgeCore.wheelRow(forY: height, height: height, rows: rows), rows - 1)
+        // Everywhere else is untouched by the clamp.
+        XCTAssertEqual(ScrollBridgeCore.wheelRow(forY: 0, height: height, rows: rows), 1)
+        XCTAssertEqual(ScrollBridgeCore.wheelRow(forY: height / 2, height: height, rows: rows), rows / 2 + 1)
+        // Degenerate grids stay sane.
+        XCTAssertEqual(ScrollBridgeCore.wheelRow(forY: 10, height: 100, rows: 1), 1)
+        XCTAssertEqual(ScrollBridgeCore.wheelRow(forY: 10, height: 0, rows: 46), 1)
+    }
     func testModeSelectionMatrix() {
         // Mode A: app requested mouse and the bridge is enabled — alt screen or not (htop, tmux).
         XCTAssertEqual(ScrollBridgeCore.mode(altScreen: true, mouseReporting: true, wheelBridgeEnabled: true), .sgrWheel)
