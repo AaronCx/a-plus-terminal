@@ -529,11 +529,25 @@ final class TerminalSession: Identifiable, Hashable {
     /// reattaching is for *resuming* after a drop (the reconnect paths), not for
     /// a deliberate new session. (Otherwise every new session lands in the last
     /// tmux — the "it booted me into session 1/12" bug.)
+    /// Single-flight, same contract as the reconnect loop below: open()
+    /// starts a connect, and a deep link, a Live Activity tap, or the
+    /// foreground auto-resume can each ask again around the same moment. Two
+    /// attempt loops racing into the survivor-picker park can resume its
+    /// continuation twice — a fatalError, seen live as a crash on tapping an
+    /// agent notification. The second caller now awaits the first instead.
     func connect() async {
+        if let connectLoop {
+            await connectLoop.value
+            return
+        }
         guard state == .connecting || state == .suspended else { return }
         state = .connecting
-        await attemptLoop(maxAttempts: 1, intent: .freshShell)
+        let loop = Task { await attemptLoop(maxAttempts: 1, intent: .freshShell) }
+        connectLoop = loop
+        defer { connectLoop = nil }
+        await loop.value
     }
+    @ObservationIgnored private var connectLoop: Task<Void, Never>?
 
     /// Reconnect contract (§4.1): exponential backoff 0.5s → 1s → 2s.
     /// Single-flight: a dropped channel, the foreground handler, and the retry
