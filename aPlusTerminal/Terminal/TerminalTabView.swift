@@ -72,7 +72,11 @@ struct TerminalTabView: View {
                     ForEach(serverGroups, id: \.title) { group in
                         Section(group.title) {
                             ForEach(group.servers) { server in
-                                ServerRow(server: server, status: reachability.statuses[server.id] ?? .unknown)
+                                ServerRow(
+                                    server: server,
+                                    status: reachability.statuses[server.id] ?? .unknown,
+                                    waitingCount: waitingCount(on: server)
+                                )
                                     .contentShape(Rectangle())
                                     .onTapGesture {
                                         if server.kind == .vncMonitor {
@@ -279,6 +283,15 @@ struct TerminalTabView: View {
         return result
     }
 
+    /// Open sessions on `server` whose agent is waiting — the server-list
+    /// glance count. A helper, because the same expression inline sent the
+    /// type-checker into the weeds.
+    private func waitingCount(on server: Server) -> Int {
+        sessionManager.sessions.filter {
+            $0.server.id == server.id && $0.effectiveAgentStatus == .waiting
+        }.count
+    }
+
     /// Notification tap → the NAMED daemon session on a server (PR 3 of the
     /// product brief). The name outlives tabs; the flow is: an open tab
     /// already on that session wins, else a new tab that resumes it, and a
@@ -366,11 +379,23 @@ struct SessionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.server.name)
                     .font(.body.weight(.medium))
-                Text(session.startedAt, style: .time)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if session.effectiveAgentStatus == .waiting {
+                    Text("\(session.effectiveAgentName ?? "Agent") is waiting")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                } else {
+                    Text(session.startedAt, style: .time)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
+            if session.effectiveAgentStatus == .waiting {
+                // One glance, no switching: the tab that needs a human says so.
+                Image(systemName: "exclamationmark.bubble.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Agent waiting")
+            }
             Button(role: .destructive, action: onClose) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.red)
@@ -454,6 +479,9 @@ struct ServerRow: View {
 
     let server: Server
     var status: ReachabilityStore.Status = .unknown
+    /// Open sessions on this server whose agent is waiting on a human. A user
+    /// running several agents scans this list; the count is the glance.
+    var waitingCount: Int = 0
 
     var body: some View {
         HStack {
@@ -469,6 +497,15 @@ struct ServerRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if waitingCount > 0 {
+                Text("\(waitingCount) waiting")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.orange.opacity(0.2), in: Capsule())
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("\(waitingCount) agents waiting")
+            }
             if server.kind == .vncMonitor {
                 Text("Monitor")
                     .font(.caption2.weight(.semibold))

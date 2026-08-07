@@ -51,6 +51,8 @@ final class AgentAlertPolicyTests: XCTestCase {
 /// The transition funnel: alerts fire on the EDGE into waiting, once.
 @MainActor
 final class AgentTransitionTests: XCTestCase {
+    func bareSessionForStatus() -> TerminalSession { bareSession() }
+
     private func bareSession() -> TerminalSession {
         let temporary = FileManager.default.temporaryDirectory
         let suffix = UUID().uuidString
@@ -88,6 +90,17 @@ final class AgentTransitionTests: XCTestCase {
         session.noteAgentStatus(.waiting)
         XCTAssertEqual(fired, [.becameWaiting, .becameWaiting],
                        "a fresh edge is a fresh alert (the policy rate-limits it)")
+    }
+}
+
+/// The daemon's read outranks the heuristic exactly when meshyy carries the
+/// session.
+@MainActor
+final class EffectiveAgentStatusTests: XCTestCase {
+    func testHeuristicIsTheFallbackNotTheTruth() throws {
+        let session = AgentTransitionTests().bareSessionForStatus()
+        // No meshyy, no daemon read: the heuristic is all there is.
+        XCTAssertEqual(session.effectiveAgentStatus, session.agentMonitor.status)
     }
 }
 
