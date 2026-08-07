@@ -1,0 +1,11 @@
+name: Feature request
+description: Something the terminal should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: The workflow this unlocks
+      description: What you are trying to DO — the feature is the means.
+    validations:
+      required: true

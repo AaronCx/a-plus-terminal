@@ -1,0 +1,30 @@
+name: Bug report
+description: Something misbehaves
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      placeholder: "e.g. TestFlight build 66, App Store 1.0.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options: [SSH, meshyy, Not sure]
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Remote setup
+      placeholder: "e.g. macOS 26 + tmux + Claude Code"

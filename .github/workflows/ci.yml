@@ -21,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Network symbols stay in the audited layers
+        run: scripts/check-network-surface.sh
+
       - name: Select Xcode
         run: echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
 
