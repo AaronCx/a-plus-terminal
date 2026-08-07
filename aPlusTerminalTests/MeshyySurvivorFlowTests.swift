@@ -582,6 +582,59 @@ final class MeshyySurvivorFlowTests: XCTestCase {
         XCTAssertEqual(held, [], "a refused link still opened something: \(held)")
     }
 
+    /// THE notification-tap crash (build 65): open() starts a connect, and the
+    /// deep-link consume called connect() AGAIN — two attempt loops racing into
+    /// the survivor-picker park, whose continuation must resume exactly once.
+    /// connect() is single-flight now; this drives the racy shape and requires
+    /// one daemon session, one live process, and no crash.
+    func testConcurrentConnectsAreSingleFlight() async throws {
+        let (session, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+
+        // The tap's shape: a connect already running, another asked at once.
+        async let first: Void = session.connect()
+        async let second: Void = session.connect()
+        async let third: Void = session.connect()
+        _ = await (first, second, third)
+
+        guard session.state == .connected, session.meshyy != nil else {
+            throw XCTSkip("no local meshyy session: \(session.meshyyUnavailable ?? "not connected")")
+        }
+        let held = try await liveGroupNames(withPrefix: prefix)
+        XCTAssertEqual(held.count, 1,
+                       "concurrent connects fanned out on the daemon: \(held)")
+    }
+
+    /// The same race with a SURVIVOR parked on the picker — the continuation
+    /// variant that actually crashed: the second loop must not touch the park.
+    func testConcurrentConnectsWithASurvivorDoNotDoubleResumeThePicker() async throws {
+        let (session, server) = try makeMeshyySession()
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+        let survivor = try await plantSurvivor(serverID: server.id)
+
+        async let first: Void = session.connect()
+        async let second: Void = session.connect()
+        try await poll(deadline: 20, "the connect never parked on the survivor picker") {
+            session.meshyySurvivors != nil
+        }
+        session.chooseMeshyySession(.resume(survivor))
+        _ = await (first, second)
+
+        XCTAssertEqual(session.state, .connected)
+        XCTAssertEqual(session.meshyy?.sessionName, survivor)
+        let held = try await liveGroupNames(withPrefix: prefix)
+        XCTAssertEqual(held, [survivor],
+                       "the race minted something beside the survivor: \(held)")
+    }
+
     // MARK: - Harness (same probe plumbing as MeshyyResizeAtConnectTests)
 
     /// Runs a marker print in the session's shell and reads it back off the

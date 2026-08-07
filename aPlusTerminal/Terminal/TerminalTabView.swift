@@ -319,7 +319,11 @@ struct TerminalTabView: View {
         let session = sessionManager.open(server: server)
         session.requestedMeshyySession = target.name
         path = [session]
-        Task { await session.connect() }
+        // NO connect() here: open() already started one. The extra call ran a
+        // SECOND connect concurrently — the exact double-connect the test
+        // harness documented in July — and two connects racing into the
+        // survivor-picker park can resume its continuation twice, which is a
+        // fatalError. That was the crash on tapping a notification.
     }
 
     /// Live Activity tap → land inside the session (§4.5). After an app
