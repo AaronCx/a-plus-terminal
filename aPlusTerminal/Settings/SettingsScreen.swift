@@ -70,11 +70,11 @@ struct SettingsScreen: View {
                             Text(mux.displayName).tag(mux.id)
                         }
                     }
-                    Toggle("Agent mascot icons", isOn: $settings.agentMascotIcons)
+                    Toggle("Agent icons", isOn: $settings.agentMascotIcons)
                 } header: {
                     Text("Agent & Multiplexer")
                 } footer: {
-                    Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server. Mascot icons: sessions and the Live Activity show the detected agent's mark instead of the terminal glyph.")
+                    Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server. Agent icons: sessions and the Live Activity show the detected agent's icon instead of the terminal glyph.")
                 }
 
                 Section {
