@@ -7,6 +7,12 @@ import Observation
 final class AppSettings {
     /// §4.1 — after a reconnect, automatically reattach to the last recorded
     /// multiplexer target (tmux/zellij/screen/…). Renamed from `autoReattachTmux`.
+    /// Show the detected agent's mascot mark (session rows, Live Activity)
+    /// instead of the generic terminal glyph.
+    var agentMascotIcons: Bool {
+        didSet { defaults.set(agentMascotIcons, forKey: Keys.agentMascotIcons) }
+    }
+
     var autoReattachMultiplexer: Bool {
         didSet { defaults.set(autoReattachMultiplexer, forKey: Keys.autoReattachMultiplexer) }
     }
@@ -82,6 +88,7 @@ final class AppSettings {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         // Migration: honor the old keys if the new ones were never written.
+        self.agentMascotIcons = defaults.object(forKey: Keys.agentMascotIcons) as? Bool ?? true
         self.autoReattachMultiplexer = defaults.object(forKey: Keys.autoReattachMultiplexer) as? Bool
             ?? defaults.object(forKey: Keys.legacyAutoReattachTmux) as? Bool
             ?? true
@@ -107,6 +114,7 @@ final class AppSettings {
 
     private enum Keys {
         static let autoReattachMultiplexer = "autoReattachMultiplexer"
+        static let agentMascotIcons = "agentMascotIcons"
         static let scrollWheelBridge = "scrollWheelBridge"
         static let multiplexerHintShown = "multiplexerHintShown"
         static let autoSendDictation = "autoSendDictation"

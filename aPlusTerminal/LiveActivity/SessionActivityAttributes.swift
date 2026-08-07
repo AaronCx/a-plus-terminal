@@ -16,6 +16,10 @@ struct SessionActivityAttributes: ActivityAttributes {
         /// Detected agent's display name (e.g. "Claude Code"); nil → "Agent".
         /// Optional (default nil) so older payloads and call sites still work.
         var agentName: String? = nil
+        /// Asset name of the agent's mascot mark ("agent-claude-code"), nil
+        /// when the setting is off or no agent is detected — the renderer
+        /// falls back to the terminal glyph. Additive for older payloads.
+        var agentIconName: String? = nil
 
         var isConnected: Bool { state == "connected" }
         /// Paused-but-open: the socket was suspended (backgrounded past the

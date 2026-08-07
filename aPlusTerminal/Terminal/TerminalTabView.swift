@@ -372,6 +372,8 @@ struct TerminalTabView: View {
 }
 
 struct SessionRow: View {
+    @Environment(AppSettings.self) private var settings
+
     let session: TerminalSession
     var onClose: () -> Void
 
@@ -380,6 +382,14 @@ struct SessionRow: View {
             Circle()
                 .fill(stateColor)
                 .frame(width: 9, height: 9)
+            if settings.agentMascotIcons, let icon = session.effectiveAgentIconName {
+                Image(icon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 20, height: 20)
+                    .clipShape(RoundedRectangle(cornerRadius: 4.5))
+                    .accessibilityLabel(session.effectiveAgentName ?? "Agent")
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.server.name)
                     .font(.body.weight(.medium))

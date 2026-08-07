@@ -121,7 +121,7 @@ final class MeshyyTransport {
     /// The daemon's read of the agent — termios- and alt-screen-aware, so it
     /// is ground truth where the app's byte-burst heuristic is a guess. The
     /// heuristic stays as the SSH path's fallback.
-    var onAgentStatus: (@MainActor (AgentActivityMonitor.Status, String?) -> Void)?
+    var onAgentStatus: (@MainActor (AgentActivityMonitor.Status, String?, String?) -> Void)?
 
     private let session: MeshyySession
     private let name: String
@@ -489,14 +489,14 @@ final class MeshyyTransport {
                         self?.onQuickActions?(offered)
                     }
 
-                case .agent(let kind, _, let detail):
+                case .agent(let kind, let agentID, let detail):
                     let status: AgentActivityMonitor.Status = switch kind {
                     case .waiting: .waiting
                     case .working: .working
                     default: .none
                     }
                     Task { @MainActor [weak self] in
-                        self?.onAgentStatus?(status, detail)
+                        self?.onAgentStatus?(status, agentID, detail)
                     }
 
                 case .screenRebuilt, .termios, .screenMode, .reconnecting:

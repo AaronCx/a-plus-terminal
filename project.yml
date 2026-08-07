@@ -11,7 +11,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # One source of truth for both targets — the app and widget MUST ship with
     # identical versions or App Store Connect rejects the upload.
-    CURRENT_PROJECT_VERSION: 67
+    CURRENT_PROJECT_VERSION: 68
     MARKETING_VERSION: "1.0.4"
 packages:
   # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
@@ -54,6 +54,10 @@ targets:
     sources:
       - aPlusTerminal
       - path: Resources
+        buildPhase: resources
+      # Agent mascot marks — shared with the widget so the Live Activity can
+      # draw the same icon the app shows.
+      - path: AgentIcons.xcassets
         buildPhase: resources
     dependencies:
       - target: aPlusTerminalWidgets
@@ -111,6 +115,8 @@ targets:
           - group.com.aaroncx.aplusterminal
     sources:
       - aPlusTerminalWidgets
+      - path: AgentIcons.xcassets
+        buildPhase: resources
       # Shared with the app target — must compile identically in both.
       - path: aPlusTerminal/LiveActivity/SessionActivityAttributes.swift
       - path: aPlusTerminal/LiveActivity/SessionSnapshotStore.swift

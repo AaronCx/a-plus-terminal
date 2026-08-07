@@ -18,6 +18,11 @@ struct AgentProfile: Codable, Identifiable, Hashable {
     var quietInterval: Double?
     /// Optional per-agent override of the working-burst byte threshold.
     var burstThreshold: Int?
+    /// Substrings that mean the agent is STILL WORKING however quiet the pty —
+    /// Claude Code shows "esc to interrupt" for the whole life of a tool call,
+    /// re-printed by its spinner. Quiet alone read a silent build as "waiting
+    /// for input" and notified a human nobody needed. Empty = quiet decides.
+    var busyMarkers: [String] = []
     /// Built-in (bundled) vs. user-defined. User entries override built-ins
     /// with the same id.
     var builtIn: Bool = true
@@ -30,7 +35,7 @@ struct AgentProfile: Codable, Identifiable, Hashable {
 
 extension AgentProfile {
     private enum CodingKeys: String, CodingKey {
-        case id, displayName, detectionMarkers, attachTemplate, quietInterval, burstThreshold, builtIn
+        case id, displayName, detectionMarkers, attachTemplate, quietInterval, burstThreshold, busyMarkers, builtIn
     }
 
     /// Lenient decoder: hand-authored / community profile JSON may omit
@@ -44,6 +49,7 @@ extension AgentProfile {
         attachTemplate = try c.decodeIfPresent(String.self, forKey: .attachTemplate) ?? "{path} "
         quietInterval = try c.decodeIfPresent(Double.self, forKey: .quietInterval)
         burstThreshold = try c.decodeIfPresent(Int.self, forKey: .burstThreshold)
+        busyMarkers = try c.decodeIfPresent([String].self, forKey: .busyMarkers) ?? []
         builtIn = try c.decodeIfPresent(Bool.self, forKey: .builtIn) ?? true
     }
 }
