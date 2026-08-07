@@ -71,10 +71,13 @@ struct SettingsScreen: View {
                         }
                     }
                     Toggle("Agent icons", isOn: $settings.agentMascotIcons)
+                    NavigationLink("Custom agent icons") {
+                        CustomAgentIconsView()
+                    }
                 } header: {
                     Text("Agent & Multiplexer")
                 } footer: {
-                    Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server. Agent icons: sessions and the Live Activity show the detected agent's icon instead of the terminal glyph.")
+                    Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server. Agent icons: sessions and the Live Activity show the detected agent's icon instead of the terminal glyph. Agent names, icons and mascots are trademarks or artwork of their respective owners; a+Terminal is independent and not affiliated with, sponsored by, or endorsed by any of them.")
                 }
 
                 Section {
@@ -163,6 +166,9 @@ struct SettingsScreen: View {
                     }
                     NavigationLink("License Agreement") {
                         BundledDocumentView(resource: "LicenseAgreement", title: "License Agreement")
+                    }
+                    NavigationLink("Third-Party Notices") {
+                        BundledDocumentView(resource: "ThirdPartyNotices", title: "Third-Party Notices")
                     }
                     Link(destination: privacyPolicyURL) {
                         Label("Privacy Policy (Web)", systemImage: "safari")
