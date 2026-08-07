@@ -130,6 +130,16 @@ final class TerminalSession: Identifiable, Hashable {
 
     /// Last agent status this session alerted on, for transition detection.
     @ObservationIgnored private var alertedAgentStatus: AgentActivityMonitor.Status = .none
+    /// When the current working phase began — the alert filter's evidence.
+    @ObservationIgnored private var workingSince: Date?
+    /// A waiting edge only alerts after this much REAL work. Anything shorter
+    /// is a redraw cycle wearing work's clothes: dismissing the keyboard on
+    /// the way out of the app resizes the pty, the TUI repaints (a burst, so
+    /// "working"), goes quiet, and ~2s later manufactures a waiting edge —
+    /// which posted a notification every single time the user left the app.
+    /// Typing does the same dance turn-by-turn. A real "the agent finished
+    /// and needs you" follows sustained work, not a two-second repaint.
+    static let minimumWorkBeforeAlert: TimeInterval = 4
     /// Seams for the alert shell, injectable so tests never touch
     /// UNUserNotificationCenter. Defaults post through AgentAlertCenter.
     @ObservationIgnored var postAgentAlert: (AgentAlertPolicy.Trigger) -> Void = { _ in }
@@ -140,12 +150,18 @@ final class TerminalSession: Identifiable, Hashable {
     /// Every observed agent-status change funnels here — from the SSH byte
     /// heuristic and from meshyy's daemon events alike — so the notification
     /// decision exists exactly once.
-    func noteAgentStatus(_ status: AgentActivityMonitor.Status) {
+    func noteAgentStatus(_ status: AgentActivityMonitor.Status, now: Date = Date()) {
         defer { alertedAgentStatus = status }
+        if status == .working, alertedAgentStatus != .working {
+            workingSince = now
+        }
         if status != .none {
             AgentAlertCenter.shared.agentDetected()
         }
         guard status == .waiting, alertedAgentStatus != .waiting else { return }
+        // The filter: only sustained work earns an alert on its end.
+        guard let since = workingSince,
+              now.timeIntervalSince(since) >= Self.minimumWorkBeforeAlert else { return }
         postAgentAlert(.becameWaiting)
     }
 

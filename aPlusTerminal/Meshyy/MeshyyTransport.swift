@@ -136,9 +136,19 @@ final class MeshyyTransport {
         self.name = name
         (output, outputContinuation) = AsyncStream.makeStream(
             of: Data.self,
-            // Same bound and same reason as SSHConnection: a runaway remote must not be
-            // able to grow this without limit. Dropped bytes are the oldest backlog.
-            bufferingPolicy: .bufferingNewest(512)
+            // UNBOUNDED, unlike SSHConnection's stream, and the difference is the
+            // resume protocol. Every byte entering this stream has already been
+            // COUNTED into the session's consumedOffset, so the daemon will never
+            // replay it — a chunk dropped here is gone from the emulator forever.
+            // Under SSH a drop loses pixels until the next repaint; here it
+            // permanently desyncs the emulator from the session (content, and
+            // worse, mode-arming escapes: a dropped `?1000h` is a terminal whose
+            // swipes go dead until tmux next touches the mouse modes). The bound
+            // also protected nothing: MeshyySession's own event stream is
+            // unbounded one hop upstream for exactly this reason — "a slow
+            // consumer must fall behind, never lose bytes" (§6.4) — so the cap
+            // only added a second, silent place to lose what the first refused to.
+            bufferingPolicy: .unbounded
         )
     }
 
@@ -541,8 +551,15 @@ final class MeshyyTransport {
     /// DISARMED the very mode being asserted (measured: the arming test went
     /// red the moment this synthesis went live). Within the family: set the
     /// actives, and reset only when the whole family is off.
+    ///
+    /// 1006 (the SGR encoding) belongs to that special handling too, in
+    /// order: SwiftTerm reads `?1006l` as "mouse off" outright — it resets
+    /// `mouseMode`, not just the encoding — so the encoding must settle
+    /// BEFORE the family. Emitted after it, a reset of an inactive 1006
+    /// cancelled the very arming this synthesis exists to assert (a program
+    /// that arms mouse without SGR ended up believed off).
     static func modeEscapes(active: Set<Int>) -> Data {
-        var out = ""
+        var out = "\u{1B}[?1006\(active.contains(1006) ? "h" : "l")"
         let mouseFamily: [Int] = [1000, 1002, 1003]
         if mouseFamily.contains(where: active.contains) {
             for mode in mouseFamily where active.contains(mode) {
@@ -553,7 +570,7 @@ final class MeshyyTransport {
                 out += "\u{1B}[?\(mode)l"
             }
         }
-        for mode in [1, 1004, 1006, 2004] {
+        for mode in [1, 1004, 2004] {
             out += "\u{1B}[?\(mode)\(active.contains(mode) ? "h" : "l")"
         }
         return Data(out.utf8)

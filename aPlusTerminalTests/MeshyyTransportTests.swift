@@ -371,3 +371,66 @@ final class ResizeDuringBootstrapTests: XCTestCase {
         )
     }
 }
+
+/// The escapes synthesized from a daemon `modes` frame, checked against
+/// SwiftTerm's actual mode semantics — the emulator these bytes are for.
+@MainActor
+final class ModeSynthesisTests: XCTestCase {
+
+    // MARK: - Mode synthesis vs SwiftTerm's semantics
+
+    /// SwiftTerm's mouse-mode state machine, replicated for exactly the modes
+    /// `modeEscapes` can emit. The subtlety these tests exist for: SwiftTerm
+    /// treats `?1006l` (SGR encoding OFF) as "mouse off" — it resets
+    /// `mouseMode` outright, not just the encoding — so the ORDER of the
+    /// synthesized escapes decides whether an armed mouse survives them.
+    private func mouseOnAfter(_ escapes: Data) -> Bool {
+        var mouseOn = false
+        let text = String(decoding: escapes, as: UTF8.self)
+        var search = text[...]
+        while let start = search.range(of: "\u{1B}[?") {
+            let rest = search[start.upperBound...]
+            guard let end = rest.firstIndex(where: { $0 == "h" || $0 == "l" }) else { break }
+            let active = rest[end] == "h"
+            for piece in rest[..<end].split(separator: ";") {
+                switch Int(piece) {
+                case 1000, 1002, 1003:
+                    mouseOn = active           // any family reset disarms
+                case 1006 where !active:
+                    mouseOn = false            // SwiftTerm: ?1006l → mouseMode = .off
+                default:
+                    break
+                }
+            }
+            search = rest[rest.index(after: end)...]
+        }
+        return mouseOn
+    }
+
+    /// The tmux shape (mouse on arms 1000+1002+1006, measured on 3.6a): the
+    /// synthesis must leave the emulator armed.
+    func testModeSynthesisArmsTheTmuxSet() {
+        XCTAssertTrue(
+            mouseOnAfter(MeshyyTransport.modeEscapes(active: [1, 1000, 1002, 1006, 2004])),
+            "the modes tmux actually arms must synthesize to an armed emulator"
+        )
+    }
+
+    /// A program that arms mouse WITHOUT SGR encoding (X10-era arming): the
+    /// daemon reports {1000} and the synthesis must still leave the emulator
+    /// armed. The old escape order emitted `?1000h` and then `?1006l`, and
+    /// SwiftTerm reads that trailing `?1006l` as "mouse off" — the synthesis
+    /// disarmed the very mode it was asserting.
+    func testModeSynthesisCannotDisarmTheMouseItJustArmed() {
+        XCTAssertTrue(
+            mouseOnAfter(MeshyyTransport.modeEscapes(active: [1000])),
+            "?1006l must not follow the family arming it would cancel"
+        )
+    }
+
+    /// All off stays all off — the reset direction must not regress.
+    func testModeSynthesisStillDisarmsWhenEverythingIsOff() {
+        XCTAssertFalse(mouseOnAfter(MeshyyTransport.modeEscapes(active: [])))
+        XCTAssertFalse(mouseOnAfter(MeshyyTransport.modeEscapes(active: [2004, 1])))
+    }
+}

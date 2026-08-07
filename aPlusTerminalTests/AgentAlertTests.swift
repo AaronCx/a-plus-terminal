@@ -74,22 +74,33 @@ final class AgentTransitionTests: XCTestCase {
         )
     }
 
-    func testOnlyTheEdgeIntoWaitingFires() throws {
+    func testOnlyASustainedWorkingPhaseEarnsAnAlertOnItsEnd() throws {
         let session = bareSession()
         var fired: [AgentAlertPolicy.Trigger] = []
         session.postAgentAlert = { fired.append($0) }
+        let t0 = Date()
 
-        session.noteAgentStatus(.none)
-        session.noteAgentStatus(.working)
+        session.noteAgentStatus(.none, now: t0)
+        session.noteAgentStatus(.working, now: t0)
         XCTAssertEqual(fired, [], "working must never alert — it fires constantly")
-        session.noteAgentStatus(.waiting)
+
+        // The click-off shape: keyboard dismissal resizes the pty, the TUI
+        // repaints (2s of "work"), goes quiet, and manufactures a waiting
+        // edge. This posted a notification EVERY time the user left the app.
+        session.noteAgentStatus(.waiting, now: t0.addingTimeInterval(2))
+        XCTAssertEqual(fired, [], "a 2s repaint is not work; its end is not news")
+
+        // Typing's turn-by-turn oscillation: same filter, same silence.
+        session.noteAgentStatus(.working, now: t0.addingTimeInterval(3))
+        session.noteAgentStatus(.waiting, now: t0.addingTimeInterval(5.5))
+        XCTAssertEqual(fired, [], "turn-taking echo bursts must not alert")
+
+        // Real work: sustained, then finished — THIS is the notification.
+        session.noteAgentStatus(.working, now: t0.addingTimeInterval(10))
+        session.noteAgentStatus(.waiting, now: t0.addingTimeInterval(20))
         XCTAssertEqual(fired, [.becameWaiting])
-        session.noteAgentStatus(.waiting)
+        session.noteAgentStatus(.waiting, now: t0.addingTimeInterval(21))
         XCTAssertEqual(fired, [.becameWaiting], "still waiting is not newly waiting")
-        session.noteAgentStatus(.working)
-        session.noteAgentStatus(.waiting)
-        XCTAssertEqual(fired, [.becameWaiting, .becameWaiting],
-                       "a fresh edge is a fresh alert (the policy rate-limits it)")
     }
 }
 

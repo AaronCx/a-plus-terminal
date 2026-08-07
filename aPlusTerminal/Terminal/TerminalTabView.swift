@@ -383,7 +383,7 @@ struct SessionRow: View {
                 .fill(stateColor)
                 .frame(width: 9, height: 9)
             if settings.agentMascotIcons, let icon = session.effectiveAgentIconName {
-                Image(icon)
+                agentIconImage(icon)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 20, height: 20)
@@ -417,6 +417,16 @@ struct SessionRow: View {
             .buttonStyle(.borderless)
             .accessibilityLabel("Close Session")
         }
+    }
+
+    /// Custom user icon first (App Group), bundled asset second.
+    private func agentIconImage(_ iconName: String) -> Image {
+        let id = iconName.hasPrefix("agent-") ? String(iconName.dropFirst(6)) : iconName
+        if let url = CustomAgentIconStore.imageURL(for: id),
+           let ui = UIImage(contentsOfFile: url.path) {
+            return Image(uiImage: ui)
+        }
+        return Image(iconName)
     }
 
     private var stateColor: Color {
