@@ -1,6 +1,7 @@
 import ActivityKit
 import WidgetKit
 import SwiftUI
+import UIKit
 
 /// Lock Screen + Dynamic Island presentations for active SSH sessions (§4.5).
 struct SessionLiveActivity: Widget {
@@ -79,22 +80,42 @@ struct SessionLiveActivity: Widget {
     }
 }
 
-/// The detected agent's mascot mark, or the terminal glyph when none —
-/// the payload only carries an icon name when the user's toggle is on.
+/// The detected agent's icon, or the terminal glyph when none — the payload
+/// only carries an icon name when the user's toggle is on. A USER-SUPPLIED
+/// icon (App Group AgentIcons/<id>.png) wins over the bundled default, which
+/// is what lets users bring vendor art the app itself does not ship.
 struct AgentGlyph: View {
     let iconName: String?
     var size: CGFloat = 16
 
     var body: some View {
         if let iconName {
-            Image(iconName)
-                .resizable()
-                .scaledToFit()
-                .frame(width: size, height: size)
-                .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
+            if let custom = customImage(for: iconName) {
+                Image(uiImage: custom)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
+            } else {
+                Image(iconName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
+            }
         } else {
             Image(systemName: "terminal.fill")
         }
+    }
+
+    /// iconName is "agent-<profileID>"; the custom file is keyed by the id.
+    private func customImage(for iconName: String) -> UIImage? {
+        let id = iconName.hasPrefix("agent-") ? String(iconName.dropFirst(6)) : iconName
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.aaroncx.aplusterminal"
+        ) else { return nil }
+        let url = container.appendingPathComponent("AgentIcons/\(id).png")
+        return UIImage(contentsOfFile: url.path)
     }
 }
 
