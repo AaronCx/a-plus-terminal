@@ -109,16 +109,25 @@ final class AgentAlertCenter: NSObject {
     }
 }
 
-extension AgentAlertCenter: UNUserNotificationCenterDelegate {
+extension AgentAlertCenter: @preconcurrency UNUserNotificationCenterDelegate {
     /// A tap on the notification routes its deep link.
-    nonisolated func userNotificationCenter(
+    ///
+    /// NOT `nonisolated` — that one keyword was the crash-on-every-tap. The
+    /// compiler's ObjC bridge awaits this method and then invokes UIKit's
+    /// completion handler on whatever executor the task ended on; nonisolated
+    /// ended it on the cooperative pool, and UIKit's completion performs a
+    /// state-restoration snapshot that hard-asserts the main thread →
+    /// NSException → abort, ~70ms AFTER the deep link had already routed
+    /// successfully. Inheriting the class's @MainActor makes the bridge hop
+    /// to main before it calls back into UIKit. Reproduced 3-for-3 in the
+    /// simulator, with and without a matching server; the openurl path never
+    /// crashed because it has no UIKit completion to misdeliver.
+    func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
         let info = response.notification.request.content.userInfo
         guard let raw = info["url"] as? String, let url = URL(string: raw) else { return }
-        await MainActor.run {
-            AgentAlertCenter.shared.openURL?(url)
-        }
+        openURL?(url)
     }
 }

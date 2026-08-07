@@ -7,7 +7,8 @@ final class AgentActivityMonitorTests: XCTestCase {
 
     private let claudeCode = AgentProfile(
         id: "claude-code", displayName: "Claude Code",
-        detectionMarkers: ["claude code", "esc to interrupt"], attachTemplate: "{path} ")
+        detectionMarkers: ["claude code", "esc to interrupt"], attachTemplate: "{path} ",
+        busyMarkers: ["esc to interrupt"])
     private let hermes = AgentProfile(
         id: "hermes", displayName: "Hermes", detectionMarkers: ["hermes"], attachTemplate: "{path} ")
     private let generic = AgentProfile(
@@ -54,6 +55,29 @@ final class AgentActivityMonitorTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(monitor.status, .waiting)
         XCTAssertEqual(transitions, [.working, .waiting])
+    }
+
+    func testQuietWithBusyMarkerOnScreenStaysWorking() async {
+        // The false-notification report: a silent tool call — a build, a CI
+        // watch — kept the busy marker near the end of the stream, and quiet
+        // alone flagged the agent as waiting for a human nobody needed.
+        let monitor = explicitMonitor(quietInterval: 0.1)
+        var spinner = ""
+        for _ in 0..<20 { spinner += "\u{1B}[2K* Running tests… (esc to interrupt)\r" }
+        monitor.observe(bytes(spinner))
+        XCTAssertEqual(monitor.status, .working)
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.status, .working,
+                       "quiet with the busy marker showing must stay WORKING")
+
+        // The agent stops: its input box now occupies the end of the stream.
+        var prompt = String(repeating: "\u{2500}", count: 60)
+        prompt += "\n> Try \"fix the login bug\"\n"
+        prompt += String(repeating: "\u{2500}", count: 60) + "\n  ? for shortcuts\n"
+        monitor.observe(bytes(prompt))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.status, .waiting, "marker gone + quiet = genuinely waiting")
     }
 
     func testNewBurstAfterWaitingReturnsToWorking() async {
@@ -157,12 +181,21 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.status, .none, "a bare prompt after waiting clears the label")
     }
 
-    func testAgentIdleFrameWithoutPromptStaysWaiting() async {
+    func testAgentFrameWithBusyFooterStaysWorkingNotClearedNotWaiting() async {
+        // This fixture is a REAL captured frame: the input box with "esc to
+        // interrupt" still in the footer — the shape Claude Code shows while
+        // background work runs at the prompt. Two things must both hold:
+        // it is NOT a bare shell prompt (never cleared to .none — the frame's
+        // original guard), and since the busy-markers change it is NOT
+        // "waiting" either: the footer is the agent's own statement that its
+        // process is not done, and notifying a human here was the false
+        // "agent needs you" report.
         let monitor = explicitMonitor(quietInterval: 0.1)
         monitor.observe(bytes(String(repeating: "tokens ", count: 50)
             + "\r\n│ ❯ type a message │\r\n╰────╯ esc to interrupt"))
         try? await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertEqual(monitor.status, .waiting, "an agent input box is not a shell prompt")
+        XCTAssertEqual(monitor.status, .working,
+                       "busy footer showing: not done, not waiting, never .none")
     }
 
     func testStripANSIRemovesCSIAndOSC() {

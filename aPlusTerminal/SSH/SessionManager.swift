@@ -108,6 +108,14 @@ final class TerminalSession: Identifiable, Hashable {
     /// heuristic is a guess; nil over SSH or before the first event.
     private(set) var daemonAgentStatus: AgentActivityMonitor.Status?
     private(set) var daemonAgentName: String?
+    private(set) var daemonAgentID: String?
+
+    /// Asset name for the detected agent's mascot mark, when one is detected.
+    var effectiveAgentIconName: String? {
+        let id = (usesMeshyy ? daemonAgentID : nil) ?? agentMonitor.detected?.id
+        guard let id, id != "generic" else { return nil }
+        return "agent-\(id)"
+    }
 
     /// What the surfaces show: the daemon's read when there is one, the
     /// heuristic otherwise (the SSH path's fallback, per the brief).
@@ -175,9 +183,10 @@ final class TerminalSession: Identifiable, Hashable {
         transport.onQuickActions = { [weak self] actions in
             self?.offeredQuickActions = actions
         }
-        transport.onAgentStatus = { [weak self] status, name in
+        transport.onAgentStatus = { [weak self] status, id, name in
             guard let self else { return }
             self.daemonAgentStatus = status
+            self.daemonAgentID = id
             self.daemonAgentName = name
             self.noteAgentStatus(status)
             self.onStateChange?()   // repaint the rows that show it
@@ -1713,7 +1722,11 @@ final class SessionManager {
                         sessionState: stateString,
                         monitorStatus: monitorStatus
                     ),
-                    agentName: session.agentMonitor.detected?.displayName
+                    agentName: session.agentMonitor.detected?.displayName,
+                    // Only carried when the toggle is on: the widget renders
+                    // whatever it is handed, so the setting is enforced here.
+                    agentIconName: settings.agentMascotIcons
+                        ? session.effectiveAgentIconName : nil
                 )
             }
         activityController.update(with: summaries)

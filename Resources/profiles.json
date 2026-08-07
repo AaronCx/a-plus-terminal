@@ -10,42 +10,58 @@
     {
       "id": "claude-code",
       "displayName": "Claude Code",
-      "detectionMarkers": ["claude code", "esc to interrupt"],
+      "detectionMarkers": [
+        "claude code",
+        "esc to interrupt"
+      ],
       "attachTemplate": "{path} ",
-      "builtIn": true
+      "builtIn": true,
+      "busyMarkers": [
+        "esc to interrupt"
+      ]
     },
     {
       "id": "codex",
       "displayName": "Codex",
-      "detectionMarkers": ["codex"],
+      "detectionMarkers": [
+        "codex"
+      ],
       "attachTemplate": "{path} ",
       "builtIn": true
     },
     {
       "id": "aider",
       "displayName": "aider",
-      "detectionMarkers": ["aider"],
+      "detectionMarkers": [
+        "aider"
+      ],
       "attachTemplate": "/add {path}\n",
       "builtIn": true
     },
     {
       "id": "gemini-cli",
       "displayName": "Gemini CLI",
-      "detectionMarkers": ["gemini cli"],
+      "detectionMarkers": [
+        "gemini cli"
+      ],
       "attachTemplate": "{path} ",
       "builtIn": true
     },
     {
       "id": "opencode",
       "displayName": "opencode",
-      "detectionMarkers": ["opencode"],
+      "detectionMarkers": [
+        "opencode"
+      ],
       "attachTemplate": "{path} ",
       "builtIn": true
     },
     {
       "id": "hermes",
       "displayName": "Hermes",
-      "detectionMarkers": ["hermes"],
+      "detectionMarkers": [
+        "hermes"
+      ],
       "attachTemplate": "{path} ",
       "builtIn": true
     }

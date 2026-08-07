@@ -155,13 +155,27 @@ final class AgentActivityMonitor {
                 self.detected = self.explicitAgent
                 self.transition(to: .none)
             } else if self.status == .working {
-                self.transition(to: .waiting)
+                // Quiet is not waiting while the agent SAYS it is busy: a
+                // silent tool call keeps the profile's busy marker near the
+                // end of the stream (the spinner re-prints it). Same gate as
+                // meshyy's daemon-side monitor; bounded to the recent tail
+                // because bytes outlive the redraws that erased them.
+                if !self.tailShowsBusyMarker() {
+                    self.transition(to: .waiting)
+                }
             }
         }
     }
 
     private func tailShowsIdleShellPrompt() -> Bool {
         Self.endsAtShellPrompt(String(decoding: promptTail, as: UTF8.self))
+    }
+
+    private func tailShowsBusyMarker() -> Bool {
+        guard let markers = detected?.busyMarkers, !markers.isEmpty else { return false }
+        let stripped = Self.stripANSI(String(decoding: promptTail, as: UTF8.self)).lowercased()
+        let window = String(stripped.suffix(512))
+        return markers.contains { window.contains($0.lowercased()) }
     }
 
     /// True when the ANSI-stripped tail ends at a bare shell prompt (`%`,

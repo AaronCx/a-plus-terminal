@@ -13,7 +13,7 @@ struct SessionLiveActivity: Widget {
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 6) {
-                        Image(systemName: "terminal.fill")
+                        AgentGlyph(iconName: context.state.sessions.first?.agentIconName)
                         Text("a+Terminal")
                             .font(.headline)
                     }
@@ -46,7 +46,7 @@ struct SessionLiveActivity: Widget {
                     .padding(.horizontal, 4)
                 }
             } compactLeading: {
-                Image(systemName: "terminal.fill")
+                AgentGlyph(iconName: context.state.sessions.first?.agentIconName, size: 14)
                     .widgetURL(deepLink(for: context.state))
             } compactTrailing: {
                 // An agent waiting for input outranks the session count —
@@ -79,6 +79,25 @@ struct SessionLiveActivity: Widget {
     }
 }
 
+/// The detected agent's mascot mark, or the terminal glyph when none —
+/// the payload only carries an icon name when the user's toggle is on.
+struct AgentGlyph: View {
+    let iconName: String?
+    var size: CGFloat = 16
+
+    var body: some View {
+        if let iconName {
+            Image(iconName)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
+        } else {
+            Image(systemName: "terminal.fill")
+        }
+    }
+}
+
 struct SessionActivityRow: View {
     let session: SessionActivityAttributes.SessionSummary
 
@@ -97,6 +116,9 @@ struct SessionActivityRow: View {
                     Circle()
                         .fill(session.isConnected ? Color.green : Color.orange)
                         .frame(width: 8, height: 8)
+                }
+                if let icon = session.agentIconName {
+                    AgentGlyph(iconName: icon, size: 13)
                 }
                 Text(session.name)
                     .font(.subheadline.weight(.medium))
@@ -143,7 +165,7 @@ struct LockScreenSessionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Image(systemName: "terminal.fill")
+                AgentGlyph(iconName: state.sessions.first?.agentIconName)
                 Text(title)
                     .font(.headline)
                 Spacer()
