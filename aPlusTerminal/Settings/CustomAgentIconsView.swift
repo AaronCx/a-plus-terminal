@@ -8,8 +8,15 @@ import UniformTypeIdentifiers
 struct CustomAgentIconsView: View {
     @Environment(ProfileStore.self) private var profiles
 
-    @State private var importing: String?
+    /// Which agent the picker is choosing for. SEPARATE from the sheet's
+    /// presentation flag: the sheet's dismissal writes false through the
+    /// binding, and that write can land before the completion handler reads
+    /// the id — the pick silently did nothing. Presentation and payload are
+    /// now different variables so dismissal cannot erase the payload.
+    @State private var pendingAgent: String?
+    @State private var showImporter = false
     @State private var refresh = 0
+    @State private var importError: String?
 
     var body: some View {
         List {
@@ -26,8 +33,11 @@ struct CustomAgentIconsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Choose…") { importing = agent.id }
-                            .buttonStyle(.borderless)
+                        Button("Choose…") {
+                            pendingAgent = agent.id
+                            showImporter = true
+                        }
+                        .buttonStyle(.borderless)
                         if CustomAgentIconStore.imageURL(for: agent.id) != nil {
                             Button(role: .destructive) {
                                 CustomAgentIconStore.clear(for: agent.id)
@@ -41,22 +51,51 @@ struct CustomAgentIconsView: View {
                     }
                 }
             } footer: {
-                Text("Pick any image from Files (PNG with transparency looks best; it's stored square at 360px). Custom icons show in the session list and Live Activity, stay on this device, and never leave it.")
+                Text("Pick any image from Files (PNG with transparency looks best; it's stored square at 360px). Custom icons show in the session list and Live Activity when an agent is detected, stay on this device, and never leave it.")
+            }
+            if let importError {
+                Section {
+                    Text(importError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
         }
         .navigationTitle("Custom Agent Icons")
         .fileImporter(
-            isPresented: Binding(get: { importing != nil }, set: { if !$0 { importing = nil } }),
+            isPresented: $showImporter,
             allowedContentTypes: [.image]
         ) { result in
-            guard let id = importing else { return }
-            importing = nil
-            guard case .success(let url) = result else { return }
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            if let data = try? Data(contentsOf: url) {
-                CustomAgentIconStore.save(data, for: id)
-                refresh += 1
+            guard let id = pendingAgent else {
+                importError = "Lost track of which agent was being changed — try again."
+                return
+            }
+            pendingAgent = nil
+            switch result {
+            case .failure(let error):
+                importError = "Couldn't open that file: \(error.localizedDescription)"
+            case .success(let url):
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                // iCloud Drive files may not be materialized on this device;
+                // a plain read fails silently. Coordinated reading downloads
+                // and blocks until the bytes exist — the failure the silent
+                // path hid was exactly this.
+                var data: Data?
+                var coordError: NSError?
+                NSFileCoordinator().coordinate(
+                    readingItemAt: url, options: [], error: &coordError
+                ) { actual in
+                    data = try? Data(contentsOf: actual)
+                }
+                if let data, CustomAgentIconStore.save(data, for: id) {
+                    importError = nil
+                    refresh += 1
+                } else {
+                    importError = "Couldn't read \(url.lastPathComponent)"
+                        + (coordError.map { " — \($0.localizedDescription)" } ?? "")
+                        + ". If it's in iCloud, open it once in Files so it downloads, then retry."
+                }
             }
         }
     }
