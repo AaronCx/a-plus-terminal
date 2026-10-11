@@ -398,6 +398,45 @@ final class ScrollBridgeTraceTests: XCTestCase {
         XCTAssertEqual(record.totalBytes, h.sink.traced.reduce(0) { $0 + $1.data.count })
     }
 
+    func testMomentumIsRecordedAndClosesTheRecordWhenItDiesOut() async throws {
+        let h = makeHarness(tracer: true, escapes: mouseOn)
+        h.bridge.beginSwipe()
+        h.bridge.injectRelease(velocityY: 1500, at: touch)
+        let deadline = Date().addingTimeInterval(5)
+        while h.store.records.last?.endedAt == nil, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let record = try XCTUnwrap(h.store.records.last)
+        XCTAssertNotNil(record.endedAt, "momentum ending closes the record")
+        XCTAssertFalse(record.emissions.isEmpty)
+        XCTAssertTrue(record.emissions.allSatisfy(\.momentum))
+        XCTAssertTrue(record.emissions.allSatisfy(\.up), "a finger released moving down is wheel-up (natural scrolling)")
+    }
+
+    func testABridgeDeallocatedMidFlickStillClosesItsRecord() async throws {
+        let h = makeHarness(tracer: true, escapes: mouseOn)
+        let tracer = h.bridge.tracer
+        let store = h.store
+        // A second bridge on the same view that nothing but `bridge` holds.
+        var bridge: ScrollBridge? = ScrollBridge(sendData: { _ in }, wheelBridgeEnabled: { true })
+        weak var weakBridge = bridge
+        bridge?.attach(to: h.view)
+        bridge?.tracer = tracer
+        bridge?.sendTraced = { _, _ in }
+        bridge?.beginSwipe()
+        bridge?.injectRelease(velocityY: 3000, at: touch)
+        if let pan = h.view.priorityPan {
+            h.view.removeGestureRecognizer(pan)
+        }
+        bridge = nil
+        try XCTSkipIf(weakBridge != nil, "something still retains the bridge; cannot exercise dealloc")
+        let deadline = Date().addingTimeInterval(2)
+        while store.records.last?.endedAt == nil, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNotNil(store.records.last?.endedAt, "the momentum task closed the record without its bridge")
+    }
+
     func testANewSwipeClosesThePreviousRecord() throws {
         let h = makeHarness(tracer: true, escapes: mouseOn)
         h.bridge.beginSwipe()

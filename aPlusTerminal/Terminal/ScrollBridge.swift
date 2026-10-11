@@ -237,6 +237,13 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
         return emit(deltaY: up ? travel : -travel, location: point, traceID: traceID)
     }
 
+    /// Test/oracle seam: releases the finger at `velocityY` (points/s, UIKit
+    /// sign: positive = finger moving down = wheel up), running the SAME momentum decay
+    /// as a real pan's `.ended`. The gesture's record closes when it dies out.
+    func injectRelease(velocityY: CGFloat, at point: CGPoint) {
+        startMomentum(velocityY: velocityY, location: point)
+    }
+
     /// Closes the current gesture's trace record (the pan path does this when
     /// momentum ends or the pan cancels).
     func endSwipe() {
@@ -274,7 +281,15 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
     }
 
     @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
-        guard let view = terminalView else { return }
+        guard let view = terminalView else {
+            // The view went away mid-gesture: still close its record, or the
+            // trace shows a swipe that never finished.
+            switch pan.state {
+            case .ended, .cancelled, .failed: endSwipe()
+            default: break
+            }
+            return
+        }
         switch pan.state {
         case .began:
             momentumTask?.cancel()
@@ -337,6 +352,10 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
             return
         }
         let gestureTrace = traceID
+        // Held strongly: if the bridge is deallocated mid-flick (tab closed),
+        // deinit cancels this task and `self` is gone, but the gesture's
+        // record must still close — an open record reads as a stuck swipe.
+        let tracer = self.tracer
         momentumTask = Task { @MainActor [weak self] in
             var velocity = velocityY
             while !Task.isCancelled, abs(velocity) > 40 {
@@ -344,7 +363,11 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
                 velocity *= 0.92
                 try? await Task.sleep(for: .milliseconds(16))
             }
-            self?.finishTrace(gestureTrace)
+            if let self {
+                self.finishTrace(gestureTrace)
+            } else if let gestureTrace {
+                tracer?.end(gestureTrace)
+            }
         }
     }
 
