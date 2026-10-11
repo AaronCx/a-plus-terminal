@@ -23,17 +23,27 @@ enum BuildChannel: String, Codable, Sendable {
     }
 
     /// Synchronous, offline guess, good enough until `resolve()` answers.
-    /// TestFlight installs carry a sandbox receipt. `appStoreReceiptURL` is
-    /// deprecated since iOS 18; it is still the only synchronous signal.
+    /// TestFlight installs carry a sandbox receipt, App Store installs a
+    /// production one (the URL names the environment whether or not the file
+    /// exists yet). `appStoreReceiptURL` is deprecated since iOS 18; it is
+    /// still the only synchronous signal.
+    ///
+    /// App Review installs also report sandbox, so reviewers get the trace on
+    /// by default — on-device only, like everywhere else.
     static var synchronousHint: BuildChannel {
         #if DEBUG
         return .debug
         #else
-        if Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt" {
-            return .testFlight
-        }
-        return .unknown
+        return channel(forReceiptName: Bundle.main.appStoreReceiptURL?.lastPathComponent)
         #endif
+    }
+
+    static func channel(forReceiptName name: String?) -> BuildChannel {
+        switch name {
+        case "sandboxReceipt": return .testFlight
+        case "receipt": return .appStore
+        default: return .unknown
+        }
     }
 
     /// The authoritative answer, from StoreKit's signed app transaction.

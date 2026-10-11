@@ -151,8 +151,11 @@ final class AppSettings {
         #if DEBUG
         self.scrollTraceChannelDefault = true
         #else
-        self.scrollTraceChannelDefault = defaults.object(forKey: Keys.scrollTraceChannelDefault) as? Bool
-            ?? BuildChannel.synchronousHint.scrollTraceDefault
+        // A definite receipt wins over the cache: a TestFlight tester who
+        // installs the App Store build over it keeps UserDefaults (cached ON),
+        // and offline the async resolve can't correct it.
+        self.scrollTraceChannelDefault = BuildChannel.synchronousHint.scrollTraceDefault
+            ?? defaults.object(forKey: Keys.scrollTraceChannelDefault) as? Bool
             ?? false
         #endif
     }

@@ -226,6 +226,14 @@ final class ScrollTraceStoreTests: XCTestCase {
         XCTAssertFalse(ScrollTraceView.summary(of: makeRecord()).contains("finished"))
     }
 
+    func testReceiptNameMapsToTheChannel() {
+        XCTAssertEqual(BuildChannel.channel(forReceiptName: "sandboxReceipt"), .testFlight)
+        XCTAssertEqual(BuildChannel.channel(forReceiptName: "receipt"), .appStore)
+        XCTAssertEqual(BuildChannel.channel(forReceiptName: nil), .unknown)
+        XCTAssertEqual(BuildChannel.appStore.scrollTraceDefault, false)
+        XCTAssertEqual(BuildChannel.testFlight.scrollTraceDefault, true)
+    }
+
     func testSettingFollowsTheChannelUntilOverridden() {
         let suite = "ScrollTraceTests-channel-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
