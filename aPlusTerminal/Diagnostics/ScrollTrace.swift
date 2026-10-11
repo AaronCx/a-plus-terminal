@@ -24,6 +24,16 @@ enum ScrollTrace {
         case ssh, meshyy
     }
 
+    /// Where `session` came from — they are not equally trustworthy.
+    enum SessionSource: String, Codable, Sendable {
+        /// The meshyy session this tab is attached to (authoritative).
+        case meshyy
+        /// The server's persisted last-seen tmux/screen target: shared by all
+        /// of that server's tabs, refreshed only on keepalive ticks and never
+        /// cleared on detach, so it can name a session this tab is not in.
+        case serverLastMultiplexerTarget
+    }
+
     enum TransportState: String, Codable, Sendable {
         case connected, reconnecting, dead
     }
@@ -129,6 +139,9 @@ enum ScrollTrace {
         var server: String?
         var session: String?
         var transport: Transport
+        /// Which tab (TerminalSession.id) — two tabs on one server differ here.
+        var tabID: UUID?
+        var sessionSource: SessionSource?
         var meshyyUnavailableReason: String?
         var transportState: TransportState
         var rawSessionState: String
@@ -200,6 +213,7 @@ enum ScrollTrace {
 /// `TerminalSession` through a closure — `ScrollBridge` keeps no session
 /// reference.
 struct ScrollTraceContext {
+    var tabID: UUID? = nil
     struct PtyResize {
         var cols: Int
         var rows: Int
@@ -210,6 +224,7 @@ struct ScrollTraceContext {
 
     var server: String?
     var session: String?
+    var sessionSource: ScrollTrace.SessionSource? = nil
     var transport: ScrollTrace.Transport
     var meshyyUnavailableReason: String?
     var transportState: ScrollTrace.TransportState
@@ -668,6 +683,8 @@ final class ScrollGestureTracer {
             server: ctx?.server,
             session: ctx?.session,
             transport: ctx?.transport ?? .ssh,
+            tabID: ctx?.tabID,
+            sessionSource: ctx?.session == nil ? nil : ctx?.sessionSource,
             meshyyUnavailableReason: ctx?.meshyyUnavailableReason,
             transportState: ctx?.transportState ?? .dead,
             rawSessionState: ctx?.rawSessionState ?? "unknown",

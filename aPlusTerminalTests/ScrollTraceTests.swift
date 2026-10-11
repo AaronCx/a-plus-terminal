@@ -275,10 +275,11 @@ final class ScrollBridgeTraceTests: XCTestCase {
             settings: makeTraceSettings(enabled: tracing ?? false), directory: nil, observesKeyboard: false
         )
         if tracing != nil {
+            let tabID = self.tabID
             let framesAt = Date().addingTimeInterval(-2)
             bridge.tracer = ScrollGestureTracer(store: store) {
                 ScrollTraceContext(
-                    server: "probe", session: "aplus-test-0", transport: .meshyy,
+                    tabID: tabID, server: "probe", session: "aplus-test-0", sessionSource: .meshyy, transport: .meshyy,
                     meshyyUnavailableReason: nil, transportState: .connected,
                     rawSessionState: "connected", meshyyTransportFinished: false,
                     lastInboundBytesAt: framesAt, lastInboundFrameAt: nil,
@@ -291,6 +292,7 @@ final class ScrollBridgeTraceTests: XCTestCase {
         return Harness(view: view, bridge: bridge, store: store, sink: sink)
     }
 
+    private let tabID = UUID()
     private let mouseOn = "\u{1B}[?1000h\u{1B}[?1006h"
     private let altScreen = "\u{1B}[?1049h"
     private let touch = CGPoint(x: 500, y: 699)   // the very bottom of the view
@@ -327,6 +329,8 @@ final class ScrollBridgeTraceTests: XCTestCase {
         XCTAssertEqual(record.transport, .meshyy)
         XCTAssertEqual(record.server, "probe")
         XCTAssertEqual(record.session, "aplus-test-0")
+        XCTAssertEqual(record.sessionSource, .meshyy)
+        XCTAssertEqual(record.tabID, tabID)
         XCTAssertEqual(record.transportState, .connected)
         XCTAssertTrue(record.wheelBridgeEnabled)
         let belief = try XCTUnwrap(record.belief)

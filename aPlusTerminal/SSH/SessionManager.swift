@@ -450,9 +450,18 @@ final class TerminalSession: Identifiable, Hashable {
         if transportState == .connected, meshyy?.isFinished == true {
             transportState = .dead
         }
+        let session: String?
+        let sessionSource: ScrollTrace.SessionSource?
+        if let name = meshyy?.sessionName {
+            (session, sessionSource) = (name, .meshyy)
+        } else {
+            (session, sessionSource) = (server.lastMultiplexerTarget, .serverLastMultiplexerTarget)
+        }
         return ScrollTraceContext(
+            tabID: id,
             server: server.name,
-            session: meshyy?.sessionName ?? server.lastMultiplexerTarget,
+            session: session,
+            sessionSource: sessionSource,
             transport: usesMeshyy ? .meshyy : .ssh,
             meshyyUnavailableReason: meshyyUnavailable,
             transportState: transportState,
