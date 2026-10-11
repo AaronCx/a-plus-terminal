@@ -122,6 +122,10 @@ struct ScrollTraceView: View {
             if belief.isScrolledBack == true {
                 line += " scrolled-back"
             }
+            if let pty = record.lastPtyResize,
+               !pty.ok || pty.rows != belief.rows || pty.cols != belief.cols {
+                line += " · pty \(pty.cols)x\(pty.rows)\(pty.ok ? "" : " failed") vs \(belief.cols)x\(belief.rows)"
+            }
         }
         if record.totalBytes > 0 {
             line += " · \(record.totalBytes)B"

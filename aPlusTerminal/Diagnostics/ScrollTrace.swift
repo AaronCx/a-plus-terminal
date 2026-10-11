@@ -61,6 +61,9 @@ enum ScrollTrace {
         var rows: Int
         var cols: Int
         var keyboardVisible: Bool
+        /// Since the software keyboard last showed or hid — a toggle resizes
+        /// the pty, and tmux re-pulses its mouse modes on every WINCH.
+        var msSinceKeyboardChange: Int?
         var isFirstResponder: Bool
         /// Since the mouse mode last actually changed (not merely re-asserted).
         var msSinceMouseModeChange: Int?
@@ -107,6 +110,17 @@ enum ScrollTrace {
         var ageMs: Int
     }
 
+    /// The last pty size a transport was handed. Differing from the belief's
+    /// rows/cols = the far side's pty is not the size the wheel rows assume.
+    struct PtyResize: Codable, Equatable, Sendable {
+        var cols: Int
+        var rows: Int
+        var via: Transport
+        var ok: Bool
+        var error: String?
+        var ageMs: Int
+    }
+
     /// One gesture (or one declined gesture).
     struct Record: Codable, Equatable, Identifiable, Sendable {
         var id: UUID
@@ -147,6 +161,7 @@ enum ScrollTrace {
         var sentVia: Transport?
         var lastModesFrame: ModesFrame?
         var lastScreenModeFrame: ScreenModeFrame?
+        var lastPtyResize: PtyResize?
     }
 
     static func hex(_ data: Data) -> String {
@@ -185,6 +200,14 @@ enum ScrollTrace {
 /// `TerminalSession` through a closure — `ScrollBridge` keeps no session
 /// reference.
 struct ScrollTraceContext {
+    struct PtyResize {
+        var cols: Int
+        var rows: Int
+        var via: ScrollTrace.Transport
+        var error: String?
+        var at: Date
+    }
+
     var server: String?
     var session: String?
     var transport: ScrollTrace.Transport
@@ -193,6 +216,7 @@ struct ScrollTraceContext {
     var rawSessionState: String
     var meshyyTransportFinished: Bool?
     var lastInboundBytesAt: Date?
+    var lastPtyResize: PtyResize? = nil
     /// Pong-inclusive "last frame from the daemon" — nil until MeshyyKit
     /// exposes one (see TerminalSession.scrollTraceContext()).
     var lastInboundFrameAt: Date?
@@ -222,6 +246,7 @@ final class ScrollTraceStore {
     /// notifications (a hardware keyboard keeps this false while the terminal
     /// is first responder — the record carries both).
     @ObservationIgnored private(set) var keyboardVisible = false
+    @ObservationIgnored private(set) var keyboardChangedAt: Date?
 
     @ObservationIgnored let fileURL: URL?
     @ObservationIgnored private let settings: AppSettings
@@ -262,7 +287,11 @@ final class ScrollTraceStore {
         }
         if observesKeyboard {
             keyboardObservers = KeyboardObservers { [weak self] visible in
-                self?.keyboardVisible = visible
+                guard let self else { return }
+                if visible != self.keyboardVisible {
+                    self.keyboardChangedAt = Date()
+                }
+                self.keyboardVisible = visible
             }
         }
     }
@@ -654,6 +683,12 @@ final class ScrollGestureTracer {
             },
             lastScreenModeFrame: ctx?.lastScreenModeFrame.map {
                 .init(alt: $0.alt, ageMs: ScrollTrace.milliseconds(from: $0.at, to: at))
+            },
+            lastPtyResize: ctx?.lastPtyResize.map {
+                .init(
+                    cols: $0.cols, rows: $0.rows, via: $0.via, ok: $0.error == nil, error: $0.error,
+                    ageMs: ScrollTrace.milliseconds(from: $0.at, to: at)
+                )
             }
         )
     }
@@ -667,6 +702,7 @@ final class ScrollGestureTracer {
             rows: terminal.rows,
             cols: terminal.cols,
             keyboardVisible: store.keyboardVisible,
+            msSinceKeyboardChange: store.keyboardChangedAt.map { ScrollTrace.milliseconds(from: $0, to: at) },
             isFirstResponder: view.isFirstResponder,
             msSinceMouseModeChange: view.lastMouseModeChangeAt.map { ScrollTrace.milliseconds(from: $0, to: at) },
             previousMouseMode: view.previousMouseMode.map { String(describing: $0) },

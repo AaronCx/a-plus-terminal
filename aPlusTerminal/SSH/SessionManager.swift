@@ -273,6 +273,10 @@ final class TerminalSession: Identifiable, Hashable {
     @ObservationIgnored private(set) var lastModesFrame: (active: Set<Int>, at: Date)?
     @ObservationIgnored private(set) var lastScreenModeFrame: (alt: Bool, at: Date)?
     @ObservationIgnored private var scrollTracer: ScrollGestureTracer?
+    /// The last pty resize a transport was actually handed, and how it went.
+    /// A lost resize leaves tmux's pty smaller than the emulator, and wheel
+    /// events aimed below tmux's last row are dropped.
+    @ObservationIgnored private(set) var lastPtyResize: ScrollTraceContext.PtyResize?
 
     /// Detached sessions the daemon holds for this server, set while the connect is
     /// parked waiting for the user to choose — drives the survivor picker overlay.
@@ -455,6 +459,7 @@ final class TerminalSession: Identifiable, Hashable {
             rawSessionState: String(describing: state),
             meshyyTransportFinished: meshyy?.isFinished,
             lastInboundBytesAt: lastInboundBytesAt,
+            lastPtyResize: lastPtyResize,
             // LATER (meshyy 0.1.22): a pong-inclusive `lastInboundFrameAt`,
             // synchronously readable on MeshyySession, goes here. Until then
             // nil — the app never sees heartbeat pongs, so any app-side stamp
@@ -1475,10 +1480,31 @@ final class TerminalSession: Identifiable, Hashable {
             // Under meshyy the SSH connection has no pty, so resizing it alone would
             // send this nowhere — and this call's whole job is making the pty match the
             // screen before a multiplexer draws into it.
-            try? await meshyy.resize(cols: size.cols, rows: size.rows)
+            await deliverResize(cols: size.cols, rows: size.rows, via: meshyy, else: connection)
             return
         }
-        try? await connection.resize(cols: size.cols, rows: size.rows)
+        await deliverResize(cols: size.cols, rows: size.rows, via: nil, else: connection)
+    }
+
+    /// Hands a resize to the transport carrying the pty (meshyy if given,
+    /// else the SSH connection). Errors are swallowed exactly as before; the
+    /// outcome is only remembered for the scroll trace.
+    private func deliverResize(
+        cols: Int, rows: Int, via meshyy: MeshyyTransport?, else connection: SSHConnection
+    ) async {
+        var failure: String?
+        do {
+            if let meshyy {
+                try await meshyy.resize(cols: cols, rows: rows)
+            } else {
+                try await connection.resize(cols: cols, rows: rows)
+            }
+        } catch {
+            failure = String(describing: error)
+        }
+        lastPtyResize = .init(
+            cols: cols, rows: rows, via: meshyy != nil ? .meshyy : .ssh, error: failure, at: Date()
+        )
     }
 
     /// Single consumer for all outbound traffic — strict FIFO per session,
@@ -1514,11 +1540,7 @@ final class TerminalSession: Identifiable, Hashable {
                         enqueuedAt: enqueuedAt
                     )
                 case .resize(let cols, let rows):
-                    if let meshyy {
-                        try? await meshyy.resize(cols: cols, rows: rows)
-                    } else {
-                        try? await connection.resize(cols: cols, rows: rows)
-                    }
+                    await self.deliverResize(cols: cols, rows: rows, via: meshyy, else: connection)
                 }
             }
         }

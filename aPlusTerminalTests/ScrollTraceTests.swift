@@ -477,6 +477,34 @@ final class ScrollBridgeTraceTests: XCTestCase {
         XCTAssertNil(record.inboundBytesAfterSend)
     }
 
+    func testRecordCarriesTheLastDeliveredPtySizeAndKeyboardAge() throws {
+        let h = makeHarness(tracer: true, escapes: mouseOn)
+        let store = ScrollTraceStore(settings: makeTraceSettings(enabled: true), directory: nil)
+        let resizedAt = Date().addingTimeInterval(-1)
+        h.bridge.tracer = ScrollGestureTracer(store: store) {
+            ScrollTraceContext(
+                server: "probe", session: nil, transport: .ssh,
+                meshyyUnavailableReason: nil, transportState: .connected,
+                rawSessionState: "connected", meshyyTransportFinished: nil,
+                lastInboundBytesAt: nil,
+                lastPtyResize: .init(cols: 100, rows: 30, via: .ssh, error: "channelClosed", at: resizedAt)
+            )
+        }
+        NotificationCenter.default.post(name: UIResponder.keyboardWillShowNotification, object: nil)
+        h.bridge.beginSwipe()
+        let record = try XCTUnwrap(store.records.last)
+        let resize = try XCTUnwrap(record.lastPtyResize)
+        XCTAssertEqual(resize.rows, 30)
+        XCTAssertEqual(resize.cols, 100)
+        XCTAssertFalse(resize.ok)
+        XCTAssertEqual(resize.error, "channelClosed")
+        XCTAssertGreaterThanOrEqual(resize.ageMs, 900)
+        XCTAssertNotEqual(record.belief?.rows, resize.rows, "the mismatch a lost resize leaves is visible")
+        XCTAssertEqual(record.belief?.keyboardVisible, true)
+        XCTAssertLessThan(record.belief?.msSinceKeyboardChange ?? .max, 1000)
+        NotificationCenter.default.post(name: UIResponder.keyboardWillHideNotification, object: nil)
+    }
+
     func testEmissionsAreCappedPerRecordAndTheRestCounted() throws {
         let h = makeHarness(tracer: true, escapes: mouseOn)
         h.bridge.beginSwipe()
