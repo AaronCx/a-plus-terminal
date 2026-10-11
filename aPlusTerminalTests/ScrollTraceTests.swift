@@ -96,6 +96,10 @@ final class ScrollTraceStoreTests: XCTestCase {
         records.forEach(first.append)
         await first.flush()
         XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("trace.json").path))
+        XCTAssertEqual(
+            try? directory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true,
+            "the trace never rides along in an iCloud or Finder backup"
+        )
 
         let second = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
         XCTAssertTrue(second.records.isEmpty, "the load runs off the launch path")

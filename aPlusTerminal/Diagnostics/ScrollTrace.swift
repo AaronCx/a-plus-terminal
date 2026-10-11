@@ -490,9 +490,13 @@ private actor ScrollTraceFileWriter {
         guard generation > lastGeneration else { return }
         lastGeneration = generation
         do {
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-            )
+            var directory = url.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            // "Stored only on your iPhone" (privacy policy): keep it out of
+            // iCloud and Finder backups too.
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? directory.setResourceValues(values)
             struct File: Encodable {
                 var schema: Int
                 var records: [ScrollTrace.Record]
