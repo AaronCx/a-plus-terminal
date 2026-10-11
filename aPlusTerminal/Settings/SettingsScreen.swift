@@ -80,6 +80,8 @@ struct SettingsScreen: View {
                     Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server. Agent icons: sessions and the Live Activity show the detected agent's icon instead of the terminal glyph. Agent names, icons and mascots are trademarks or artwork of their respective owners; a+Terminal is independent and not affiliated with, sponsored by, or endorsed by any of them.")
                 }
 
+                NotificationSettingsSection()
+
                 Section {
                     Toggle("Send scroll as mouse wheel in full-screen apps", isOn: $settings.scrollWheelBridge)
                     Toggle("Auto-reattach multiplexer", isOn: $settings.autoReattachMultiplexer)

@@ -183,6 +183,9 @@ final class TerminalSession: Identifiable, Hashable {
     /// back inside that window is its reply to a query in the output (DA,
     /// XTVERSION, colors) — the terminal talking, not the user.
     @ObservationIgnored var isFeedingOutput = false
+    /// The one-time "how to get notified" card, raised the first time Claude
+    /// Code is detected in any session.
+    var showNotificationSetupCard = false
     /// Test seam: every write to the pty, and whether it counted as the
     /// user's answer.
     @ObservationIgnored var onSendInput: ((Data, Bool) -> Void)?
@@ -213,9 +216,14 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     /// A named agent is running here: the moment notifications become
-    /// meaningful, so ask for permission now (once per process).
+    /// meaningful, so ask for permission now (once per process), and show
+    /// Claude Code users the one setting that makes it ring.
     private func noteNamedAgent(_ agent: String) {
         AgentAlertCenter.shared.agentDetected()
+        if agent == "claude-code", !settings.notificationSetupCardShown {
+            settings.notificationSetupCardShown = true
+            showNotificationSetupCard = true
+        }
     }
 
     /// Why a signal did or did not reach the alert policy.

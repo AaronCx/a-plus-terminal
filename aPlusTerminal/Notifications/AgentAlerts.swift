@@ -193,6 +193,46 @@ final class AgentAlertCenter: NSObject {
     func sessionClosed(_ sessionID: UUID) {
         policy.forget(session: sessionID)
     }
+
+    // MARK: - Test notification
+
+    static let testNotificationID = "agent-test"
+    /// Long enough to leave the app and see it land on the Lock Screen or as
+    /// a banner; it also shows in the foreground (see `willPresent`).
+    static let testNotificationDelay: TimeInterval = 5
+
+    enum TestNotificationResult: Equatable {
+        case scheduled
+        /// Notifications are off for the app; only iOS Settings can fix it.
+        case denied
+    }
+
+    /// Settings → Notifications → "Send test notification": asks for
+    /// permission if it was never asked, then schedules a clearly-labelled
+    /// notification a few seconds out.
+    func sendTestNotification() async -> TestNotificationResult {
+        let center = UNUserNotificationCenter.current()
+        var status = await center.notificationSettings().authorizationStatus
+        if status == .notDetermined {
+            authorizationRequested = true
+            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+            status = await center.notificationSettings().authorizationStatus
+        }
+        guard status == .authorized || status == .provisional || status == .ephemeral else {
+            return .denied
+        }
+        let content = UNMutableNotificationContent()
+        content.title = "Test notification"
+        content.body = "This is how a+Terminal tells you an agent needs you."
+        content.sound = .default
+        try? await center.add(UNNotificationRequest(
+            identifier: Self.testNotificationID,
+            content: content,
+            trigger: UNTimeIntervalNotificationTrigger(timeInterval: Self.testNotificationDelay, repeats: false)
+        ))
+        agentAlertLog.notice("test notification scheduled")
+        return .scheduled
+    }
 }
 
 extension AgentAlertCenter: @preconcurrency UNUserNotificationCenterDelegate {
@@ -208,6 +248,16 @@ extension AgentAlertCenter: @preconcurrency UNUserNotificationCenterDelegate {
     /// to main before it calls back into UIKit. Reproduced 3-for-3 in the
     /// simulator, with and without a matching server; the openurl path never
     /// crashed because it has no UIKit completion to misdeliver.
+    /// Agent alerts never reach here — the policy does not post while the
+    /// app is active — but the test notification may land with the user
+    /// still in Settings, and a test that shows nothing proves nothing.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        notification.request.identifier == Self.testNotificationID ? [.banner, .list, .sound] : []
+    }
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse

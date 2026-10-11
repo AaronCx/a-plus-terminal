@@ -34,6 +34,13 @@ struct TerminalScreen: View {
                     }
                     Spacer()
                 }
+            } else if session.showNotificationSetupCard {
+                VStack {
+                    NotificationSetupCard {
+                        session.showNotificationSetupCard = false
+                    }
+                    Spacer()
+                }
             }
 
             switch session.state {

@@ -330,6 +330,60 @@ final class AgentTransitionTests: XCTestCase {
     }
 }
 
+/// The "how to get notified" card: once, the first time Claude Code shows up
+/// in ANY session, and never for other agents.
+@MainActor
+final class NotificationSetupCardTests: XCTestCase {
+    private let claudeCode = AgentProfile(
+        id: "claude-code", displayName: "Claude Code",
+        detectionMarkers: ["claude code"], attachTemplate: "{path} ")
+    private let hermes = AgentProfile(
+        id: "hermes", displayName: "Hermes", detectionMarkers: ["hermes"], attachTemplate: "{path} ")
+
+    private func session(_ settings: AppSettings) -> TerminalSession {
+        let temporary = FileManager.default.temporaryDirectory
+        let suffix = UUID().uuidString
+        return TerminalSession(
+            server: Server(name: "t", host: "127.0.0.1", username: "t"),
+            keyStore: KeyStore(secrets: InMemorySecretStore(),
+                               metadataURL: temporary.appendingPathComponent("ck-\(suffix).json")),
+            serverStore: ServerStore(fileURL: temporary.appendingPathComponent("cs-\(suffix).json")),
+            passwords: PasswordStore(secrets: InMemorySecretStore()),
+            settings: settings,
+            profiles: ProfileStore(
+                agents: [claudeCode, hermes],
+                multiplexers: [MultiplexerProfile(id: "none", displayName: "None (raw shell)")]
+            )
+        )
+    }
+
+    func testShownOnceForTheFirstClaudeCodeOnly() throws {
+        let settings = AppSettings(defaults: UserDefaults(suiteName: "SetupCard-\(UUID().uuidString)")!)
+
+        let other = session(settings)
+        other.agentMonitor.observe(Array("hermes ready".utf8))
+        other.noteAgentStatus(.none)
+        XCTAssertFalse(other.showNotificationSetupCard, "the card is about Claude Code's setting")
+
+        let first = session(settings)
+        first.noteAgentStatus(.none)
+        XCTAssertFalse(first.showNotificationSetupCard, "nothing detected yet")
+        first.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
+        first.noteAgentStatus(.none)
+        XCTAssertTrue(first.showNotificationSetupCard)
+        XCTAssertTrue(settings.notificationSetupCardShown)
+
+        let second = session(settings)
+        second.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
+        second.noteAgentStatus(.none)
+        XCTAssertFalse(second.showNotificationSetupCard, "shown once, ever — Settings keeps it reachable")
+    }
+
+    func testTheCopiedTextIsTheSetting() {
+        XCTAssertEqual(AgentNotificationSetup.settingLine, #""preferredNotifChannel": "terminal_bell""#)
+    }
+}
+
 /// The daemon's read outranks the heuristic exactly when meshyy carries the
 /// session.
 @MainActor
