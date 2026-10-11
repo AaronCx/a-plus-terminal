@@ -141,6 +141,57 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(skipped.detected?.id, "claude-code", "a cursor-forward over a space is still a space")
     }
 
+    // MARK: - Custom agents
+
+    private let fakeAgent = AgentProfile(
+        id: "custom-fake-agent-abc123", displayName: "Fake Agent",
+        detectionMarkers: ["fakeagent v1 ready", "fakeagent"], attachTemplate: "{path} ", builtIn: false)
+
+    private func autoWithCustom() -> AgentActivityMonitor {
+        AgentActivityMonitor(candidates: [claudeCode, hermes, generic, fakeAgent])
+    }
+
+    func testCustomMarkerLatchesCustomProfile() {
+        let monitor = autoWithCustom()
+        var changes = 0
+        monitor.onDetectedChange = { changes += 1 }
+        monitor.observe(bytes("FakeAgent v1 ready\n"))
+        XCTAssertEqual(monitor.detected?.id, "custom-fake-agent-abc123")
+        XCTAssertEqual(monitor.detected?.displayName, "Fake Agent")
+        XCTAssertEqual(changes, 1, "the latch is reported even though status never changed")
+        XCTAssertEqual(monitor.status, .none, "a short banner is not a working burst")
+    }
+
+    func testCommandNameMarkerMatchesThroughColorizedEcho() {
+        // zsh syntax highlighting re-draws the typed command with color codes
+        // spliced in; the raw bytes never contain "fakeagent" contiguously.
+        let monitor = autoWithCustom()
+        monitor.observe(bytes("\u{1B}[1m\u{1B}[32mfake\u{1B}[39m\u{1B}[0m\u{1B}[32magent\u{1B}[39m --serve"))
+        XCTAssertEqual(monitor.detected?.id, "custom-fake-agent-abc123")
+    }
+
+    func testColorizedMarkerSplitAcrossChunksStillLatches() {
+        var bannerOnly = fakeAgent
+        bannerOnly.detectionMarkers = ["fakeagent v1 ready"]
+        let monitor = AgentActivityMonitor(candidates: [claudeCode, generic, bannerOnly])
+        monitor.observe(bytes("\u{1B}[38;5;208mFake"))
+        monitor.observe(bytes("\u{1B}[0mAgent v1 re"))
+        XCTAssertNil(monitor.detected, "not yet: the banner is incomplete")
+        monitor.observe(bytes("ady\u{1B}[K\r\n"))
+        XCTAssertEqual(monitor.detected?.id, "custom-fake-agent-abc123")
+    }
+
+    func testBuiltInMarkerStillWinsAndStillNeedsItsOwnText() {
+        // Stripping escapes must not let a built-in match where it didn't
+        // before, nor change which profile wins on a plain banner.
+        let monitor = autoWithCustom()
+        monitor.observe(bytes("\u{1B}[1mClaude Code\u{1B}[0m v2\n"))
+        XCTAssertEqual(monitor.detected?.id, "claude-code")
+        let quiet = autoWithCustom()
+        quiet.observe(bytes("\u{1B}[31merror:\u{1B}[0m nothing here\n"))
+        XCTAssertNil(quiet.detected)
+    }
+
     func testEmptyCandidatesDisablesDetection() {
         let monitor = AgentActivityMonitor(candidates: [])
         monitor.observe(bytes("Claude Code\n"))

@@ -1,3 +1,4 @@
+import ActivityKit
 import XCTest
 import Citadel
 import CryptoKit
@@ -631,6 +632,41 @@ final class SessionManagerTests: XCTestCase {
             self.manager.gracePreambleFinished
         }
         manager.appWillEnterForeground()  // release the background task
+    }
+
+    /// Custom agents reach the Live Activity: a custom profile's marker in
+    /// the session's OUTPUT latches it — with no status transition, the
+    /// banner is far below the burst threshold — and the running Activity's
+    /// content carries "agent-<id>", the name the widget resolves to the
+    /// user's PNG (or the generic doodle). Real ActivityKit, in-process SSH.
+    func testCustomAgentLatchReachesLiveActivityIconName() async throws {
+        try XCTSkipUnless(
+            ActivityAuthorizationInfo().areActivitiesEnabled,
+            "Live Activities are not enabled in this simulator environment"
+        )
+        let custom = AgentProfile(
+            id: "custom-echo-bot-q1w2e3", displayName: "Echo Bot",
+            detectionMarkers: ["echobot v1 ready"], attachTemplate: "{path} ", builtIn: false)
+        profiles = ProfileStore(agents: profiles.agents + [custom], multiplexers: profiles.multiplexers)
+        manager = SessionManager(
+            keyStore: keyStore, serverStore: serverStore,
+            passwords: PasswordStore(secrets: InMemorySecretStore()),
+            settings: settings, profiles: profiles)
+
+        let session = manager.open(server: makeServer())
+        try await waitFor("session to connect") { session.state == .connected }
+        // The recording shell echoes stdin back as output.
+        session.sendInput(Data("EchoBot v1 ready\n".utf8))
+        try await waitFor("custom marker to latch") { session.agentMonitor.detected?.id == custom.id }
+        XCTAssertEqual(session.agentMonitor.status, .none, "latched without any status transition")
+
+        let expected = "agent-\(custom.id)"
+        try await waitFor("Live Activity to carry the custom icon name", timeout: 5) {
+            Activity<SessionActivityAttributes>.activities.contains { activity in
+                activity.content.state.sessions.contains { $0.id == session.id && $0.agentIconName == expected }
+            }
+        }
+        manager.closeAll()
     }
 }
 
