@@ -24,9 +24,11 @@ App Store candidates are cut with `scripts/ship-testflight.sh <build> --app-stor
 It archives the `aPlusTerminalAppStore` scheme, which is built without the
 `MESHYY` condition and without the Meshyy package, so meshyy is not in the
 binary at all (App Review tests the exact uploaded binary; a runtime "off" is
-not enough). On top of the usual gates it refuses a dirty tree, requires 0
-`@rpath` references, runs `scripts/check-no-meshyy.sh` on the archived app,
-and writes "App Store candidate" into the build's TestFlight What to Test
+not enough). On top of the usual gates it refuses a dirty tree or a local
+`develop` that differs from `origin/develop`, runs `scripts/check-no-meshyy.sh`
+on a Debug simulator build of the same commit (only an unoptimized binary
+shows short UI strings) and on the archived app, requires 0 `@rpath`
+references, and writes "App Store candidate" into the build's TestFlight What to Test
 notes. The candidate Aaron tests is the build that gets submitted; any change
 after his review means a new candidate. Archives are kept in
 `~/Library/Developer/Xcode/Archives/aPlusTerminal/`.

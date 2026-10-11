@@ -8,10 +8,12 @@
 #
 # --app-store cuts an App Store CANDIDATE instead of a beta: it archives the
 # aPlusTerminalAppStore scheme (no MESHYY condition, no Meshyy package),
-# refuses a dirty tree at every step, proves the archived binary with
-# scripts/check-no-meshyy.sh and an @rpath count of 0, and writes "App Store
-# candidate" into the build's TestFlight What to Test notes. The build Aaron
-# tests is then the exact build that gets submitted.
+# refuses a dirty tree or a local develop that differs from origin/develop at
+# every step, proves meshyy is absent with scripts/check-no-meshyy.sh on both
+# a Debug simulator build of the same commit and the archived binary, requires
+# an @rpath count of 0, and writes "App Store candidate" into the build's
+# TestFlight What to Test notes. The build Aaron tests is then the exact build
+# that gets submitted.
 #
 # Machine-local prerequisites (this is Aaron's Mac Mini pipeline; runs nowhere
 # else): relay-ci.keychain + ~/.appstoreconnect key/pass files, full Xcode at
@@ -51,6 +53,7 @@ fi
 ARCHIVE_DIR="$HOME/Library/Developer/Xcode/Archives/aPlusTerminal"
 ARCHIVE="$ARCHIVE_DIR/$ARCHIVE_NAME.xcarchive"
 ARCHIVE_LOG="$ARCHIVE_DIR/$ARCHIVE_NAME.log"
+SIM_LOG="$ARCHIVE_DIR/$ARCHIVE_NAME-sim.log"
 GIT_ID=(-c user.name="Aaron Character" -c user.email="116983481+AaronCx@users.noreply.github.com")
 
 die() {
@@ -66,6 +69,17 @@ require_clean() {
   local dirty
   dirty=$(git status --porcelain) || die "git status failed ($1)"
   [[ -z "$dirty" ]] || die "working tree dirty $1 — commit or remove first: $(head -5 <<<"$dirty" | tr '\n' ' ')"
+}
+
+# ...and "committed on develop" means on GitHub's develop, where CI ran: a
+# local commit that was never pushed would otherwise ride into the candidate
+# (`git pull` succeeds as a no-op when local is merely ahead).
+require_synced() {
+  local head origin
+  head=$(git rev-parse HEAD) || die "git rev-parse HEAD failed ($1)"
+  origin=$(git rev-parse origin/develop) || die "git rev-parse origin/develop failed ($1)"
+  [[ "$head" == "$origin" ]] \
+    || die "local develop ${head:0:9} differs from origin/develop ${origin:0:9} $1 — push or reset it first"
 }
 
 # asc_call METHOD PATH [JSON_BODY] — one App Store Connect API request.
@@ -150,8 +164,11 @@ else
   [[ -z "$(git status --porcelain)" ]] || die "working tree dirty — commit/stash first"
 fi
 git checkout develop >/dev/null 2>&1 || die "git checkout develop failed (is develop checked out in another worktree?)"
-git pull >/dev/null 2>&1 || die "git pull on develop failed"
-[[ $APP_STORE -eq 1 ]] && require_clean "after checkout/pull of develop"
+git pull --ff-only >/dev/null 2>&1 || die "git pull --ff-only on develop failed (diverged from origin/develop?)"
+if [[ $APP_STORE -eq 1 ]]; then
+  require_clean "after checkout/pull of develop"
+  require_synced "after pull"
+fi
 mkt=$(grep -E '^\s*MARKETING_VERSION:' project.yml | head -1 | awk '{print $2}' | tr -d '"')
 live=$(curl -sf -m 20 "https://itunes.apple.com/lookup?id=$APP_ID" | python3 -c "import json,sys; r=json.load(sys.stdin)['results']; print(r[0]['version'] if r else '0')")
 if [[ -z "$mkt" ]]; then die "could not read MARKETING_VERSION from project.yml"; fi
@@ -178,15 +195,32 @@ if [[ "$cur" != "$BUILD_N" ]]; then
   gh pr checks "$pr_num" --watch --fail-fast --interval 15 || die "CI red on bump PR #$pr_num — fix and re-run"
   gh pr merge "$pr_num" --squash --delete-branch >/dev/null || die "merge of PR #$pr_num failed"
   git checkout develop >/dev/null 2>&1 || die "git checkout develop failed after merging PR #$pr_num"
-  git pull >/dev/null 2>&1 || die "git pull on develop failed after merging PR #$pr_num"
+  git pull --ff-only >/dev/null 2>&1 || die "git pull --ff-only on develop failed after merging PR #$pr_num"
   make generate >/dev/null || die "make generate failed"
 else
   echo "CURRENT_PROJECT_VERSION already $BUILD_N — skipping bump PR"
   make generate >/dev/null || die "make generate failed"
 fi
-# Generation writes only gitignored files; anything else showing up here would
-# be built into the candidate without being on develop.
-[[ $APP_STORE -eq 1 ]] && require_clean "after make generate"
+if [[ $APP_STORE -eq 1 ]]; then
+  # Generation writes only gitignored files; anything else showing up here
+  # would be built into the candidate without being on develop.
+  require_clean "after make generate"
+  require_synced "after make generate"
+
+  # [2b] meshyy is compiled out — proven on a Debug simulator build of this
+  # same commit, BEFORE the archive. The archive gets the same check in [5e],
+  # but a Release (-O) binary folds string literals of 15 bytes or fewer
+  # ("Use meshyy", "Still Running", "Scroll trace"…) into immediates that
+  # `strings` cannot see; only an -Onone build shows every copy needle. Same
+  # targets CI runs, same DerivedData.
+  echo "Building $SCHEME for the simulator (Debug) for the copy-needle check"
+  mkdir -p "$ARCHIVE_DIR" || die "could not create $ARCHIVE_DIR"
+  make build-appstore >"$SIM_LOG" 2>&1 \
+    || { tail -20 "$SIM_LOG" >&2; die "simulator build of $SCHEME failed — see $SIM_LOG"; }
+  make check-appstore \
+    || die "check-no-meshyy.sh FAILED on the Debug simulator build of $SCHEME — meshyy is in the App Store candidate; do not upload"
+  require_clean "after the simulator build"
+fi
 
 # [3] Keychain
 security unlock-keychain -p "$(cat "$HOME/.appstoreconnect/relay-ci-keychain-pass")" relay-ci.keychain \
@@ -252,7 +286,8 @@ if [[ $APP_STORE -eq 1 ]]; then
   [[ "$rpaths" -eq 0 ]] || die "dyld gate: App Store candidate binary has $rpaths @rpath reference(s); expected 0"
   echo "dyld gate: 0 @rpath references in $(basename "$app_bin")"
 
-  # [5e] meshyy is compiled out — proven on the archived binary itself.
+  # [5e] meshyy is compiled out — proven on the archived binary itself (the
+  # copy needles of 15 bytes or fewer were proven on the -Onone build in [2b]).
   "$REPO_DIR/scripts/check-no-meshyy.sh" "$app_dir" \
     || die "check-no-meshyy.sh FAILED on $app_dir — meshyy is in the App Store candidate; do not upload"
 fi
@@ -318,7 +353,7 @@ for i in $(seq 1 60); do
       && die "$LABEL is VALID but its What to Test notes could not be written ($notes_err) — set \"$WHAT_TO_TEST\" before handing it to Aaron"
     if [[ $APP_STORE -eq 1 ]]; then
       title="App Store candidate build $BUILD_N VALID"
-      default_body="App Store candidate $mkt (build $BUILD_N) processed clean in ~$((i / 2)) min. meshyy is compiled out (check-no-meshyy.sh passed on the archive) and What to Test says so. This is the exact build that will be submitted — state build $BUILD_N when testing."
+      default_body="App Store candidate $mkt (build $BUILD_N) processed clean in ~$((i / 2)) min. meshyy is compiled out (check-no-meshyy.sh passed on the archive and on a Debug build of the same commit) and What to Test says so. This is the exact build that will be submitted — state build $BUILD_N when testing."
     else
       title="TestFlight build $BUILD_N VALID"
       default_body="Upload processed clean in ~$((i / 2)) min. Install via TestFlight — state the build number when testing."
