@@ -41,6 +41,23 @@
 #     the Add Server discovery screen.
 # Neither is QUIC and neither leaves the local network.
 #
+# Limits, read before trusting a PASS:
+#   - Run it on an UNOPTIMIZED (-Onone, Debug) build as well as the archive.
+#     A Release (-O) binary folds Swift string literals of 15 bytes or fewer
+#     into immediates that `strings` cannot see, so on an archive the short
+#     needles ("Use meshyy", "meshyyd", "Still Running", "Resume Session",
+#     "Scroll trace") prove nothing. CI and `ship-testflight.sh --app-store`
+#     run it on the Debug simulator build for that reason; type names and
+#     longer copy are still visible in Release.
+#   - Absolute build paths compiled into the binary (BoringSSL's __FILE__
+#     strings under SourcePackages/checkouts/swift-crypto survive Release) are
+#     cut back to the part from their first SourcePackages/ or Build/ on, so
+#     a DerivedData directory with "meshyy" in its name cannot fail the check,
+#     while a checkout of the meshyy package itself
+#     (SourcePackages/checkouts/meshyy) still does. Any other absolute path is
+#     kept whole: a source checkout whose own path contains "meshyy" fails
+#     (on the safe side).
+#
 # `test && pass || fail` is a real if/else here: pass() only echoes.
 # shellcheck disable=SC2015
 set -uo pipefail
@@ -94,9 +111,15 @@ while IFS= read -r -d '' f; do
 done < <(find "$app" -type f ! -path '*/_CodeSignature/*' -print0)
 
 echo "Mach-O files scanned: ${#machos[@]}"
+# strings -a, with absolute build paths cut back to SourcePackages/… or Build/…
+# (see "Limits" above).
+bundle_strings() {
+    strings -a "$1" | perl -pe 's#^/.*?/(SourcePackages|Build)/#$1/#'
+}
+
 for bin in "${machos[@]}"; do
     rel="${bin#"$app"/}"
-    s=$(strings -a "$bin")
+    s=$(bundle_strings "$bin")
     n=$(grep -ci meshyy <<<"$s")
     [[ "$n" -eq 0 ]] && pass "$rel: 0 \"meshyy\" strings" \
         || fail "$rel: $n \"meshyy\" strings, e.g. $(grep -i meshyy <<<"$s" | head -3 | tr '\n' ' ')"
@@ -116,7 +139,7 @@ done
 # Text resources (privacy policy, notices, profiles.json, App Intents metadata…).
 text_hits=0
 for f in "${texts[@]}"; do
-    s=$(strings -a "$f")
+    s=$(bundle_strings "$f")
     if grep -qi meshyy <<<"$s"; then fail "${f#"$app"/}: mentions meshyy"; text_hits=1; fi
     for needle in "${copy_needles[@]}"; do
         if grep -qF -- "$needle" <<<"$s"; then fail "${f#"$app"/}: UI copy \"$needle\" present"; text_hits=1; fi
