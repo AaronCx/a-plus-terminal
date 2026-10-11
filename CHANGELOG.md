@@ -16,11 +16,17 @@ unreleased work accumulates at the top.
   `exit` closes the tab like a real terminal, and a resumed terminal
   re-learns the running program's input modes, so tmux scrolling still
   works after an auto-resume. Off by default. (#131, #137)
-- **Agent notifications:** the phone tells you when an agent is waiting on
-  an answer, and one tap answers it from a quick-actions palette. A wait
-  you have already seen stays quiet until you answer, and quiet output is
-  no longer mistaken for "waiting". Agent status is surfaced where you
-  are already looking. (#132, #138, #139, #140, #143, #149)
+- **Agent notifications:** the phone tells you when an agent asks for
+  you — only when the agent itself signals it (the terminal bell, or an
+  OSC 9 / OSC 777 / OSC 7501 notification sequence), never by guessing
+  from its output, so leaving the app no longer produces a notification.
+  Claude Code needs one setting on the server, which a one-time card
+  (also in Settings → Notifications) shows with a Copy button; Settings
+  also sends a test notification. A ring you have already seen stays
+  quiet until you answer. Notifications arrive only while a+Terminal is
+  still running: briefly after you leave it, or while a pop-out is
+  showing. Agent status is surfaced where you are already looking.
+  (#132, #138, #139, #140, #143, #149)
 - **Sessions widget:** a home-screen widget that lists live sessions and
   opens exactly the session it shows. (#135, #136)
 - **Agent icons:** agents get their real faces across the app, with a
