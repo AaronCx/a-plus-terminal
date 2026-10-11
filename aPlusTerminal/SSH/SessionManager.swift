@@ -1353,6 +1353,7 @@ final class TerminalSession: Identifiable, Hashable {
                 guard let self, !Task.isCancelled else { return }
                 let bytes = [UInt8](chunk)
                 self.lastInboundBytesAt = Date()
+                self.scrollTracer?.noteInbound(byteCount: bytes.count)
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
                 // No noteAgentStatus here: under meshyy the daemon's agent
@@ -1529,6 +1530,7 @@ final class TerminalSession: Identifiable, Hashable {
                 guard let self, !Task.isCancelled else { return }
                 let bytes = [UInt8](chunk)
                 self.lastInboundBytesAt = Date()
+                self.scrollTracer?.noteInbound(byteCount: bytes.count)
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
                 self.noteAgentStatus(self.agentMonitor.status)

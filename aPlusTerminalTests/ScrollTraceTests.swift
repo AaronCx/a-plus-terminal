@@ -438,6 +438,45 @@ final class ScrollBridgeTraceTests: XCTestCase {
         XCTAssertEqual(record.emissions.count, 2)
     }
 
+    func testOutputAfterASendIsCountedAsItsResponseOnlyInsideTheWindow() throws {
+        final class Clock { var now = Date(timeIntervalSince1970: 1_760_000_000) }
+        let clock = Clock()
+        let h = makeHarness(tracer: true, escapes: mouseOn)
+        let tracer = ScrollGestureTracer(store: h.store, context: { nil }, now: { clock.now })
+        h.bridge.tracer = tracer
+
+        tracer.noteInbound(byteCount: 99)   // before any send: nobody's response
+        h.bridge.beginSwipe()
+        h.bridge.injectSwipe(ticks: 1, up: true, at: touch)
+        let id = try XCTUnwrap(h.sink.traced.last?.id)
+        clock.now += 0.05
+        tracer.noteSend(recordID: id, via: .meshyy, error: nil)
+        clock.now += 0.12
+        tracer.noteInbound(byteCount: 300)
+        clock.now += 0.5
+        tracer.noteInbound(byteCount: 20)
+        clock.now += ScrollGestureTracer.responseWindow
+        tracer.noteInbound(byteCount: 4000)   // too late to be this swipe's
+        h.bridge.endSwipe()
+
+        let record = try XCTUnwrap(h.store.records.last)
+        XCTAssertEqual(record.msToFirstInboundAfterSend, 120)
+        XCTAssertEqual(record.inboundBytesAfterSend, 320)
+    }
+
+    func testAFailedSendWatchesForNoResponse() throws {
+        let h = makeHarness(tracer: true, escapes: mouseOn)
+        let tracer = try XCTUnwrap(h.bridge.tracer)
+        h.bridge.beginSwipe()
+        h.bridge.injectSwipe(ticks: 1, up: true, at: touch)
+        let id = try XCTUnwrap(h.sink.traced.last?.id)
+        tracer.noteSend(recordID: id, via: .ssh, error: "notConnected")
+        tracer.noteInbound(byteCount: 10)
+        let record = try XCTUnwrap(h.store.records.last)
+        XCTAssertNil(record.msToFirstInboundAfterSend)
+        XCTAssertNil(record.inboundBytesAfterSend)
+    }
+
     func testEmissionsAreCappedPerRecordAndTheRestCounted() throws {
         let h = makeHarness(tracer: true, escapes: mouseOn)
         h.bridge.beginSwipe()

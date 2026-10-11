@@ -129,6 +129,9 @@ struct ScrollTraceView: View {
         if let latency = record.maxSendLatencyMs, latency >= 250 {
             line += " · send waited \(latency)ms"
         }
+        if record.sendOK > 0 {
+            line += record.msToFirstInboundAfterSend.map { " · reply \($0)ms" } ?? " · no reply"
+        }
         if record.sendFailed > 0 {
             line += " · \(record.sendFailed) send failed"
         }

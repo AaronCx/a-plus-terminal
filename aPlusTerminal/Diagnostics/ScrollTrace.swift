@@ -136,6 +136,13 @@ enum ScrollTrace {
         var maxSendLatencyMs: Int?
         /// ms from start when the last send of this gesture finished.
         var lastSendDoneMs: Int?
+        /// The cheapest on-device sign the far side reacted: ms from this
+        /// gesture's first successful send to the first output that came
+        /// back within `ScrollGestureTracer.responseWindow` of its last send
+        /// (a tmux copy-mode redraw answers a wheel event). nil with sendOK > 0
+        /// = nothing came back. Byte counts only, never the bytes.
+        var msToFirstInboundAfterSend: Int?
+        var inboundBytesAfterSend: Int?
         /// The transport the outbox actually used when it dequeued the bytes.
         var sentVia: Transport?
         var lastModesFrame: ModesFrame?
@@ -493,6 +500,11 @@ final class ScrollGestureTracer {
     private let context: () -> ScrollTraceContext?
     private let now: () -> Date
     private(set) var openRecordID: UUID?
+    /// How long after a gesture's last send inbound output still counts as
+    /// its response.
+    static let responseWindow: TimeInterval = 2
+    /// The gesture whose response is being watched for.
+    private var responseWatch: (recordID: UUID, firstSendDoneAt: Date, until: Date)?
 
     init(
         store: ScrollTraceStore,
@@ -577,6 +589,29 @@ final class ScrollGestureTracer {
             } else {
                 record.sendOK += 1
             }
+        }
+        guard error == nil else { return }
+        if let watch = responseWatch, watch.recordID == recordID {
+            responseWatch?.until = at.addingTimeInterval(Self.responseWindow)
+        } else {
+            responseWatch = (recordID, at, at.addingTimeInterval(Self.responseWindow))
+        }
+    }
+
+    /// Output reached the emulator (either pump). Counted against the gesture
+    /// whose send preceded it, while inside the response window.
+    func noteInbound(byteCount: Int) {
+        guard let watch = responseWatch else { return }
+        let at = now()
+        guard at <= watch.until else {
+            responseWatch = nil
+            return
+        }
+        store.update(watch.recordID) { record in
+            if record.msToFirstInboundAfterSend == nil {
+                record.msToFirstInboundAfterSend = ScrollTrace.milliseconds(from: watch.firstSendDoneAt, to: at)
+            }
+            record.inboundBytesAfterSend = (record.inboundBytesAfterSend ?? 0) + byteCount
         }
     }
 
