@@ -235,9 +235,14 @@ if [[ $APP_STORE -eq 1 ]]; then
   require_clean "after the simulator build"
 fi
 
-# [3] Keychain
-security unlock-keychain -p "$(cat "$HOME/.appstoreconnect/relay-ci-keychain-pass")" relay-ci.keychain \
-  || die "could not unlock relay-ci.keychain"
+# [3] Keychain. The password goes to `security` on stdin (`-i` reads the
+# command there), never on argv where `ps` shows it; plain `unlock-keychain`
+# without -p would prompt on /dev/tty and hang an interactive run.
+kc_pass=$(<"$HOME/.appstoreconnect/relay-ci-keychain-pass") || die "could not read the relay-ci.keychain password file"
+[[ "$kc_pass" != *[\"\\]* ]] || die "relay-ci.keychain password contains a quote or backslash, which security -i cannot take"
+printf 'unlock-keychain -p "%s" relay-ci.keychain\n' "$kc_pass" | security -i >/dev/null 2>&1 \
+  || { unset kc_pass; die "could not unlock relay-ci.keychain"; }
+unset kc_pass
 
 # [4] Archive (manual signing; DEVELOPER_DIR mandatory or archives silently no-op)
 mkdir -p "$ARCHIVE_DIR" || die "could not create $ARCHIVE_DIR"
