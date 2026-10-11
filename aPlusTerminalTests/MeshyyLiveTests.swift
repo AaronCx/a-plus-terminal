@@ -1,3 +1,4 @@
+#if MESHYY
 import MeshyyCore
 import MeshyyKit
 import XCTest
@@ -218,3 +219,4 @@ private actor Received {
         return text.contains(needle)
     }
 }
+#endif

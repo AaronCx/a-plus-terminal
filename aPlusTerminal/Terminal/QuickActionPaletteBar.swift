@@ -1,3 +1,4 @@
+#if MESHYY
 import SwiftUI
 
 /// One-tap answers to whatever the agent is waiting on (meshyy M6 tier 1).
@@ -35,3 +36,4 @@ struct QuickActionPaletteBar: View {
         .background(.thinMaterial)
     }
 }
+#endif

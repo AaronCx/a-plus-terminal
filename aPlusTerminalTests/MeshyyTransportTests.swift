@@ -1,3 +1,4 @@
+#if MESHYY
 import MeshyyCore
 import XCTest
 @testable import aPlusTerminal
@@ -434,3 +435,4 @@ final class ModeSynthesisTests: XCTestCase {
         XCTAssertFalse(mouseOnAfter(MeshyyTransport.modeEscapes(active: [2004, 1])))
     }
 }
+#endif

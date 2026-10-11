@@ -115,6 +115,7 @@ struct SettingsScreen: View {
                     Text("Shows the previewed page's console.log messages in a pane inside the preview, since a phone has no developer tools. This works by injecting a small script into your own page — it's the only part of Preview that does, which is why it's a choice. Off = nothing is injected and no messages are captured. Nothing leaves your device either way.")
                 }
 
+                #if MESHYY
                 Section {
                     Toggle("Use meshyy when available (beta)", isOn: $settings.meshyyTransport)
                 } header: {
@@ -122,6 +123,7 @@ struct SettingsScreen: View {
                 } footer: {
                     Text("Keeps your session alive on the server, so it survives the app being suspended or the network dropping, and replays what you missed. Needs meshyyd on the host; without it nothing changes. Turn this off to get the normal SSH behaviour back.")
                 }
+                #endif
 
                 Section {
                     NavigationLink("Customize key bar") {

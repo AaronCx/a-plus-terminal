@@ -169,6 +169,7 @@ final class EffectiveAgentStatusTests: XCTestCase {
     }
 }
 
+#if MESHYY
 /// The by-name deep link parses; junk does not.
 @MainActor
 final class ServerSessionLinkTests: XCTestCase {
@@ -191,3 +192,4 @@ final class ServerSessionLinkTests: XCTestCase {
         }
     }
 }
+#endif

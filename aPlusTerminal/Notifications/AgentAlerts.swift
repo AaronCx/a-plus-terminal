@@ -69,11 +69,13 @@ final class AgentAlertCenter: NSObject {
     }
 
     /// The agent in `session` needs the user. Posts when the policy allows.
+    /// `daemonSessionName` is the resumable transport's session name when one
+    /// carries the session; always nil in a build without it (`MESHYY` unset).
     func agentNeedsYou(
         sessionID: UUID,
         serverID: UUID,
         serverName: String,
-        meshyySessionName: String?,
+        daemonSessionName: String?,
         agentName: String?,
         trigger: AgentAlertPolicy.Trigger,
         appIsActive: Bool,
@@ -92,11 +94,15 @@ final class AgentAlertCenter: NSObject {
         // The deep link lands the tap in the RIGHT session, not the app's
         // last state. By daemon session name when meshyy carries it — the
         // name outlives the tab — by session id otherwise.
-        if let name = meshyySessionName {
+        #if MESHYY
+        if let name = daemonSessionName {
             content.userInfo = ["url": "aplusterminal://server/\(serverID.uuidString)/session/\(name)"]
         } else {
             content.userInfo = ["url": "aplusterminal://session/\(sessionID.uuidString)"]
         }
+        #else
+        content.userInfo = ["url": "aplusterminal://session/\(sessionID.uuidString)"]
+        #endif
         UNUserNotificationCenter.current().add(UNNotificationRequest(
             identifier: "agent-\(sessionID.uuidString)-\(trigger == .bell ? "bell" : "waiting")",
             content: content,

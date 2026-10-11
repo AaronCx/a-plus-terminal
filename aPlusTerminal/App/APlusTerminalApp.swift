@@ -185,10 +185,12 @@ final class DeepLinkRouter: @unchecked Sendable {
     /// Set when an App Intent (or aplusterminal://connect/<uuid>) asks to
     /// open a session to a saved server; TerminalTabView consumes it.
     var connectServerID: UUID?
+    #if MESHYY
     /// aplusterminal://server/<id>/session/<name> — attach the NAMED daemon
     /// session on that server. The name outlives tabs, which is what lets a
     /// notification link land in the right session after the tab is gone.
     var targetServerSession: (server: UUID, name: String)?
+    #endif
 
     func requestConnect(toServer id: UUID) {
         deepLinkLog.debug("router: connect request \(id.uuidString, privacy: .public)")
@@ -220,6 +222,7 @@ final class DeepLinkRouter: @unchecked Sendable {
             guard let id = UUID(uuidString: url.lastPathComponent) else { break }
             requestConnect(toServer: id)
             return
+        #if MESHYY
         case "server":
             // /<serverUUID>/session/<name>
             let parts = url.pathComponents.filter { $0 != "/" }
@@ -229,6 +232,7 @@ final class DeepLinkRouter: @unchecked Sendable {
             selectedTab = .terminal
             targetServerSession = (server: serverID, name: parts[2])
             return
+        #endif
         default:
             break
         }

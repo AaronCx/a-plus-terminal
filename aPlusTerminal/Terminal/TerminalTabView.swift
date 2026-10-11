@@ -135,15 +135,19 @@ struct TerminalTabView: View {
             .onChange(of: router.connectServerID) { _, _ in
                 consumeConnectRequest()
             }
+            #if MESHYY
             .onChange(of: router.targetServerSession?.name) { _, _ in
                 consumeServerSessionLink()
             }
+            #endif
             .onAppear {
                 // A cold-launch deep link (or App Intent) can land before this
                 // view observes changes — consume whatever is already pending.
                 consumeDeepLink()
                 consumeConnectRequest()
+                #if MESHYY
                 consumeServerSessionLink()
+                #endif
             }
             .task {
                 await reachability.refresh(serverStore.servers)
@@ -292,6 +296,7 @@ struct TerminalTabView: View {
         }.count
     }
 
+    #if MESHYY
     /// Notification tap → the NAMED daemon session on a server (PR 3 of the
     /// product brief). The name outlives tabs; the flow is: an open tab
     /// already on that session wins, else a new tab that resumes it, and a
@@ -325,6 +330,7 @@ struct TerminalTabView: View {
         // survivor-picker park can resume its continuation twice, which is a
         // fatalError. That was the crash on tapping a notification.
     }
+    #endif
 
     /// Live Activity tap → land inside the session (§4.5). After an app
     /// relaunch the tapped session no longer exists — clear the target so a

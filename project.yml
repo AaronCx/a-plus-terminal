@@ -79,6 +79,10 @@ targets:
         # Empty by default (automatic signing). The TestFlight upload script
         # passes CODE_SIGN_STYLE=Manual and these per-target profile names.
         PROVISIONING_PROFILE_SPECIFIER: "$(APLUSTERMINAL_PROFILE_APP)"
+        # Every meshyy entry point in the sources is wrapped in `#if MESHYY`.
+        # Target level, not project level: here `$(inherited)` picks up the
+        # project's Debug `DEBUG`, which a project-level base value would drop.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY"
     info:
       path: aPlusTerminal/Info.plist
       properties:
@@ -117,7 +121,9 @@ targets:
       - aPlusTerminalWidgets
       - path: AgentIcons.xcassets
         buildPhase: resources
-      # Shared with the app target — must compile identically in both.
+      # Shared with the app target — must compile identically in both. The
+      # widget never defines MESHYY: it only reads servers.json (never writes
+      # it), so Server's meshyy-only field is simply absent here.
       - path: aPlusTerminal/LiveActivity/SessionActivityAttributes.swift
       - path: aPlusTerminal/LiveActivity/SessionSnapshotStore.swift
       - path: aPlusTerminal/Servers/Server.swift
@@ -142,6 +148,8 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        # Hosted by the beta app, so the meshyy suites compile and run here.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY"
     sources:
       - aPlusTerminalTests
     dependencies:
