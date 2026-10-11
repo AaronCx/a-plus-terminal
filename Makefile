@@ -7,8 +7,11 @@ SIM_NAME ?= $(shell DEVELOPER_DIR=$(DEVELOPER_DIR) xcrun simctl list devices ava
 DEST := platform=iOS Simulator,name=$(SIM_NAME)
 
 XCBUILD := xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal -destination '$(DEST)'
+# The App Store candidate: same app, built WITHOUT meshyy (no MESHYY condition,
+# no Meshyy package). See project.yml targetTemplates.
+XCBUILD_APPSTORE := xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminalAppStore -destination '$(DEST)'
 
-.PHONY: generate build test test-meshyy-live test-scroll-oracle clean
+.PHONY: generate build test build-appstore test-appstore check-appstore test-meshyy-live test-scroll-oracle clean
 
 generate:
 	xcodegen generate
@@ -18,6 +21,18 @@ build: generate
 
 test: generate
 	$(XCBUILD) test
+
+build-appstore: generate
+	$(XCBUILD_APPSTORE) build
+
+# The no-meshyy Settings UI test, against the App Store candidate.
+test-appstore: generate
+	$(XCBUILD_APPSTORE) test
+
+# Binary proof on the simulator build from build-appstore (run that first).
+check-appstore:
+	@app=$$($(XCBUILD_APPSTORE) -showBuildSettings -json 2>/dev/null | python3 -I -c 'import json,sys; s=[t["buildSettings"] for t in json.load(sys.stdin) if t["target"]=="aPlusTerminalAppStore"][0]; print(s["BUILT_PRODUCTS_DIR"]+"/"+s["WRAPPER_NAME"])'); \
+	  ./scripts/check-no-meshyy.sh "$$app"
 
 # Live meshyy tests against a real local meshyyd.
 #

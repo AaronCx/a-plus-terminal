@@ -43,3 +43,15 @@ jobs:
 
       - name: Test
         run: make test
+
+      # The App Store candidate: the same app built WITHOUT meshyy. A broken
+      # `#if MESHYY` gate fails here, not at release time. Same DerivedData
+      # and simulator as the steps above, so the packages are already built.
+      - name: Build App Store candidate (no meshyy)
+        run: make build-appstore
+
+      - name: App Store candidate Settings has no meshyy (UI test)
+        run: make test-appstore
+
+      - name: App Store candidate binary has no meshyy
+        run: make check-appstore
