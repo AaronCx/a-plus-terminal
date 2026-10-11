@@ -139,6 +139,15 @@ struct SettingsScreen: View {
                     }
                 }
 
+                // On-device diagnostics. Nothing here leaves the phone unless
+                // the user shares it from inside the screen.
+                Section("Diagnostics") {
+                    NavigationLink("Scroll trace") {
+                        ScrollTraceView()
+                    }
+                    .accessibilityIdentifier("settings.scrollTrace")
+                }
+
                 Section {
                     Link(destination: supportURL) {
                         Label("Report an Issue", systemImage: "questionmark.circle")
