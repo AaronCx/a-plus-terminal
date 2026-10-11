@@ -339,6 +339,16 @@ rm -f "$exp"
 WHAT_TO_TEST="App Store candidate — $mkt (build $BUILD_N). meshyy is compiled out of this binary. This is the exact build that will be submitted."
 notes_written=0
 notes_err="never attempted: build not found"
+notes_rc=0
+# try_what_to_test — one attempt; sets notes_written, or notes_err + notes_rc.
+try_what_to_test() {
+  if notes_err=$(set_what_to_test "$build_id" "$WHAT_TO_TEST"); then
+    notes_written=1
+    echo "What to Test set: $WHAT_TO_TEST"
+  else
+    notes_rc=$?
+  fi
+}
 echo "Polling ASC for build $BUILD_N processingState..."
 alarmed=0
 state="ABSENT"
@@ -355,19 +365,30 @@ for i in $(seq 1 60); do
     state="UNREACHABLE"
   fi
   # App Store candidates: record what this build is as soon as it exists.
-  # ASC may refuse the write while the build is still processing, so a
-  # refusal is retried on the next poll; only at VALID is it fatal (below).
-  if [[ $APP_STORE -eq 1 && $notes_written -eq 0 && -n "${build_id:-}" ]]; then
-    if notes_err=$(set_what_to_test "$build_id" "$WHAT_TO_TEST"); then
-      notes_written=1
-      echo "What to Test set: $WHAT_TO_TEST"
-    else
+  # ASC may refuse the write (exit 3) while the build is still processing, so
+  # before VALID a refusal or an unreachable ASC is retried on the next poll;
+  # a helper failure (exit 4) is fatal at once.
+  if [[ $APP_STORE -eq 1 && $notes_written -eq 0 && -n "${build_id:-}" && "$state" != "VALID" ]]; then
+    try_what_to_test
+    if [[ $notes_written -eq 0 ]]; then
+      [[ $notes_rc -eq 2 || $notes_rc -eq 3 ]] || die "What to Test write for $LABEL failed (exit $notes_rc): $notes_err"
       echo "What to Test not set yet: $notes_err (retrying)"
     fi
   fi
   if [[ "$state" == "VALID" ]]; then
-    [[ $APP_STORE -eq 1 && $notes_written -eq 0 ]] \
-      && die "$LABEL is VALID but its What to Test notes could not be written ($notes_err) — set \"$WHAT_TO_TEST\" before handing it to Aaron"
+    # At VALID a refusal is final, but ASC being briefly unreachable (exit 2)
+    # must not abort a candidate that uploaded and processed fine: retry that.
+    if [[ $APP_STORE -eq 1 && $notes_written -eq 0 ]]; then
+      for attempt in 1 2 3 4 5 6; do
+        try_what_to_test
+        [[ $notes_written -eq 1 || $notes_rc -ne 2 ]] && break
+        [[ $attempt -eq 6 ]] && break
+        echo "What to Test attempt $attempt at VALID: $notes_err (retrying)"
+        sleep 20
+      done
+      [[ $notes_written -eq 1 ]] \
+        || die "$LABEL is VALID but its What to Test notes could not be written (exit $notes_rc: $notes_err) — set \"$WHAT_TO_TEST\" before handing it to Aaron"
+    fi
     if [[ $APP_STORE -eq 1 ]]; then
       title="App Store candidate build $BUILD_N VALID"
       default_body="App Store candidate $mkt (build $BUILD_N) processed clean in ~$((i / 2)) min. meshyy is compiled out (check-no-meshyy.sh passed on the archive and on a Debug build of the same commit) and What to Test says so. This is the exact build that will be submitted — state build $BUILD_N when testing."
