@@ -88,49 +88,58 @@ require_synced() {
 # for the JSON): exit 2 = ASC unreachable (transient, retry); exit 3 = ASC
 # answered with "errors" (fatal: e.g. 403
 # FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED must not read as "build not
-# there yet"); any other exit = this helper itself failed (key, PyJWT). The
-# JWT goes to curl through a 0600 header file, never on argv.
+# there yet"); exit 4 = this helper itself failed (key file, PyJWT, curl
+# missing), with the exception as the line. The JWT goes to curl through a
+# 0600 header file, never on argv.
 asc_call() {
   ASC_ISSUER="$ISSUER" ASC_KID="$KID" ASC_KEY_PATH="$KEY_PATH" python3 -I - "$@" <<'PY'
 import json, os, subprocess, sys, tempfile, time
-import jwt
-method, path = sys.argv[1], sys.argv[2]
-body = sys.argv[3] if len(sys.argv) > 3 else None
-now = int(time.time())
-tok = jwt.encode({'iss': os.environ['ASC_ISSUER'], 'iat': now, 'exp': now + 600, 'aud': 'appstoreconnect-v1'},
-                 open(os.environ['ASC_KEY_PATH']).read(), algorithm='ES256',
-                 headers={'kid': os.environ['ASC_KID']})
-fd, header = tempfile.mkstemp(prefix='asc-header-')  # mkstemp creates it 0600
+
+def main():
+    import jwt
+    method, path = sys.argv[1], sys.argv[2]
+    body = sys.argv[3] if len(sys.argv) > 3 else None
+    now = int(time.time())
+    with open(os.environ['ASC_KEY_PATH']) as key:
+        tok = jwt.encode({'iss': os.environ['ASC_ISSUER'], 'iat': now, 'exp': now + 600, 'aud': 'appstoreconnect-v1'},
+                         key.read(), algorithm='ES256', headers={'kid': os.environ['ASC_KID']})
+    fd, header = tempfile.mkstemp(prefix='asc-header-')  # mkstemp creates it 0600
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write('Authorization: Bearer ' + tok + '\n')
+            if body:
+                f.write('Content-Type: application/json\n')
+        url = 'https://api.appstoreconnect.apple.com' + path
+        last = 'no response'
+        for extra in ([], ['--resolve', 'api.appstoreconnect.apple.com:443:17.56.10.18']):
+            cmd = ['curl', '-g', '-sS', '-m', '25', '-X', method, '-H', '@' + header, *extra]
+            if body:
+                cmd += ['--data-binary', body]
+            p = subprocess.run(cmd + [url], capture_output=True, text=True)
+            if p.returncode != 0 or not p.stdout.strip():
+                last = p.stderr.strip() or f'curl exit {p.returncode}'
+                continue
+            try:
+                d = json.loads(p.stdout)
+            except ValueError:
+                last = 'non-JSON response'
+                continue
+            if d.get('errors'):
+                e = d['errors'][0]
+                print(f"ASC {e.get('status', '?')} {e.get('code', '?')}: {e.get('title', '')} — {e.get('detail', '')}")
+                return 3
+            print(json.dumps(d))
+            return 0
+        print('ASC unreachable: ' + last)
+        return 2
+    finally:
+        os.unlink(header)
+
 try:
-    with os.fdopen(fd, 'w') as f:
-        f.write('Authorization: Bearer ' + tok + '\n')
-        if body:
-            f.write('Content-Type: application/json\n')
-    url = 'https://api.appstoreconnect.apple.com' + path
-    last = 'no response'
-    for extra in ([], ['--resolve', 'api.appstoreconnect.apple.com:443:17.56.10.18']):
-        cmd = ['curl', '-g', '-sS', '-m', '25', '-X', method, '-H', '@' + header, *extra]
-        if body:
-            cmd += ['--data-binary', body]
-        p = subprocess.run(cmd + [url], capture_output=True, text=True)
-        if p.returncode != 0 or not p.stdout.strip():
-            last = p.stderr.strip() or f'curl exit {p.returncode}'
-            continue
-        try:
-            d = json.loads(p.stdout)
-        except ValueError:
-            last = 'non-JSON response'
-            continue
-        if d.get('errors'):
-            e = d['errors'][0]
-            print(f"ASC {e.get('status', '?')} {e.get('code', '?')}: {e.get('title', '')} — {e.get('detail', '')}")
-            sys.exit(3)
-        print(json.dumps(d))
-        sys.exit(0)
-    print('ASC unreachable: ' + last)
-    sys.exit(2)
-finally:
-    os.unlink(header)
+    sys.exit(main())
+except Exception as e:  # key file, PyJWT, curl — say why on stdout, like every other failure
+    print(f'ASC helper failed: {type(e).__name__}: {e}'.replace('\n', ' '))
+    sys.exit(4)
 PY
 }
 
@@ -145,7 +154,8 @@ json_get() {
 set_what_to_test() {  # set_what_to_test BUILD_ID TEXT
   local out loc_id body
   out=$(asc_call GET "/v1/builds/$1/betaBuildLocalizations?limit=50") || { local rc=$?; echo "$out"; return $rc; }
-  loc_id=$(json_get "$out" "next((x['id'] for x in d.get('data', []) if x['attributes'].get('locale') == 'en-US'), '')")
+  loc_id=$(json_get "$out" "next((x['id'] for x in d.get('data', []) if x['attributes'].get('locale') == 'en-US'), '')") \
+    || { echo "could not parse the build's betaBuildLocalizations: $out"; return 4; }
   if [[ -n "$loc_id" ]]; then
     body=$(python3 -I -c 'import json, sys; print(json.dumps({"data": {"type": "betaBuildLocalizations", "id": sys.argv[1], "attributes": {"whatsNew": sys.argv[2]}}}))' "$loc_id" "$2")
     out=$(asc_call PATCH "/v1/betaBuildLocalizations/$loc_id" "$body") || { local rc=$?; echo "$out"; return $rc; }
@@ -169,8 +179,10 @@ if [[ $APP_STORE -eq 1 ]]; then
   require_clean "after checkout/pull of develop"
   require_synced "after pull"
 fi
-mkt=$(grep -E '^\s*MARKETING_VERSION:' project.yml | head -1 | awk '{print $2}' | tr -d '"')
-live=$(curl -sf -m 20 "https://itunes.apple.com/lookup?id=$APP_ID" | python3 -c "import json,sys; r=json.load(sys.stdin)['results']; print(r[0]['version'] if r else '0')")
+mkt=$(grep -E '^\s*MARKETING_VERSION:' project.yml | head -1 | awk '{print $2}' | tr -d '"') \
+  || die "could not read MARKETING_VERSION from project.yml"
+live=$(curl -sf -m 20 "https://itunes.apple.com/lookup?id=$APP_ID" | python3 -c "import json,sys; r=json.load(sys.stdin)['results']; print(r[0]['version'] if r else '0')") \
+  || die "iTunes lookup of the live App Store version failed"
 if [[ -z "$mkt" ]]; then die "could not read MARKETING_VERSION from project.yml"; fi
 if [[ "$(printf '%s\n%s\n' "$live" "$mkt" | sort -V | tail -1)" == "$live" && "$mkt" != "$live"01 ]]; then
   if [[ "$mkt" == "$live" ]]; then
@@ -179,11 +191,12 @@ if [[ "$(printf '%s\n%s\n' "$live" "$mkt" | sort -V | tail -1)" == "$live" && "$
 fi
 
 # [2] Bump CURRENT_PROJECT_VERSION via PR (project.yml is the source; pbxproj is generated).
-cur=$(grep -E '^\s*CURRENT_PROJECT_VERSION:' project.yml | head -1 | awk '{print $2}' | tr -d '"')
+cur=$(grep -E '^\s*CURRENT_PROJECT_VERSION:' project.yml | head -1 | awk '{print $2}' | tr -d '"') \
+  || die "could not read CURRENT_PROJECT_VERSION from project.yml"
 if [[ "$cur" != "$BUILD_N" ]]; then
   branch="build/$BUILD_N"
   git checkout -b "$branch" >/dev/null || die "could not create branch $branch"
-  sed -i '' -E "s/^([[:space:]]*CURRENT_PROJECT_VERSION:).*/\1 $BUILD_N/" project.yml
+  sed -i '' -E "s/^([[:space:]]*CURRENT_PROJECT_VERSION:).*/\1 $BUILD_N/" project.yml || die "could not bump project.yml"
   make generate >/dev/null || die "make generate failed on the bump branch"
   grep -q "CURRENT_PROJECT_VERSION = $BUILD_N" aPlusTerminal.xcodeproj/project.pbxproj || die "bump did not land in generated pbxproj"
   git "${GIT_ID[@]}" commit -am "chore: bump build number to $BUILD_N" >/dev/null || die "bump commit failed"
@@ -254,12 +267,14 @@ app_dir=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name '*.app' | head
 [[ -n "$app_dir" ]] || die "no .app in $ARCHIVE/Products/Applications"
 app_bin="$app_dir/$(basename "$app_dir" .app)"
 [[ -f "$app_bin" ]] || die "app binary $app_bin missing"
+# Captured once, checked: an otool failure inside a process substitution
+# would read as "no frameworks referenced" and pass both dyld gates.
+libs=$(DEVELOPER_DIR="$DEV_DIR" xcrun otool -L "$app_bin") || die "otool -L failed on $app_bin"
 while read -r fw; do
   [[ -z "$fw" ]] && continue
   [[ -e "$app_dir/Frameworks/$fw" ]] \
     || die "dyld gate: app binary references @rpath/$fw but it is NOT embedded in Frameworks/ — this archive would crash at launch on device"
-done < <(DEVELOPER_DIR="$DEV_DIR" xcrun otool -L "$app_bin" \
-  | grep -oE '@rpath/[^/]+\.framework' | sed 's|@rpath/||' | sort -u)
+done < <(grep -oE '@rpath/[^/]+\.framework' <<<"$libs" | sed 's|@rpath/||' | sort -u)
 
 # [5c] Asset-bundle gate: both compiled catalogs exist and carry every agent
 # icon from AgentIcons.xcassets (the app draws them in rows; the widget draws
@@ -282,7 +297,7 @@ if [[ $APP_STORE -eq 1 ]]; then
   # links statically into a Release device build, so a reference here means a
   # dynamic framework was pulled in — the build-30 crash class, and for a
   # candidate also an unreviewed dependency.
-  rpaths=$(DEVELOPER_DIR="$DEV_DIR" xcrun otool -L "$app_bin" | grep -c '@rpath/' || true)
+  rpaths=$(grep -c '@rpath/' <<<"$libs" || true)
   [[ "$rpaths" -eq 0 ]] || die "dyld gate: App Store candidate binary has $rpaths @rpath reference(s); expected 0"
   echo "dyld gate: 0 @rpath references in $(basename "$app_bin")"
 
@@ -329,8 +344,10 @@ alarmed=0
 state="ABSENT"
 for i in $(seq 1 60); do
   if resp=$(asc_call GET "/v1/builds?filter%5Bapp%5D=$APP_ID&filter%5Bversion%5D=$BUILD_N&limit=1"); then
-    state=$(json_get "$resp" "d['data'][0]['attributes']['processingState'] if d.get('data') else 'ABSENT'")
-    build_id=$(json_get "$resp" "d['data'][0]['id'] if d.get('data') else ''")
+    state=$(json_get "$resp" "d['data'][0]['attributes']['processingState'] if d.get('data') else 'ABSENT'") \
+      || die "could not parse the ASC build response: $resp"
+    build_id=$(json_get "$resp" "d['data'][0]['id'] if d.get('data') else ''") \
+      || die "could not parse the ASC build response: $resp"
   else
     rc=$?
     [[ $rc -eq 2 ]] || die "App Store Connect build query failed (exit $rc): $resp"
@@ -362,7 +379,8 @@ for i in $(seq 1 60); do
     # should try on this build — so a release needs ONE Pushover, not two.
     "$PUSHOVER" "$title" \
       "${SHIP_PUSHOVER_MESSAGE:-$default_body}" \
-      "https://appstoreconnect.apple.com/apps/$APP_ID/testflight/ios" >/dev/null 2>&1
+      "https://appstoreconnect.apple.com/apps/$APP_ID/testflight/ios" >/dev/null 2>&1 \
+      || echo "warning: the VALID Pushover did not send" >&2
     echo "$LABEL VALID"
     exit 0
   fi
@@ -373,7 +391,7 @@ for i in $(seq 1 60); do
     alarmed=1
     "$PUSHOVER" "Build $BUILD_N MISSING at 10 min — likely silent rejection" \
       "Baseline is VALID in 1-2 min. Check aaronc3214@icloud.com for the ITMS code (e.g. ITMS-90626). Still polling to 30 min." \
-      '' >/dev/null 2>&1
+      '' >/dev/null 2>&1 || echo "warning: the MISSING Pushover did not send" >&2
   fi
   sleep 30
 done
