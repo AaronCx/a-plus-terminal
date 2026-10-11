@@ -127,6 +127,20 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.detected?.id, "claude-code", "markers split across reads still name the agent")
     }
 
+    func testMarkerSplicedByATmuxRedrawStillNamesAgent() {
+        // Captured from a+Terminal inside tmux: the redraw only rewrote the
+        // cells that changed, so the banner arrived with an attribute reset
+        // and a charset designation in the middle of the marker, and a
+        // cursor-forward where a space already sat.
+        let monitor = autoMonitor()
+        monitor.observe(bytes("\u{1B}[2;12H\u{1B}[1mClaude C\u{1B}(B\u{1B}[m\u{1B}[1mode\u{1B}[C\u{1B}(B\u{1B}[m"))
+        XCTAssertEqual(monitor.detected?.id, "claude-code")
+
+        let skipped = autoMonitor()
+        skipped.observe(bytes("\u{1B}[1mClaude\u{1B}[CCode\u{1B}[m v2"))
+        XCTAssertEqual(skipped.detected?.id, "claude-code", "a cursor-forward over a space is still a space")
+    }
+
     func testEmptyCandidatesDisablesDetection() {
         let monitor = AgentActivityMonitor(candidates: [])
         monitor.observe(bytes("Claude Code\n"))
@@ -202,6 +216,7 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(
             AgentActivityMonitor.stripANSI("\u{1B}]0;title\u{07}hi \u{1B}[1;32mthere\u{1B}[0m"),
             "hi there")
+        XCTAssertEqual(AgentActivityMonitor.stripANSI("a\u{1B}[3Cb\u{1B}(Bc\u{1B})0d"), "a   bcd")
     }
 
     func testEndsAtShellPromptTerminators() {

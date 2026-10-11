@@ -39,6 +39,9 @@ final class AgentActivityMonitor {
     /// never end an idle frame with a bare POSIX terminator. Extend here for
     /// fancy prompts (e.g. "❯") if a real one proves safe.
     static let promptTerminators: Set<Character> = ["%", "$", "#"]
+    /// Cap on the spaces one cursor-forward expands to — a marker never spans
+    /// a jump wider than a line.
+    private static let maxCursorForward = 512
 
     private let candidates: [AgentProfile]
     /// Candidates that carry markers — scanned to upgrade `detected`.
@@ -116,7 +119,12 @@ final class AgentActivityMonitor {
     }
 
     private func scanForMarker(_ bytes: [UInt8]) {
-        let text = String(decoding: carryBytes + bytes, as: UTF8.self).lowercased()
+        // Markers are matched against what the user SEES, not the raw bytes:
+        // tmux redraws only the cells that changed, so "Claude Code" arrives
+        // as `Claude C`, an attribute reset, `ode` — or with a cursor-forward
+        // where a space already sat. Raw matching left Claude Code inside
+        // tmux unnamed for its whole life.
+        let text = Self.stripANSI(String(decoding: carryBytes + bytes, as: UTF8.self)).lowercased()
         // Prefer the most specific (longest) matching marker. When one chunk
         // carries markers for two agents, this names the one whose marker
         // matched most specifically rather than whichever profile happens to
@@ -190,8 +198,11 @@ final class AgentActivityMonitor {
         return promptTerminators.contains(last)
     }
 
-    /// Removes CSI (`ESC [ … final`), OSC (`ESC ] … BEL` / `ESC \`) and
-    /// two-character escapes so prompt detection sees what the user sees.
+    /// Removes CSI (`ESC [ … final`), OSC (`ESC ] … BEL` / `ESC \`),
+    /// character-set designations (`ESC ( B`) and two-character escapes so
+    /// prompt and marker detection see what the user sees. A cursor-forward
+    /// (`ESC [ n C`) becomes `n` spaces: a redraw skips a cell that already
+    /// holds a space instead of rewriting it.
     static func stripANSI(_ text: String) -> String {
         var result = String.UnicodeScalarView()
         var scalars = text.unicodeScalars[...]
@@ -206,10 +217,21 @@ final class AgentActivityMonitor {
             switch introducer {
             case "[":
                 // CSI: skip parameter/intermediate bytes up to a final byte.
+                var parameters = ""
                 while let byte = scalars.first {
                     scalars = scalars.dropFirst()
-                    if (0x40...0x7E).contains(byte.value) { break }
+                    if (0x40...0x7E).contains(byte.value) {
+                        if byte == "C" {
+                            let count = min(Int(parameters) ?? 1, Self.maxCursorForward)
+                            result.append(contentsOf: String(repeating: " ", count: max(count, 1)).unicodeScalars)
+                        }
+                        break
+                    }
+                    parameters.unicodeScalars.append(byte)
                 }
+            case "(", ")", "*", "+":
+                // Character-set designation: one more byte names the set.
+                scalars = scalars.dropFirst()
             case "]":
                 // OSC: terminated by BEL or ESC-backslash (ST).
                 var previous: UnicodeScalar?
