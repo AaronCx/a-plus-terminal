@@ -119,6 +119,9 @@ struct ScrollTraceView: View {
         }
         if let belief = record.belief {
             line += " · mouse \(belief.mouseMode) alt \(belief.altScreen ? "on" : "off") kb \(belief.keyboardVisible ? "on" : "off")"
+            if belief.isScrolledBack == true {
+                line += " scrolled-back"
+            }
         }
         if record.totalBytes > 0 {
             line += " · \(record.totalBytes)B"

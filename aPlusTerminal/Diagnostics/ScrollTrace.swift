@@ -67,6 +67,17 @@ enum ScrollTrace {
         /// What it changed from, e.g. "off" → `mouseMode`.
         var previousMouseMode: String?
         var msSinceBufferSwitch: Int?
+        /// The local viewport is up in SwiftTerm's own scrollback: the user is
+        /// looking at stale local history, so even a wheel event tmux honours
+        /// can look like "nothing happens". nil on records from before this
+        /// field existed.
+        var isScrolledBack: Bool?
+        /// SwiftTerm's scroll position, 0 (top of scrollback) … 1 (live
+        /// bottom); nil when there is no local scrollback (alt screen, or too
+        /// little output).
+        var scrollPosition: Double?
+        /// Index of the top visible line in the active buffer (yDisp).
+        var topVisibleRow: Int?
     }
 
     /// One `ScrollBridge.emit` that produced bytes.
@@ -602,7 +613,10 @@ final class ScrollGestureTracer {
             isFirstResponder: view.isFirstResponder,
             msSinceMouseModeChange: view.lastMouseModeChangeAt.map { ScrollTrace.milliseconds(from: $0, to: at) },
             previousMouseMode: view.previousMouseMode.map { String(describing: $0) },
-            msSinceBufferSwitch: view.lastBufferSwitchAt.map { ScrollTrace.milliseconds(from: $0, to: at) }
+            msSinceBufferSwitch: view.lastBufferSwitchAt.map { ScrollTrace.milliseconds(from: $0, to: at) },
+            isScrolledBack: view.canScroll && view.scrollPosition < 1,
+            scrollPosition: view.canScroll ? view.scrollPosition : nil,
+            topVisibleRow: terminal.getTopVisibleRow()
         )
     }
 }

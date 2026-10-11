@@ -486,6 +486,27 @@ final class ScrollBridgeTraceTests: XCTestCase {
         XCTAssertNotNil(store.records.last?.endedAt, "the momentum task closed the record without its bridge")
     }
 
+    func testBeliefSaysWhenTheLocalViewportIsScrolledBack() throws {
+        let lines = (1...120).map { "line \($0)" }.joined(separator: "\r\n")
+        let h = makeHarness(tracer: true, escapes: lines)
+        h.bridge.beginSwipe()
+        let live = try XCTUnwrap(h.store.records.last?.belief)
+        XCTAssertEqual(live.isScrolledBack, false)
+        XCTAssertEqual(live.scrollPosition, 1)
+
+        h.view.scrollUp(lines: 10)
+        h.bridge.beginSwipe()
+        let back = try XCTUnwrap(h.store.records.last?.belief)
+        XCTAssertEqual(back.isScrolledBack, true)
+        XCTAssertLessThan(back.scrollPosition ?? 1, 1)
+        XCTAssertEqual(back.topVisibleRow, (live.topVisibleRow ?? 0) - 10)
+
+        let alt = makeHarness(tracer: true, escapes: altScreen)
+        alt.bridge.beginSwipe()
+        XCTAssertEqual(alt.store.records.last?.belief?.isScrolledBack, false)
+        XCTAssertNil(alt.store.records.last?.belief?.scrollPosition, "no local scrollback on the alt screen")
+    }
+
     func testOnlyARealModeOrBufferChangeIsStamped() throws {
         let view = TerminalEmulatorView(frame: CGRect(x: 0, y: 0, width: 1000, height: 700))
         view.feed(byteArray: ArraySlice(Array(mouseOn.utf8)))
