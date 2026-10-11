@@ -61,7 +61,7 @@ struct ScrollTraceView: View {
             } header: {
                 Text("Share")
             } footer: {
-                Text("\"Send to inbox\" uploads the trace over that session's SSH connection to ~/.aplusterminal-inbox/ on the server. Nothing is typed into the terminal.")
+                Text("The trace includes your server and session names and your iPhone model. \"Send to inbox\" uploads it over that session's SSH connection to ~/.aplusterminal-inbox/ on the server. Nothing is typed into the terminal.")
             }
 
             Section {
