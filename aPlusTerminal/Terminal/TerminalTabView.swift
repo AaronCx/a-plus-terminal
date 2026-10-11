@@ -37,6 +37,10 @@ struct TerminalTabView: View {
                             SessionRow(session: session) {
                                 sessionManager.close(session)
                             }
+                            // A container, so the row's own identifier doesn't
+                            // overwrite its children's (the agent icon's
+                            // identifier says which art was drawn).
+                            .accessibilityElement(children: .contain)
                             .accessibilityIdentifier("session-\(session.id.uuidString)")
                             .contentShape(Rectangle())
                             .onTapGesture {
@@ -389,12 +393,17 @@ struct SessionRow: View {
                 .fill(stateColor)
                 .frame(width: 9, height: 9)
             if settings.agentMascotIcons, let icon = session.effectiveAgentIconName {
-                agentIconImage(icon)
+                let source = CustomAgentIconStore.source(forIconName: icon)
+                agentIconImage(source)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 20, height: 20)
                     .clipShape(RoundedRectangle(cornerRadius: 4.5))
                     .accessibilityLabel(session.effectiveAgentName ?? "Agent")
+                    // Which art was drawn, for UI tests: agentIcon.custom.<id>,
+                    // agentIcon.bundled.<id> or agentIcon.generic.<id>.
+                    .accessibilityIdentifier(
+                        "agentIcon.\(source.kind).\(CustomAgentIconStore.profileID(fromIconName: icon))")
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.server.name)
@@ -425,14 +434,14 @@ struct SessionRow: View {
         }
     }
 
-    /// Custom user icon first (App Group), bundled asset second.
-    private func agentIconImage(_ iconName: String) -> Image {
-        let id = iconName.hasPrefix("agent-") ? String(iconName.dropFirst(6)) : iconName
-        if let url = CustomAgentIconStore.imageURL(for: id),
-           let ui = UIImage(contentsOfFile: url.path) {
+    /// Custom user icon first (App Group), bundled asset second, the generic
+    /// doodle last — a custom agent without a picked icon must not render
+    /// an empty slot.
+    private func agentIconImage(_ source: CustomAgentIconStore.Source) -> Image {
+        if case .custom(let url) = source, let ui = UIImage(contentsOfFile: url.path) {
             return Image(uiImage: ui)
         }
-        return Image(iconName)
+        return Image(source.assetName)
     }
 
     private var stateColor: Color {

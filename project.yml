@@ -163,6 +163,10 @@ targets:
       - path: aPlusTerminal/Servers/Server.swift
       - path: aPlusTerminal/Servers/ServerStore.swift
       - path: aPlusTerminal/Network/Reachability.swift
+      # Custom agent icons: the widget reads the same App Group file the app
+      # writes, through the same code (path, id guard, generic fallback).
+      - path: aPlusTerminal/Profiles/AgentProfile.swift
+      - path: aPlusTerminal/Profiles/CustomAgentIconStore.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.aplusterminal.widgets

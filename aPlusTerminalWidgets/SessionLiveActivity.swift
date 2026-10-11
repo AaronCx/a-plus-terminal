@@ -83,21 +83,23 @@ struct SessionLiveActivity: Widget {
 /// The detected agent's icon, or the terminal glyph when none — the payload
 /// only carries an icon name when the user's toggle is on. A USER-SUPPLIED
 /// icon (App Group AgentIcons/<id>.png) wins over the bundled default, which
-/// is what lets users bring vendor art the app itself does not ship.
+/// is what lets users bring vendor art the app itself does not ship. A
+/// custom agent with neither draws the generic doodle, never a blank slot.
 struct AgentGlyph: View {
     let iconName: String?
     var size: CGFloat = 16
 
     var body: some View {
         if let iconName {
-            if let custom = customImage(for: iconName) {
+            let source = CustomAgentIconStore.source(forIconName: iconName)
+            if case .custom(let url) = source, let custom = thumbnail(at: url) {
                 Image(uiImage: custom)
                     .resizable()
                     .scaledToFit()
                     .frame(width: size, height: size)
                     .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
             } else {
-                Image(iconName)
+                Image(source.assetName)
                     .resizable()
                     .scaledToFit()
                     .frame(width: size, height: size)
@@ -108,19 +110,15 @@ struct AgentGlyph: View {
         }
     }
 
-    /// iconName is "agent-<profileID>"; the custom file is keyed by the id.
+    /// The custom file's path comes from CustomAgentIconStore, compiled into
+    /// this extension too, so it always matches where the app wrote it.
     ///
     /// The loaded bitmap is thumbnailed DOWN TO THE SLOT before it reaches
     /// ActivityKit: the island's compact presentation replaces images larger
     /// than the slot with a gray placeholder box rather than scaling them —
     /// which is exactly how a user-imported 360px custom icon rendered as a
     /// gray square while the pre-sized bundled assets drew fine.
-    private func customImage(for iconName: String) -> UIImage? {
-        let id = iconName.hasPrefix("agent-") ? String(iconName.dropFirst(6)) : iconName
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: "group.com.aaroncx.aplusterminal"
-        ) else { return nil }
-        let url = container.appendingPathComponent("AgentIcons/\(id).png")
+    private func thumbnail(at url: URL) -> UIImage? {
         guard let full = UIImage(contentsOfFile: url.path) else { return nil }
         let side = size * 3   // the slot in pixels at max display scale
         return full.preparingThumbnail(of: CGSize(width: side, height: side)) ?? full
