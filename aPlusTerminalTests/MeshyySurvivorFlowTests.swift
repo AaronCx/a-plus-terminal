@@ -257,6 +257,84 @@ final class MeshyySurvivorFlowTests: XCTestCase {
     /// refocus. This drives resign→focus against a REAL pty with 1004 enabled
     /// and asserts the program received focus-out then focus-in, which is
     /// precisely what the sheet's onDismiss fix must produce.
+    /// PR A's acceptance on a REAL daemon: one swipe over meshyy produces a
+    /// record carrying every field a dead swipe needs to explain itself —
+    /// belief, route, bytes with their cell, the daemon's modes frame and its
+    /// age, the pong-inclusive inbound clock (0.1.22), and whether the bytes
+    /// left and something came back. Unit tests pin each field's arithmetic;
+    /// this pins that the live wiring actually fills them.
+    func testASwipeOverMeshyyLeavesACompleteTraceRecord() async throws {
+        let (session, server) = try makeMeshyySession(traceEnabled: true)
+        let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
+        addTeardownBlock {
+            await session.close()
+            await self.killSessions(withPrefix: prefix)
+        }
+        await session.connect()
+        guard session.state == .connected, session.meshyy != nil else {
+            throw XCTSkip("no local meshyy session: \(session.meshyyUnavailable ?? "not connected")")
+        }
+
+        // Arm mouse + SGR the way tmux does, and prove the emulator consumed it.
+        session.sendInput(Data("printf '\\e[?1000h\\e[?1006h'\n".utf8))
+        let armed = try await ask(session, marker: "ARMEDMOUSE")
+        XCTAssertEqual(armed, "ok", "the session never echoed the arming marker")
+        // The far side: transcribe what the program receives.
+        let log = "/tmp/aplus-trace-\(UUID().uuidString.prefix(8)).log"
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: log) }
+        session.sendInput(Data("cat -v > \(log)\n".utf8))
+        try await poll(deadline: 10, "the transcriber never started") {
+            FileManager.default.fileExists(atPath: log)
+        }
+        // Idle long enough that only heartbeat pongs could keep the inbound
+        // clock fresh — an events-only clock would read ~1.5 s here.
+        try await Task.sleep(for: .milliseconds(1500))
+
+        let bridge = try XCTUnwrap(session.scrollBridge)
+        let decision = try XCTUnwrap(bridge.beginSwipe())
+        XCTAssertEqual(decision.mode, .sgrWheel, "armed mouse must route as wheel events")
+        let bytes = bridge.injectSwipe(ticks: 2, up: true, at: CGPoint(x: 500, y: 300))
+        XCTAssertFalse(bytes.isEmpty)
+
+        // The program actually received the wheel bytes (cat -v renders ESC as
+        // ^[). Two ^Ds, as in the focus test: the pty is canonical, so the first
+        // releases the unterminated line to cat and the second is the EOF that
+        // makes cat flush its buffer to the file.
+        try await Task.sleep(for: .milliseconds(300))
+        session.sendInput(Data([0x04]))
+        try await Task.sleep(for: .milliseconds(200))
+        session.sendInput(Data([0x04]))
+        try await poll(deadline: 10, "the program never received the wheel bytes") {
+            ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").contains("^[[<64;")
+        }
+        bridge.endSwipe()
+
+        let store = try XCTUnwrap(session.scrollTraceStoreForTesting)
+        let record = try XCTUnwrap(store.records.last { $0.route == .sgrWheel })
+        XCTAssertEqual(record.transport, .meshyy)
+        XCTAssertEqual(record.transportState, .connected)
+        XCTAssertEqual(record.session, session.meshyy?.sessionName)
+        XCTAssertNotNil(record.endedAt)
+        XCTAssertEqual(record.belief?.mouseMode, "vt200")
+        XCTAssertEqual(record.belief?.rows, session.terminalView.getTerminal().rows)
+        let emission = try XCTUnwrap(record.emissions.first)
+        XCTAssertEqual(emission.ticks, 2)
+        XCTAssertTrue(emission.bytesHex.hasPrefix("1b5b3c36343b"), emission.bytesHex)
+        XCTAssertNotNil(emission.row)
+        XCTAssertLessThan(emission.row ?? .max, record.belief?.rows ?? 0,
+                          "the claimed row must never be the bottom (status) row")
+        XCTAssertEqual(record.sendOK, 1)
+        XCTAssertEqual(record.sendFailed, 0)
+        XCTAssertEqual(record.sentVia, .meshyy)
+        let modes = try XCTUnwrap(record.lastModesFrame, "the daemon's modes frame was not recorded")
+        XCTAssertTrue(Set(modes.active).isSuperset(of: [1000, 1006]), "\(modes.active)")
+        XCTAssertNotNil(record.lastScreenModeFrame)
+        let inbound = try XCTUnwrap(record.msSinceLastInboundFrame,
+                                    "the pong-inclusive inbound clock was not wired")
+        XCTAssertLessThan(inbound, 1200,
+                          "an idle healthy session is answered every heartbeat; got \(inbound) ms")
+    }
+
     func testFocusRoundTripReachesTheProgramAsMode1004Escapes() async throws {
         let (session, server) = try makeMeshyySession()
         let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
@@ -927,7 +1005,10 @@ final class MeshyySurvivorFlowTests: XCTestCase {
         return pem
     }
 
-    private func makeMeshyySession(reusing existing: Server? = nil) throws -> (TerminalSession, Server) {
+    private func makeMeshyySession(
+        reusing existing: Server? = nil,
+        traceEnabled: Bool = false
+    ) throws -> (TerminalSession, Server) {
         guard let pem = try? String(contentsOfFile: "/tmp/aplus-probe-key.pem", encoding: .utf8),
               pem.contains("PRIVATE KEY")
         else {
@@ -953,6 +1034,7 @@ final class MeshyySurvivorFlowTests: XCTestCase {
 
         let settings = AppSettings(defaults: UserDefaults(suiteName: "MeshyySurvivorFlow-\(suffix)")!)
         settings.meshyyTransport = true
+        settings.scrollTraceEnabled = traceEnabled
 
         let session = TerminalSession(
             server: entry,
@@ -963,7 +1045,10 @@ final class MeshyySurvivorFlowTests: XCTestCase {
             profiles: ProfileStore(
                 agents: [],
                 multiplexers: [MultiplexerProfile(id: "none", displayName: "None (raw shell)")]
-            )
+            ),
+            scrollTrace: traceEnabled
+                ? ScrollTraceStore(settings: settings, directory: nil, observesKeyboard: false)
+                : nil
         )
         // See MeshyyResizeAtConnectTests: an unlaid-out terminal is a 2x1 grid.
         session.terminalView.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
