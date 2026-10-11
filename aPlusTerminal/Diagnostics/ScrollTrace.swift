@@ -1,0 +1,565 @@
+import Foundation
+import Observation
+import SwiftTerm
+import UIKit
+import os
+
+/// On-device swipe trace (Settings → Diagnostics → Scroll trace).
+///
+/// Every scroll bug this app has shipped was the emulator's BELIEF about the
+/// far side (mouse mode, alt screen) diverging from what tmux actually had
+/// armed — and every one was "verified" off-device. This records, per swipe,
+/// what the app believed, which route `ScrollBridge` took on that belief, the
+/// exact bytes it sent and whether the transport took them, so the next dead
+/// swipe on a real phone names its own cause.
+///
+/// Observation only: nothing here changes routing. Local only: records live
+/// in Application Support and leave the phone solely through a share the
+/// user starts. Only ScrollBridge emissions are recorded — never general
+/// input, which carries keystrokes and passwords.
+enum ScrollTrace {
+    static let schemaVersion = 1
+
+    enum Transport: String, Codable, Sendable {
+        case ssh, meshyy
+    }
+
+    enum TransportState: String, Codable, Sendable {
+        case connected, reconnecting, dead
+    }
+
+    enum Route: String, Codable, Sendable {
+        case sgrWheel, arrowKeys, native, declined
+
+        init(_ mode: ScrollBridgeCore.Mode) {
+            switch mode {
+            case .sgrWheel: self = .sgrWheel
+            case .arrowKeys: self = .arrowKeys
+            case .native: self = .native
+            }
+        }
+    }
+
+    /// Why the pan never got as far as a routing decision. (`.native` is a
+    /// route, not a decline: returning false there hands the swipe to
+    /// SwiftTerm's local scrollback — a dead swipe if tmux is on the alt
+    /// screen and the emulator does not know it.)
+    enum DeclineReason: String, Codable, Sendable {
+        /// A long-press text selection was holding the scroll pan down.
+        case selectionHold
+        /// The pan was more horizontal than vertical.
+        case horizontal
+        /// The bridge had lost its terminal view.
+        case noView
+    }
+
+    /// What the emulator believed when the swipe was routed.
+    struct Belief: Codable, Equatable, Sendable {
+        var mouseMode: String
+        var altScreen: Bool
+        var applicationCursor: Bool
+        var rows: Int
+        var cols: Int
+        var keyboardVisible: Bool
+        var isFirstResponder: Bool
+        var msSinceMouseModeChange: Int?
+        var msSinceBufferSwitch: Int?
+    }
+
+    /// One `ScrollBridge.emit` that produced bytes.
+    struct Emission: Codable, Equatable, Sendable {
+        var msFromStart: Int
+        var ticks: Int
+        var up: Bool
+        var momentum: Bool
+        /// The 1-based cell the wheel event claimed; nil for arrow keys.
+        var row: Int?
+        var col: Int?
+        var bytesHex: String
+    }
+
+    struct ModesFrame: Codable, Equatable, Sendable {
+        var active: [Int]
+        var ageMs: Int
+    }
+
+    struct ScreenModeFrame: Codable, Equatable, Sendable {
+        var alt: Bool
+        var ageMs: Int
+    }
+
+    /// One gesture (or one declined gesture).
+    struct Record: Codable, Equatable, Identifiable, Sendable {
+        var id: UUID
+        var startedAt: Date
+        var endedAt: Date?
+        var server: String?
+        var session: String?
+        var transport: Transport
+        var meshyyUnavailableReason: String?
+        var transportState: TransportState
+        var rawSessionState: String
+        var meshyyTransportFinished: Bool?
+        var msSinceLastInboundBytes: Int?
+        var msSinceLastInboundFrame: Int?
+        var belief: Belief?
+        var wheelBridgeEnabled: Bool
+        var route: Route
+        var declineReason: DeclineReason?
+        var emissions: [Emission] = []
+        var emissionsDropped: Int = 0
+        var totalBytes: Int = 0
+        var sendOK: Int = 0
+        var sendFailed: Int = 0
+        var lastSendError: String?
+        /// The transport the outbox actually used when it dequeued the bytes.
+        var sentVia: Transport?
+        var lastModesFrame: ModesFrame?
+        var lastScreenModeFrame: ScreenModeFrame?
+    }
+
+    static func hex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func milliseconds(from start: Date, to end: Date) -> Int {
+        Int((end.timeIntervalSince(start) * 1000).rounded())
+    }
+
+    // MARK: JSON
+
+    private static let isoStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
+    static func makeEncoder(pretty: Bool) -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = pretty ? [.prettyPrinted, .sortedKeys] : [.sortedKeys]
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(isoStyle.format(date))
+        }
+        return encoder
+    }
+
+    static func makeDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            return try isoStyle.parse(try container.decode(String.self))
+        }
+        return decoder
+    }
+}
+
+/// The session-side half of a record, supplied by the owning
+/// `TerminalSession` through a closure — `ScrollBridge` keeps no session
+/// reference.
+struct ScrollTraceContext {
+    var server: String?
+    var session: String?
+    var transport: ScrollTrace.Transport
+    var meshyyUnavailableReason: String?
+    var transportState: ScrollTrace.TransportState
+    var rawSessionState: String
+    var meshyyTransportFinished: Bool?
+    var lastInboundBytesAt: Date?
+    /// Pong-inclusive "last frame from the daemon" — nil until MeshyyKit
+    /// exposes one (see TerminalSession.scrollTraceContext()).
+    var lastInboundFrameAt: Date?
+    var lastModesFrame: (active: Set<Int>, at: Date)?
+    var lastScreenModeFrame: (alt: Bool, at: Date)?
+}
+
+// MARK: - Store
+
+/// Ring buffer of the last `capacity` records, persisted to
+/// Application Support so a force-quit right after a dead swipe keeps it.
+@MainActor
+@Observable
+final class ScrollTraceStore {
+    static let capacity = 500
+    static let maxEmissionsPerRecord = 48
+
+    private(set) var records: [ScrollTrace.Record] = []
+
+    /// Bound to `AppSettings.scrollTraceEnabled`.
+    var isEnabled: Bool {
+        get { settings.scrollTraceEnabled }
+        set { settings.scrollTraceEnabled = newValue }
+    }
+
+    /// Software keyboard on screen, from the app-wide will-show/will-hide
+    /// notifications (a hardware keyboard keeps this false while the terminal
+    /// is first responder — the record carries both).
+    @ObservationIgnored private(set) var keyboardVisible = false
+
+    @ObservationIgnored let fileURL: URL?
+    @ObservationIgnored private let settings: AppSettings
+    @ObservationIgnored private let persistDelay: Duration
+    @ObservationIgnored private var persistTask: Task<Void, Never>?
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private let writer = ScrollTraceFileWriter()
+    @ObservationIgnored private var keyboardObservers: KeyboardObservers?
+
+    private static let log = Logger(subsystem: "com.aaroncx.aplusterminal", category: "scrolltrace")
+
+    nonisolated static var defaultDirectory: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("ScrollTrace", isDirectory: true)
+    }
+
+    /// - Parameters:
+    ///   - directory: where `trace.json` lives; nil keeps the trace in memory only.
+    ///   - persistDelay: how long changes coalesce before one background write.
+    init(
+        settings: AppSettings,
+        directory: URL? = ScrollTraceStore.defaultDirectory,
+        persistDelay: Duration = .seconds(2),
+        observesKeyboard: Bool = true
+    ) {
+        self.settings = settings
+        self.fileURL = directory?.appendingPathComponent("trace.json")
+        self.persistDelay = persistDelay
+        self.records = Self.load(from: fileURL)
+        if observesKeyboard {
+            keyboardObservers = KeyboardObservers { [weak self] visible in
+                self?.keyboardVisible = visible
+            }
+        }
+    }
+
+    /// Reads a previously persisted trace; anything unreadable starts empty.
+    private static func load(from url: URL?) -> [ScrollTrace.Record] {
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return [] }
+        do {
+            let data = try Data(contentsOf: url)
+            let file = try ScrollTrace.makeDecoder().decode(PersistedFile.self, from: data)
+            return Array(file.records.suffix(capacity))
+        } catch {
+            log.error("scroll trace unreadable, starting empty: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+    }
+
+    // MARK: Mutation
+
+    func append(_ record: ScrollTrace.Record) {
+        guard isEnabled else { return }
+        records.append(record)
+        if records.count > Self.capacity {
+            records.removeFirst(records.count - Self.capacity)
+        }
+        schedulePersist()
+    }
+
+    /// Mutates a record still in the ring (newest first — the one being
+    /// updated is almost always the last).
+    func update(_ id: UUID, _ body: (inout ScrollTrace.Record) -> Void) {
+        guard let index = records.lastIndex(where: { $0.id == id }) else { return }
+        body(&records[index])
+        schedulePersist()
+    }
+
+    func clear() {
+        records = []
+        persistTask?.cancel()
+        persistTask = nil
+        Task { await self.writeNow() }
+    }
+
+    // MARK: Persistence
+
+    private func schedulePersist() {
+        guard fileURL != nil, persistTask == nil else { return }
+        let delay = persistDelay
+        persistTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            self.persistTask = nil
+            await self.writeNow()
+        }
+    }
+
+    /// Writes immediately (app backgrounding, tests).
+    func flush() async {
+        persistTask?.cancel()
+        persistTask = nil
+        await writeNow()
+    }
+
+    private func writeNow() async {
+        guard let fileURL else { return }
+        generation += 1
+        await writer.write(records, generation: generation, to: fileURL)
+    }
+
+    private struct PersistedFile: Codable {
+        var schema: Int
+        var records: [ScrollTrace.Record]
+    }
+
+    // MARK: Export
+
+    struct ExportEnvelope: Encodable {
+        struct Device: Encodable {
+            var model: String
+            var machine: String
+            var systemName: String
+            var systemVersion: String
+        }
+        var schema: Int
+        var app: String
+        var build: String?
+        var marketingVersion: String?
+        var device: Device
+        var traceEnabled: Bool
+        var exportedAt: Date
+        var timeZoneOffsetSeconds: Int
+        var recordCount: Int
+        var records: [ScrollTrace.Record]
+    }
+
+    func exportData(now: Date = Date()) throws -> Data {
+        let info = Bundle.main.infoDictionary
+        let device = UIDevice.current
+        let envelope = ExportEnvelope(
+            schema: ScrollTrace.schemaVersion,
+            app: AppVersion.current,
+            build: info?["CFBundleVersion"] as? String,
+            marketingVersion: info?["CFBundleShortVersionString"] as? String,
+            device: .init(
+                model: device.model,
+                machine: Self.machineIdentifier(),
+                systemName: device.systemName,
+                systemVersion: device.systemVersion
+            ),
+            traceEnabled: isEnabled,
+            exportedAt: now,
+            timeZoneOffsetSeconds: TimeZone.current.secondsFromGMT(for: now),
+            recordCount: records.count,
+            records: records
+        )
+        return try ScrollTrace.makeEncoder(pretty: true).encode(envelope)
+    }
+
+    static func exportFileName(now: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return "aplus-scroll-trace-\(formatter.string(from: now)).json"
+    }
+
+    /// Writes the export to the temporary directory for the share sheet.
+    func exportFileURL(now: Date = Date()) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(Self.exportFileName(now: now))
+        try exportData(now: now).write(to: url, options: .atomic)
+        return url
+    }
+
+    /// e.g. "iPhone17,1" — UIDevice.model only says "iPhone".
+    private static func machineIdentifier() -> String {
+        var info = utsname()
+        uname(&info)
+        return withUnsafeBytes(of: &info.machine) { raw in
+            String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
+        }
+    }
+}
+
+/// Serializes trace writes off the main actor; a write older than the last
+/// one written is dropped, so the file never goes backwards.
+private actor ScrollTraceFileWriter {
+    private var lastGeneration = 0
+    private static let log = Logger(subsystem: "com.aaroncx.aplusterminal", category: "scrolltrace")
+
+    func write(_ records: [ScrollTrace.Record], generation: Int, to url: URL) {
+        guard generation > lastGeneration else { return }
+        lastGeneration = generation
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            struct File: Encodable {
+                var schema: Int
+                var records: [ScrollTrace.Record]
+            }
+            let data = try ScrollTrace.makeEncoder(pretty: false)
+                .encode(File(schema: ScrollTrace.schemaVersion, records: records))
+            try data.write(to: url, options: .atomic)
+        } catch {
+            Self.log.error("scroll trace write failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+}
+
+/// App-wide keyboard visibility, observed once. Owns its tokens so they are
+/// removed with it.
+private final class KeyboardObservers {
+    private var tokens: [NSObjectProtocol] = []
+
+    init(onChange: @escaping @MainActor (Bool) -> Void) {
+        let center = NotificationCenter.default
+        tokens.append(center.addObserver(
+            forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { onChange(true) }
+        })
+        tokens.append(center.addObserver(
+            forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { onChange(false) }
+        })
+    }
+
+    deinit {
+        for token in tokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+}
+
+// MARK: - Gesture tracer
+
+/// Turns ScrollBridge's gesture lifecycle into records: opened at the routing
+/// decision, emissions (momentum included) appended, closed when momentum
+/// ends or the pan cancels. Records are appended to the store as soon as they
+/// open, so a swipe that never finishes is still on disk.
+@MainActor
+final class ScrollGestureTracer {
+    private let store: ScrollTraceStore
+    private let context: () -> ScrollTraceContext?
+    private let now: () -> Date
+    private(set) var openRecordID: UUID?
+
+    init(
+        store: ScrollTraceStore,
+        context: @escaping () -> ScrollTraceContext?,
+        now: @escaping () -> Date = Date.init
+    ) {
+        self.store = store
+        self.context = context
+        self.now = now
+    }
+
+    var isRecording: Bool { store.isEnabled }
+
+    /// A routing decision was made. Returns the id emissions should carry, or
+    /// nil when nothing will be emitted (tracing off, or the native route —
+    /// recorded and closed on the spot).
+    func begin(_ decision: SwipeDecision, view: TerminalEmulatorView) -> UUID? {
+        end(openRecordID)
+        guard store.isEnabled else { return nil }
+        let at = now()
+        var record = makeRecord(
+            at: at, route: ScrollTrace.Route(decision.mode), declineReason: nil,
+            wheelBridgeEnabled: decision.wheelBridgeEnabled, view: view
+        )
+        if decision.mode == .native {
+            record.endedAt = at
+            store.append(record)
+            return nil
+        }
+        store.append(record)
+        openRecordID = record.id
+        return record.id
+    }
+
+    /// The pan was refused before any routing decision.
+    func decline(_ reason: ScrollTrace.DeclineReason, wheelBridgeEnabled: Bool, view: TerminalEmulatorView?) {
+        guard store.isEnabled else { return }
+        let at = now()
+        var record = makeRecord(
+            at: at, route: .declined, declineReason: reason,
+            wheelBridgeEnabled: wheelBridgeEnabled, view: view
+        )
+        record.endedAt = at
+        store.append(record)
+    }
+
+    func emitted(recordID: UUID, ticks: Int, up: Bool, momentum: Bool, col: Int?, row: Int?, bytes: Data) {
+        let at = now()
+        store.update(recordID) { record in
+            record.totalBytes += bytes.count
+            if record.emissions.count < ScrollTraceStore.maxEmissionsPerRecord {
+                record.emissions.append(.init(
+                    msFromStart: ScrollTrace.milliseconds(from: record.startedAt, to: at),
+                    ticks: ticks, up: up, momentum: momentum,
+                    row: row, col: col, bytesHex: ScrollTrace.hex(bytes)
+                ))
+            } else {
+                record.emissionsDropped += 1
+            }
+        }
+    }
+
+    /// What the outbox's send did with one emission batch.
+    func noteSend(recordID: UUID, via: ScrollTrace.Transport, error: String?) {
+        store.update(recordID) { record in
+            record.sentVia = via
+            if let error {
+                record.sendFailed += 1
+                record.lastSendError = error
+            } else {
+                record.sendOK += 1
+            }
+        }
+    }
+
+    func end(_ id: UUID?) {
+        guard let id else { return }
+        if openRecordID == id { openRecordID = nil }
+        let at = now()
+        store.update(id) { record in
+            if record.endedAt == nil { record.endedAt = at }
+        }
+    }
+
+    private func makeRecord(
+        at: Date,
+        route: ScrollTrace.Route,
+        declineReason: ScrollTrace.DeclineReason?,
+        wheelBridgeEnabled: Bool,
+        view: TerminalEmulatorView?
+    ) -> ScrollTrace.Record {
+        let ctx = context()
+        return ScrollTrace.Record(
+            id: UUID(),
+            startedAt: at,
+            endedAt: nil,
+            server: ctx?.server,
+            session: ctx?.session,
+            transport: ctx?.transport ?? .ssh,
+            meshyyUnavailableReason: ctx?.meshyyUnavailableReason,
+            transportState: ctx?.transportState ?? .dead,
+            rawSessionState: ctx?.rawSessionState ?? "unknown",
+            meshyyTransportFinished: ctx?.meshyyTransportFinished,
+            msSinceLastInboundBytes: ctx?.lastInboundBytesAt.map { ScrollTrace.milliseconds(from: $0, to: at) },
+            msSinceLastInboundFrame: ctx?.lastInboundFrameAt.map { ScrollTrace.milliseconds(from: $0, to: at) },
+            belief: view.map { belief(of: $0, at: at) },
+            wheelBridgeEnabled: wheelBridgeEnabled,
+            route: route,
+            declineReason: declineReason,
+            lastModesFrame: ctx?.lastModesFrame.map {
+                .init(active: $0.active.sorted(), ageMs: ScrollTrace.milliseconds(from: $0.at, to: at))
+            },
+            lastScreenModeFrame: ctx?.lastScreenModeFrame.map {
+                .init(alt: $0.alt, ageMs: ScrollTrace.milliseconds(from: $0.at, to: at))
+            }
+        )
+    }
+
+    private func belief(of view: TerminalEmulatorView, at: Date) -> ScrollTrace.Belief {
+        let terminal = view.getTerminal()
+        return ScrollTrace.Belief(
+            mouseMode: String(describing: terminal.mouseMode),
+            altScreen: terminal.isCurrentBufferAlternate,
+            applicationCursor: terminal.applicationCursor,
+            rows: terminal.rows,
+            cols: terminal.cols,
+            keyboardVisible: store.keyboardVisible,
+            isFirstResponder: view.isFirstResponder,
+            msSinceMouseModeChange: view.lastMouseModeChangeAt.map { ScrollTrace.milliseconds(from: $0, to: at) },
+            msSinceBufferSwitch: view.lastBufferSwitchAt.map { ScrollTrace.milliseconds(from: $0, to: at) }
+        )
+    }
+}

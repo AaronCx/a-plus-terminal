@@ -83,6 +83,43 @@ final class AppSettings {
         didSet { defaults.set(previewConsoleCapture, forKey: Keys.previewConsoleCapture) }
     }
 
+    /// Scroll trace (Settings → Diagnostics): the user's explicit choice, nil
+    /// when they never touched the toggle. nil follows the build channel —
+    /// ON for DEBUG and TestFlight builds, OFF for the App Store — so a
+    /// TestFlight tester records the next dead swipe without having to know
+    /// the toggle exists, and a store user never records anything unasked.
+    var scrollTraceOverride: Bool? {
+        didSet {
+            if let scrollTraceOverride {
+                defaults.set(scrollTraceOverride, forKey: Keys.scrollTraceOverride)
+            } else {
+                defaults.removeObject(forKey: Keys.scrollTraceOverride)
+            }
+        }
+    }
+
+    /// What the build channel says when there is no override. Starts from the
+    /// value cached by the previous launch's channel resolution (or a
+    /// synchronous hint on first launch) and is corrected once
+    /// `BuildChannel.resolve()` answers.
+    var scrollTraceChannelDefault: Bool {
+        didSet { defaults.set(scrollTraceChannelDefault, forKey: Keys.scrollTraceChannelDefault) }
+    }
+
+    /// The effective switch. Writing it records an explicit override.
+    var scrollTraceEnabled: Bool {
+        get { scrollTraceOverride ?? scrollTraceChannelDefault }
+        set { scrollTraceOverride = newValue }
+    }
+
+    /// Applies a resolved build channel to the default (never to an override).
+    func applyBuildChannel(_ channel: BuildChannel) {
+        guard let value = channel.scrollTraceDefault else { return }
+        if scrollTraceChannelDefault != value {
+            scrollTraceChannelDefault = value
+        }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -110,6 +147,14 @@ final class AppSettings {
         self.autoPopOutOnAppSwitch = defaults.bool(forKey: Keys.autoPopOutOnAppSwitch)
         // OFF by default — JS injection into the user's page is opt-in.
         self.previewConsoleCapture = defaults.bool(forKey: Keys.previewConsoleCapture)
+        self.scrollTraceOverride = defaults.object(forKey: Keys.scrollTraceOverride) as? Bool
+        #if DEBUG
+        self.scrollTraceChannelDefault = true
+        #else
+        self.scrollTraceChannelDefault = defaults.object(forKey: Keys.scrollTraceChannelDefault) as? Bool
+            ?? BuildChannel.synchronousHint.scrollTraceDefault
+            ?? false
+        #endif
     }
 
     private enum Keys {
@@ -125,6 +170,8 @@ final class AppSettings {
         static let autoPopOutOnAppSwitch = "autoPopOutOnAppSwitch"
         static let previewConsoleCapture = "previewConsoleCapture"
         static let meshyyTransport = "meshyyTransport"
+        static let scrollTraceOverride = "scrollTraceEnabled"
+        static let scrollTraceChannelDefault = "scrollTraceChannelDefault"
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"

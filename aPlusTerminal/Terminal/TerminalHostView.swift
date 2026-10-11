@@ -37,6 +37,23 @@ final class TerminalEmulatorView: TerminalView {
             gestureRecognizer.require(toFail: priorityPan)
         }
     }
+
+    /// When the emulator's mouse-mode belief last moved (scroll trace). Every
+    /// scroll bug so far was this belief diverging from the far side's, so
+    /// the trace needs to say how fresh it was when a swipe was routed on it.
+    private(set) var lastMouseModeChangeAt: Date?
+    /// When the emulator last switched between the primary and alt buffer.
+    private(set) var lastBufferSwitchAt: Date?
+
+    override func mouseModeChanged(source: Terminal) {
+        lastMouseModeChangeAt = Date()
+        super.mouseModeChanged(source: source)
+    }
+
+    override func bufferActivated(source: Terminal) {
+        lastBufferSwitchAt = Date()
+        super.bufferActivated(source: source)
+    }
 }
 
 /// Connects the SwiftUI layer (accessory bar, screens) to the UIKit terminal
