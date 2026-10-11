@@ -271,6 +271,14 @@ schemes:
         # override (seconds) so repeated posts are counted, not rate-limited.
         APLUSTERMINAL_TEST_ALERT_PROBE: $(APLUSTERMINAL_TEST_ALERT_PROBE)
         APLUSTERMINAL_TEST_ALERT_FLOOR: $(APLUSTERMINAL_TEST_ALERT_FLOOR)
+        # Custom agents seams (TestSeed.prepareAgentsIfRequested). The Agents
+        # UI tests set these on the launched app directly; forwarding them
+        # here also lets a manual run seed the app under test.
+        APLUSTERMINAL_TEST_AGENT_PROFILES: $(APLUSTERMINAL_TEST_AGENT_PROFILES)
+        APLUSTERMINAL_TEST_RESET_AGENTS: $(APLUSTERMINAL_TEST_RESET_AGENTS)
+        APLUSTERMINAL_TEST_AGENT_ICON_ID: $(APLUSTERMINAL_TEST_AGENT_ICON_ID)
+        APLUSTERMINAL_TEST_AGENT_ICON_FILE: $(APLUSTERMINAL_TEST_AGENT_ICON_FILE)
+        APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON: $(APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON)
       targets:
         - aPlusTerminalTests
         - aPlusTerminalUITests

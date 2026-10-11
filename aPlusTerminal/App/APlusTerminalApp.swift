@@ -30,6 +30,10 @@ struct APlusTerminalApp: App {
         let servers = ServerStore()
         let keys = KeyStore()
         let settings = AppSettings()
+        #if DEBUG
+        // Before the store loads, so seeded agents read like a normal launch.
+        TestSeed.prepareAgentsIfRequested()
+        #endif
         let profiles = ProfileStore()
         _theme = State(initialValue: theme)
         _servers = State(initialValue: servers)
