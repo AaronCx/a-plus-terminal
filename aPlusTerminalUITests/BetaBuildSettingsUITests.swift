@@ -36,6 +36,13 @@ final class BetaBuildSettingsUITests: XCTestCase {
         let texts = Set(pages.flatMap(\.texts))
         XCTAssertTrue(texts.contains("settings.meshyyTransport"), "meshyy toggle not found by the walk")
         XCTAssertFalse(pages.flatMap(\.meshyyHits).isEmpty, "walk saw no meshyy text in the beta build")
-        XCTAssertTrue(texts.contains("Third-Party Notices"), "walk never reached the bottom of the form")
+        // Positive control for the App Store test's "no Connection section"
+        // check, matched the same (case-insensitive) way.
+        XCTAssertTrue(texts.contains { $0.caseInsensitiveCompare("Connection") == .orderedSame },
+                      "walk never saw the meshyy \"Connection\" section header")
+        // Same coverage landmarks as the App Store test.
+        for landmark in ["Capture console output", "Customize key bar", "Third-Party Notices"] {
+            XCTAssertTrue(texts.contains(landmark), "walk never reached \"\(landmark)\"")
+        }
     }
 }
