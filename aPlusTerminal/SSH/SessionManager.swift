@@ -483,8 +483,16 @@ final class TerminalSession: Identifiable, Hashable {
     /// Uploads a diagnostics export (Settings → Diagnostics) to this server's
     /// SFTP inbox over the session's existing SSH connection. User-initiated
     /// only; returns the remote path. Nothing is typed into the terminal.
-    func uploadDiagnostic(_ data: Data, filename: String) async throws -> String {
-        try await connection.uploadToInbox(data, filename: filename)
+    ///
+    /// Bounded by `timeout`: under meshyy nothing probes the SSH socket, so
+    /// after a network change it can be half-open while the tab says
+    /// connected, and SFTP on it would hang until TCP gives up — minutes, at
+    /// exactly the moment someone is sending a trace after a dead swipe.
+    func uploadDiagnostic(_ data: Data, filename: String, timeout: Duration = .seconds(20)) async throws -> String {
+        let connection = self.connection
+        return try await DiagnosticUploadRace.run(timeout: timeout) {
+            try await connection.uploadToInbox(data, filename: filename)
+        }
     }
 
     /// `countsAsResponse: false` marks machine-generated traffic — scroll

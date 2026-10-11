@@ -234,6 +234,28 @@ final class ScrollTraceStoreTests: XCTestCase {
         XCTAssertEqual(BuildChannel.testFlight.scrollTraceDefault, true)
     }
 
+    func testAnUploadThatNeverAnswersTimesOut() async {
+        let started = Date()
+        do {
+            _ = try await DiagnosticUploadRace.run(timeout: .milliseconds(100)) {
+                try await Task.sleep(for: .seconds(30))
+                return "never"
+            }
+            XCTFail("should have timed out")
+        } catch {
+            XCTAssertTrue(error is DiagnosticUploadRace.TimedOut, "\(error)")
+            XCTAssertEqual(error.localizedDescription, "SSH connection not responding")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    func testAnUploadThatAnswersInTimeReturnsItsPath() async throws {
+        let path = try await DiagnosticUploadRace.run(timeout: .seconds(5)) {
+            "~/.aplusterminal-inbox/trace.json"
+        }
+        XCTAssertEqual(path, "~/.aplusterminal-inbox/trace.json")
+    }
+
     func testSettingFollowsTheChannelUntilOverridden() {
         let suite = "ScrollTraceTests-channel-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

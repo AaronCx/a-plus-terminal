@@ -159,3 +159,43 @@ struct ScrollTraceExport: Transferable {
         try await store.exportFileURL()
     }
 }
+
+/// Races a user-initiated diagnostics upload against a deadline. The upload
+/// is cancelled on timeout but not awaited: a socket that never answers must
+/// not keep the button spinning.
+enum DiagnosticUploadRace {
+    struct TimedOut: LocalizedError {
+        var errorDescription: String? { "SSH connection not responding" }
+    }
+
+    @MainActor
+    static func run(
+        timeout: Duration,
+        _ operation: @escaping @MainActor () async throws -> String
+    ) async throws -> String {
+        final class Once {
+            var continuation: CheckedContinuation<String, Error>?
+            func resume(_ result: Result<String, Error>) {
+                continuation?.resume(with: result)
+                continuation = nil
+            }
+        }
+        let once = Once()
+        return try await withCheckedThrowingContinuation { continuation in
+            once.continuation = continuation
+            let work = Task { @MainActor in
+                do {
+                    once.resume(.success(try await operation()))
+                } catch {
+                    once.resume(.failure(error))
+                }
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: timeout)
+                guard once.continuation != nil else { return }
+                work.cancel()
+                once.resume(.failure(TimedOut()))
+            }
+        }
+    }
+}
