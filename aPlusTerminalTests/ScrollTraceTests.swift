@@ -577,7 +577,7 @@ final class ScrollBridgeTraceTests: XCTestCase {
         let store = h.store
         // A second bridge on the same view that nothing but `bridge` holds.
         var bridge: ScrollBridge? = ScrollBridge(sendData: { _ in }, wheelBridgeEnabled: { true })
-        weak var weakBridge = bridge
+        weak let weakBridge = bridge
         bridge?.attach(to: h.view)
         bridge?.tracer = tracer
         bridge?.sendTraced = { _, _ in }
