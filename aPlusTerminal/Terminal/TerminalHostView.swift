@@ -41,17 +41,36 @@ final class TerminalEmulatorView: TerminalView {
     /// When the emulator's mouse-mode belief last moved (scroll trace). Every
     /// scroll bug so far was this belief diverging from the far side's, so
     /// the trace needs to say how fresh it was when a swipe was routed on it.
+    ///
+    /// Stamped only on an actual change: SwiftTerm calls `mouseModeChanged`
+    /// on every assignment, and meshyy's `.modes` frames re-assert the same
+    /// mode, so stamping every call would make an unchanged belief look as
+    /// if it had just flipped.
     private(set) var lastMouseModeChangeAt: Date?
-    /// When the emulator last switched between the primary and alt buffer.
+    /// The mode before the last change (nil until one happens).
+    private(set) var previousMouseMode: Terminal.MouseMode?
+    private var currentMouseMode: Terminal.MouseMode = .off
+    /// When the emulator last switched between the primary and alt buffer
+    /// (SwiftTerm reports a re-entry into the buffer already active too).
     private(set) var lastBufferSwitchAt: Date?
+    private var currentBufferIsAlternate = false
 
     override func mouseModeChanged(source: Terminal) {
-        lastMouseModeChangeAt = Date()
+        let mode = source.mouseMode
+        if mode != currentMouseMode {
+            previousMouseMode = currentMouseMode
+            currentMouseMode = mode
+            lastMouseModeChangeAt = Date()
+        }
         super.mouseModeChanged(source: source)
     }
 
     override func bufferActivated(source: Terminal) {
-        lastBufferSwitchAt = Date()
+        let alternate = source.isCurrentBufferAlternate
+        if alternate != currentBufferIsAlternate {
+            currentBufferIsAlternate = alternate
+            lastBufferSwitchAt = Date()
+        }
         super.bufferActivated(source: source)
     }
 }

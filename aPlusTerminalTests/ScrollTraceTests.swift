@@ -34,7 +34,7 @@ private func makeRecord(
         belief: .init(
             mouseMode: "vt200", altScreen: true, applicationCursor: false,
             rows: 35, cols: 100, keyboardVisible: true, isFirstResponder: true,
-            msSinceMouseModeChange: 400, msSinceBufferSwitch: nil
+            msSinceMouseModeChange: 400, previousMouseMode: "off", msSinceBufferSwitch: nil
         ),
         wheelBridgeEnabled: true,
         route: route,
@@ -484,6 +484,25 @@ final class ScrollBridgeTraceTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertNotNil(store.records.last?.endedAt, "the momentum task closed the record without its bridge")
+    }
+
+    func testOnlyARealModeOrBufferChangeIsStamped() throws {
+        let view = TerminalEmulatorView(frame: CGRect(x: 0, y: 0, width: 1000, height: 700))
+        view.feed(byteArray: ArraySlice(Array(mouseOn.utf8)))
+        let modeAt = try XCTUnwrap(view.lastMouseModeChangeAt)
+        XCTAssertEqual(view.previousMouseMode, .off)
+        view.feed(byteArray: ArraySlice(Array(altScreen.utf8)))
+        let bufferAt = try XCTUnwrap(view.lastBufferSwitchAt)
+
+        // A `.modes` frame / WINCH pulse re-asserting the same state.
+        view.feed(byteArray: ArraySlice(Array((mouseOn + altScreen).utf8)))
+        XCTAssertEqual(view.lastMouseModeChangeAt, modeAt, "re-asserting a mode is not a change")
+        XCTAssertEqual(view.lastBufferSwitchAt, bufferAt, "re-entering the alt screen is not a switch")
+
+        view.feed(byteArray: ArraySlice(Array("\u{1B}[?1000l\u{1B}[?1049l".utf8)))
+        XCTAssertNotEqual(view.lastMouseModeChangeAt, modeAt)
+        XCTAssertNotEqual(view.lastBufferSwitchAt, bufferAt)
+        XCTAssertNotEqual(view.previousMouseMode, .off, "what it changed from")
     }
 
     func testANewSwipeClosesThePreviousRecord() throws {

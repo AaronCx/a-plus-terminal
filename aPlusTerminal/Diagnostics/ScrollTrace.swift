@@ -62,7 +62,10 @@ enum ScrollTrace {
         var cols: Int
         var keyboardVisible: Bool
         var isFirstResponder: Bool
+        /// Since the mouse mode last actually changed (not merely re-asserted).
         var msSinceMouseModeChange: Int?
+        /// What it changed from, e.g. "off" → `mouseMode`.
+        var previousMouseMode: String?
         var msSinceBufferSwitch: Int?
     }
 
@@ -598,6 +601,7 @@ final class ScrollGestureTracer {
             keyboardVisible: store.keyboardVisible,
             isFirstResponder: view.isFirstResponder,
             msSinceMouseModeChange: view.lastMouseModeChangeAt.map { ScrollTrace.milliseconds(from: $0, to: at) },
+            previousMouseMode: view.previousMouseMode.map { String(describing: $0) },
             msSinceBufferSwitch: view.lastBufferSwitchAt.map { ScrollTrace.milliseconds(from: $0, to: at) }
         )
     }
