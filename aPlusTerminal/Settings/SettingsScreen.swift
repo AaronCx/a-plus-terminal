@@ -118,6 +118,7 @@ struct SettingsScreen: View {
                 #if MESHYY
                 Section {
                     Toggle("Use meshyy when available (beta)", isOn: $settings.meshyyTransport)
+                        .accessibilityIdentifier("settings.meshyyTransport")
                 } header: {
                     Text("Connection")
                 } footer: {
