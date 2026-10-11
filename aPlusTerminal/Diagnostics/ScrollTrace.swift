@@ -90,6 +90,11 @@ enum ScrollTrace {
         var row: Int?
         var col: Int?
         var bytesHex: String
+        /// ms from the record's start until the outbox finished sending these
+        /// bytes (meshyy: handed to the QUIC stream; SSH: written to the
+        /// channel). Far above `msFromStart` = the bytes waited in the FIFO
+        /// outbox behind something else.
+        var sendDoneMs: Int?
     }
 
     struct ModesFrame: Codable, Equatable, Sendable {
@@ -126,6 +131,11 @@ enum ScrollTrace {
         var sendOK: Int = 0
         var sendFailed: Int = 0
         var lastSendError: String?
+        /// The longest any of this gesture's sends took from leaving
+        /// ScrollBridge to the transport accepting it.
+        var maxSendLatencyMs: Int?
+        /// ms from start when the last send of this gesture finished.
+        var lastSendDoneMs: Int?
         /// The transport the outbox actually used when it dequeued the bytes.
         var sentVia: Transport?
         var lastModesFrame: ModesFrame?
@@ -545,9 +555,21 @@ final class ScrollGestureTracer {
         }
     }
 
-    /// What the outbox's send did with one emission batch.
-    func noteSend(recordID: UUID, via: ScrollTrace.Transport, error: String?) {
+    /// What the outbox's send did with one emission batch. Sends complete in
+    /// emission order (one FIFO outbox), so the n-th send is the n-th emission.
+    func noteSend(recordID: UUID, via: ScrollTrace.Transport, error: String?, enqueuedAt: Date? = nil) {
+        let at = now()
         store.update(recordID) { record in
+            let index = record.sendOK + record.sendFailed
+            let doneMs = ScrollTrace.milliseconds(from: record.startedAt, to: at)
+            if index < record.emissions.count {
+                record.emissions[index].sendDoneMs = doneMs
+            }
+            record.lastSendDoneMs = doneMs
+            if let enqueuedAt {
+                let latency = ScrollTrace.milliseconds(from: enqueuedAt, to: at)
+                record.maxSendLatencyMs = max(record.maxSendLatencyMs ?? 0, latency)
+            }
             record.sentVia = via
             if let error {
                 record.sendFailed += 1

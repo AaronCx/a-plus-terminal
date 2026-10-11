@@ -371,7 +371,7 @@ final class TerminalSession: Identifiable, Hashable {
         case data(Data)
         /// Scroll bytes that belong to a scroll-trace record: sent exactly
         /// like `.data`, but the send's outcome is reported to the trace.
-        case tracedData(Data, recordID: UUID)
+        case tracedData(Data, recordID: UUID, enqueuedAt: Date)
         case resize(cols: Int, rows: Int)
     }
 
@@ -425,7 +425,7 @@ final class TerminalSession: Identifiable, Hashable {
             scrollBridge.sendTraced = { [weak self] data, recordID in
                 // Same path as sendInput(_, countsAsResponse: false): the
                 // FIFO outbox, nothing else.
-                self?.outboxContinuation.yield(.tracedData(data, recordID: recordID))
+                self?.outboxContinuation.yield(.tracedData(data, recordID: recordID, enqueuedAt: Date()))
             }
             scrollTracer = tracer
         }
@@ -1497,7 +1497,7 @@ final class TerminalSession: Identifiable, Hashable {
                     } else {
                         try? await connection.send(data)
                     }
-                case .tracedData(let data, let recordID):
+                case .tracedData(let data, let recordID, let enqueuedAt):
                     var failure: String?
                     do {
                         if let meshyy {
@@ -1509,7 +1509,8 @@ final class TerminalSession: Identifiable, Hashable {
                         failure = String(describing: error)
                     }
                     self.scrollTracer?.noteSend(
-                        recordID: recordID, via: meshyy != nil ? .meshyy : .ssh, error: failure
+                        recordID: recordID, via: meshyy != nil ? .meshyy : .ssh, error: failure,
+                        enqueuedAt: enqueuedAt
                     )
                 case .resize(let cols, let rows):
                     if let meshyy {
