@@ -182,6 +182,7 @@ final class TerminalSession: Identifiable, Hashable {
     /// decision exists exactly once.
     func noteAgentStatus(_ status: AgentActivityMonitor.Status, now: Date = Date()) {
         defer { alertedAgentStatus = status }
+        logNoteAgentStatus(status, now: now)
         if status == .working, alertedAgentStatus != .working {
             workingSince = now
         }
@@ -199,6 +200,19 @@ final class TerminalSession: Identifiable, Hashable {
         postAgentAlert(.becameWaiting)
     }
 
+    /// One debug line per noted status — the fields the alert decision reads,
+    /// and whether this call would post (ignoring the policy's own gates).
+    private func logNoteAgentStatus(_ status: AgentActivityMonitor.Status, now: Date) {
+        let since = workingSince.map { String(format: "%.1f", now.timeIntervalSince($0)) } ?? "nil"
+        let wouldPost = status == .waiting && alertedAgentStatus != .waiting
+            && (workingSince.map { now.timeIntervalSince($0) >= Self.minimumWorkBeforeAlert } ?? false)
+            && !currentWaitSeen
+        agentAlertLog.debug("note session=\(self.id.logTag, privacy: .public) status=\(status.rawValue, privacy: .public) alerted=\(self.alertedAgentStatus.rawValue, privacy: .public) workingFor=\(since, privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public) wouldPost=\(wouldPost, privacy: .public)")
+        #if DEBUG
+        AgentAlertProbe.shared.noteAgent(agentMonitor.detected?.id)
+        #endif
+    }
+
     /// The session screen is in front of the user's eyes. If the agent is
     /// waiting right now, that wait is officially seen.
     ///
@@ -210,6 +224,7 @@ final class TerminalSession: Identifiable, Hashable {
         if alertedAgentStatus == .waiting {
             currentWaitSeen = true
         }
+        agentAlertLog.notice("viewed session=\(self.id.logTag, privacy: .public) alerted=\(self.alertedAgentStatus.rawValue, privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public)")
     }
 
     #if MESHYY
@@ -525,6 +540,9 @@ final class TerminalSession: Identifiable, Hashable {
     /// notifications: only the USER answering does.
     func sendInput(_ data: Data, countsAsResponse: Bool = true) {
         if countsAsResponse {
+            if currentWaitSeen {
+                agentAlertLog.notice("answered session=\(self.id.logTag, privacy: .public) bytes=\(data.count, privacy: .public) — seen-wait mute cleared")
+            }
             currentWaitSeen = false
         }
         outboxContinuation.yield(.data(data))
@@ -1717,10 +1735,23 @@ private final class SessionIO: TerminalViewDelegate {
 
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
         let payload = Data(data)
+        if let focus = Self.focusReport(payload) {
+            agentAlertLog.notice("focus-\(focus, privacy: .public) report leaving via send")
+        }
         MainActor.assumeIsolated { session?.sendInput(payload) }
     }
 
+    /// "in"/"out" when `data` is exactly a mode-1004 focus report.
+    static func focusReport(_ data: Data) -> String? {
+        switch Array(data) {
+        case [0x1B, 0x5B, 0x49]: return "in"
+        case [0x1B, 0x5B, 0x4F]: return "out"
+        default: return nil
+        }
+    }
+
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        agentAlertLog.notice("resize \(newCols, privacy: .public)x\(newRows, privacy: .public)")
         MainActor.assumeIsolated { session?.resize(cols: newCols, rows: newRows) }
     }
 
@@ -1754,6 +1785,7 @@ private final class SessionIO: TerminalViewDelegate {
     func bell(source: TerminalView) {
         // Agents ring the bell on completion. Same funnel, same policy, same
         // rate limit as the waiting transition — a bell storm is still a storm.
+        agentAlertLog.notice("bell")
         Task { @MainActor [weak session] in
             session?.postAgentAlert(.bell)
         }

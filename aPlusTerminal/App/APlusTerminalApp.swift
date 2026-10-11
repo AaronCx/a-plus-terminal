@@ -96,6 +96,7 @@ struct APlusTerminalApp: App {
         AppDependencyManager.shared.add(dependency: router)
         AppDependencyManager.shared.add(dependency: servers)
         #if DEBUG
+        AgentAlertProbe.shared.start()
         TestSeed.applyIfRequested(servers: servers, keys: keys, router: router, settings: settings)
         TestSeed.applyVNCIfRequested(servers: servers, passwords: passwords, vncManager: vncMonitors)
         #endif
@@ -126,6 +127,7 @@ struct APlusTerminalApp: App {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            agentAlertLog.notice("scene \(String(describing: phase), privacy: .public)")
             switch phase {
             case .background:
                 sessions.appDidEnterBackground()

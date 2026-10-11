@@ -11,6 +11,9 @@ import UserNotifications
 /// notification storm.
 struct AgentAlertPolicy {
     static let minimumInterval: TimeInterval = 30
+    /// The floor this instance applies. The static default everywhere except
+    /// DEBUG live tests, which lower it so repeats are counted, not masked.
+    var minimumInterval: TimeInterval = AgentAlertPolicy.minimumInterval
     private var lastPosted: [UUID: Date] = [:]
 
     enum Trigger: Equatable {
@@ -20,11 +23,36 @@ struct AgentAlertPolicy {
         case bell
     }
 
+    /// What the policy decided, with the reason when it said no — logged, so
+    /// a missing (or extra) notification can be explained after the fact.
+    enum Decision: Equatable {
+        case post
+        case appActive
+        case pipShowing
+        case floor
+    }
+
     /// Decides, and records the post when it says yes.
     ///
     /// `appIsActive`: a user looking at the app does not need a banner about
     /// what they can see. `pipIsShowing`: same reasoning — the pop-out exists
     /// so they can watch; being told what they are watching is noise.
+    mutating func decide(
+        session: UUID,
+        trigger: Trigger,
+        appIsActive: Bool,
+        pipIsShowing: Bool,
+        now: Date = Date()
+    ) -> Decision {
+        if appIsActive { return .appActive }
+        if pipIsShowing { return .pipShowing }
+        if let last = lastPosted[session], now.timeIntervalSince(last) < minimumInterval {
+            return .floor
+        }
+        lastPosted[session] = now
+        return .post
+    }
+
     mutating func shouldPost(
         session: UUID,
         trigger: Trigger,
@@ -32,12 +60,8 @@ struct AgentAlertPolicy {
         pipIsShowing: Bool,
         now: Date = Date()
     ) -> Bool {
-        guard !appIsActive, !pipIsShowing else { return false }
-        if let last = lastPosted[session], now.timeIntervalSince(last) < Self.minimumInterval {
-            return false
-        }
-        lastPosted[session] = now
-        return true
+        decide(session: session, trigger: trigger, appIsActive: appIsActive,
+               pipIsShowing: pipIsShowing, now: now) == .post
     }
 
     mutating func forget(session: UUID) {
@@ -55,6 +79,15 @@ final class AgentAlertCenter: NSObject {
     private var authorizationRequested = false
     /// Injected in tests; the real router in the app.
     var openURL: ((URL) -> Void)?
+
+    override init() {
+        super.init()
+        #if DEBUG
+        if let floor = AgentAlertProbe.floorOverride {
+            policy.minimumInterval = floor
+        }
+        #endif
+    }
 
     /// Called the first time an agent is DETECTED in any session — the moment
     /// notifications become meaningful, which is the sensible ask. Asking at
@@ -81,10 +114,15 @@ final class AgentAlertCenter: NSObject {
         appIsActive: Bool,
         pipIsShowing: Bool
     ) {
-        guard policy.shouldPost(
+        let decision = policy.decide(
             session: sessionID, trigger: trigger,
             appIsActive: appIsActive, pipIsShowing: pipIsShowing
-        ) else { return }
+        )
+        agentAlertLog.notice("policy session=\(sessionID.logTag, privacy: .public) trigger=\(String(describing: trigger), privacy: .public) decision=\(String(describing: decision), privacy: .public) appActive=\(appIsActive, privacy: .public) pip=\(pipIsShowing, privacy: .public)")
+        #if DEBUG
+        AgentAlertProbe.shared.noteWouldPost()
+        #endif
+        guard decision == .post else { return }
 
         let content = UNMutableNotificationContent()
         let who = agentName ?? "The agent"
@@ -108,6 +146,10 @@ final class AgentAlertCenter: NSObject {
             content: content,
             trigger: nil
         ))
+        agentAlertLog.notice("posted session=\(sessionID.logTag, privacy: .public) trigger=\(String(describing: trigger), privacy: .public)")
+        #if DEBUG
+        AgentAlertProbe.shared.notePost()
+        #endif
     }
 
     func sessionClosed(_ sessionID: UUID) {
