@@ -35,9 +35,14 @@ unreleased work accumulates at the top.
   (#139, #140, #143, #149)
 - **Sessions widget:** a home-screen widget that lists live sessions and
   opens exactly the session it shows. (#135, #136)
-- **Agent icons:** agents get their real faces across the app, with a
-  hand-drawn doodle set as the default and support for custom icons,
-  sized to fit the Dynamic Island. (#143, #144, #145, #146, #148)
+- **Agent icons and custom agents:** agents get their real faces across the
+  app, with a hand-drawn doodle set as the default and support for custom
+  icons, sized to fit the Dynamic Island. Settings → Agents now lets you
+  create your own agent for any command-line tool, with its own icon from
+  Photos or Files: a+Terminal recognizes it from the command name or what
+  it prints when it starts, and shows it on the session, the Live Activity
+  and the Dynamic Island like a built-in. Agents export and import as JSON;
+  your icons stay on your device. (#143, #144, #145, #146, #148)
 - **Fixes:** returning from a preview refocuses the terminal program, and
   the Sessions widget orders sessions correctly (#136); scrolling is
   consistent and alerts are honest about state (#145); the session picker
