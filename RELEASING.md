@@ -18,6 +18,22 @@ lists exactly the versions Apple has approved.
 `scripts/ship-testflight.sh <build>` runs from `develop`: version-bump PR →
 CI → merge → signed archive → metadata gate → upload → poll to VALID.
 
+## App Store candidates
+
+App Store candidates are cut with `scripts/ship-testflight.sh <build> --app-store`.
+It archives the `aPlusTerminalAppStore` scheme, which is built without the
+`MESHYY` condition and without the Meshyy package, so meshyy is not in the
+binary at all (App Review tests the exact uploaded binary; a runtime "off" is
+not enough). On top of the usual gates it refuses a dirty tree, requires 0
+`@rpath` references, runs `scripts/check-no-meshyy.sh` on the archived app,
+and writes "App Store candidate" into the build's TestFlight What to Test
+notes. The candidate Aaron tests is the build that gets submitted; any change
+after his review means a new candidate. Archives are kept in
+`~/Library/Developer/Xcode/Archives/aPlusTerminal/`.
+
+`main` will contain meshyy source behind `#if MESHYY` after a release merge.
+That is expected: the approved binary did not include it.
+
 ## When Apple approves version X.Y.Z (build N)
 
 1. Find the commit the approved build was archived from — the
