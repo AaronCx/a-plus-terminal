@@ -4,6 +4,7 @@
 # Encodes the proven build 3-29 recipe: version-bump PR -> CI -> merge ->
 # manual-signed archive -> ITMS-90626 metadata gate -> single-step upload ->
 # poll to VALID with the silent-rejection alarm. One Pushover per outcome.
+# Optional env SHIP_PUSHOVER_MESSAGE replaces the VALID Pushover's body.
 #
 # Machine-local prerequisites (this is Aaron's Mac Mini pipeline; runs nowhere
 # else): relay-ci.keychain + ~/.appstoreconnect key/pass files, full Xcode at
@@ -149,8 +150,10 @@ for extra in ([], ['--resolve', 'api.appstoreconnect.apple.com:443:17.56.10.18']
 PY
 )
   if [[ "$state" == "VALID" ]]; then
+    # SHIP_PUSHOVER_MESSAGE (optional) replaces the body — e.g. what Aaron
+    # should try on this build — so a release needs ONE Pushover, not two.
     "$PUSHOVER" "TestFlight build $BUILD_N VALID" \
-      "Upload processed clean in ~$((i / 2)) min. Install via TestFlight — state the build number when testing." \
+      "${SHIP_PUSHOVER_MESSAGE:-Upload processed clean in ~$((i / 2)) min. Install via TestFlight — state the build number when testing.}" \
       "https://appstoreconnect.apple.com/apps/$APP_ID/testflight/ios" >/dev/null 2>&1
     echo "build $BUILD_N VALID"
     exit 0

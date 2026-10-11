@@ -82,7 +82,19 @@ final class TerminalSession: Identifiable, Hashable {
     private(set) var connection = SSHConnection()
     /// The meshyy transport, when the toggle is on and the host has a daemon.
     /// The SSH connection above stays live regardless; this replaces only the pty.
-    private(set) var meshyy: MeshyyTransport?
+    private(set) var meshyy: MeshyyTransport? {
+        didSet {
+            // Scroll trace: frames belong to the daemon that sent them. Kept
+            // across `rebuilt()` (meshyy is replaced, never nil'd), dropped
+            // when meshyy stops carrying the pty — SSH fallback, clean exit,
+            // a closed tab — so a later record never reports another
+            // transport's far side as this one's.
+            if meshyy == nil {
+                lastModesFrame = nil
+                lastScreenModeFrame = nil
+            }
+        }
+    }
     /// Why meshyy is not carrying this session, when it was asked to.
     private(set) var meshyyUnavailable: String?
     /// True when meshyy is carrying this session's pty — the transport survives a
@@ -233,8 +245,40 @@ final class TerminalSession: Identifiable, Hashable {
             self.noteAgentStatus(status)
             self.onStateChange?()   // repaint the rows that show it
         }
+        // Scroll trace: frames the pump saw before this wiring (the attach
+        // handshake delivers both) are adopted; later ones arrive by callback.
+        // Kept on the session so they survive `rebuilt()`.
+        if let frame = transport.lastModesFrame,
+           frame.at > (lastModesFrame?.at ?? .distantPast) {
+            lastModesFrame = frame
+        }
+        if let frame = transport.lastScreenModeFrame,
+           frame.at > (lastScreenModeFrame?.at ?? .distantPast) {
+            lastScreenModeFrame = frame
+        }
+        transport.onModesFrame = { [weak self] active, at in
+            self?.lastModesFrame = (active, at)
+        }
+        transport.onScreenModeFrame = { [weak self] alt, at in
+            self?.lastScreenModeFrame = (alt, at)
+        }
     }
     private var meshyyPumpTask: Task<Void, Never>?
+
+    // MARK: Scroll trace telemetry (observation only)
+
+    /// When the emulator was last fed bytes, by either pump.
+    @ObservationIgnored private(set) var lastInboundBytesAt: Date?
+    /// The last `.modes` / `.screenMode` frame from the daemon (meshyy only).
+    @ObservationIgnored private(set) var lastModesFrame: (active: Set<Int>, at: Date)?
+    @ObservationIgnored private(set) var lastScreenModeFrame: (alt: Bool, at: Date)?
+    @ObservationIgnored private var scrollTracer: ScrollGestureTracer?
+    /// The store this session's swipes are recorded into (live tests read it).
+    @ObservationIgnored private(set) var scrollTraceStoreForTesting: ScrollTraceStore?
+    /// The last pty resize a transport was actually handed, and how it went.
+    /// A lost resize leaves tmux's pty smaller than the emulator, and wheel
+    /// events aimed below tmux's last row are dropped.
+    @ObservationIgnored private(set) var lastPtyResize: ScrollTraceContext.PtyResize?
 
     /// Detached sessions the daemon holds for this server, set while the connect is
     /// parked waiting for the user to choose — drives the survivor picker overlay.
@@ -265,7 +309,8 @@ final class TerminalSession: Identifiable, Hashable {
     private let settings: AppSettings
     private let profiles: ProfileStore
     private var io: SessionIO?
-    private var scrollBridge: ScrollBridge?
+    /// Visible (read-only) so the SSH-oracle harness can drive real swipes.
+    private(set) var scrollBridge: ScrollBridge?
     private var pumpTask: Task<Void, Never>?
     private var reconnectLoop: Task<Void, Never>?
     private var keepaliveTask: Task<Void, Never>?
@@ -330,6 +375,9 @@ final class TerminalSession: Identifiable, Hashable {
     /// starts "the second you type".
     private enum Outbound {
         case data(Data)
+        /// Scroll bytes that belong to a scroll-trace record: sent exactly
+        /// like `.data`, but the send's outcome is reported to the trace.
+        case tracedData(Data, recordID: UUID, enqueuedAt: Date)
         case resize(cols: Int, rows: Int)
     }
 
@@ -337,7 +385,7 @@ final class TerminalSession: Identifiable, Hashable {
     private let outboxContinuation: AsyncStream<Outbound>.Continuation
     private var outboxTask: Task<Void, Never>?
 
-    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
+    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, scrollTrace: ScrollTraceStore? = nil) {
         self.server = server
         self.keyStore = keyStore
         self.serverStore = serverStore
@@ -375,7 +423,79 @@ final class TerminalSession: Identifiable, Hashable {
             self.showMultiplexerHint = true
         }
         scrollBridge.attach(to: terminalView)
+        if let scrollTrace {
+            let tracer = ScrollGestureTracer(store: scrollTrace) { [weak self] in
+                self?.scrollTraceContext()
+            }
+            scrollBridge.tracer = tracer
+            scrollBridge.sendTraced = { [weak self] data, recordID in
+                // Same path as sendInput(_, countsAsResponse: false): the
+                // FIFO outbox, nothing else.
+                self?.outboxContinuation.yield(.tracedData(data, recordID: recordID, enqueuedAt: Date()))
+            }
+            scrollTracer = tracer
+            scrollTraceStoreForTesting = scrollTrace
+        }
         self.scrollBridge = scrollBridge
+    }
+
+    /// The session half of a scroll-trace record.
+    private func scrollTraceContext() -> ScrollTraceContext {
+        var transportState: ScrollTrace.TransportState = switch state {
+        case .connected: .connected
+        case .connecting, .reconnecting: .reconnecting
+        case .suspended, .closed: .dead
+        }
+        // A tab can sit `.connected` on a sealed meshyy transport (it finished
+        // inside establish()'s window-size await, before the pump could react):
+        // every byte sent there goes nowhere, so the transport is dead whatever
+        // the tab says. `rawSessionState` keeps what the tab said.
+        if transportState == .connected, meshyy?.isFinished == true {
+            transportState = .dead
+        }
+        let session: String?
+        let sessionSource: ScrollTrace.SessionSource?
+        if let name = meshyy?.sessionName {
+            (session, sessionSource) = (name, .meshyy)
+        } else {
+            (session, sessionSource) = (server.lastMultiplexerTarget, .serverLastMultiplexerTarget)
+        }
+        return ScrollTraceContext(
+            tabID: id,
+            server: server.name,
+            session: session,
+            sessionSource: sessionSource,
+            transport: usesMeshyy ? .meshyy : .ssh,
+            meshyyUnavailableReason: meshyyUnavailable,
+            transportState: transportState,
+            rawSessionState: String(describing: state),
+            meshyyTransportFinished: meshyy?.isFinished,
+            lastInboundBytesAt: lastInboundBytesAt,
+            lastPtyResize: lastPtyResize,
+            // Pong-inclusive (meshyy 0.1.22): an idle healthy session is still
+            // answered every heartbeat, so a large age here means the path went
+            // silent — the 3-4 s before the heartbeat declares death. Nil over
+            // SSH, which has no equivalent signal.
+            lastInboundFrameAt: meshyy?.lastInboundFrameAt,
+            // Only while meshyy carries the pty (see `meshyy`'s didSet).
+            lastModesFrame: meshyy != nil ? lastModesFrame : nil,
+            lastScreenModeFrame: meshyy != nil ? lastScreenModeFrame : nil
+        )
+    }
+
+    /// Uploads a diagnostics export (Settings → Diagnostics) to this server's
+    /// SFTP inbox over the session's existing SSH connection. User-initiated
+    /// only; returns the remote path. Nothing is typed into the terminal.
+    ///
+    /// Bounded by `timeout`: under meshyy nothing probes the SSH socket, so
+    /// after a network change it can be half-open while the tab says
+    /// connected, and SFTP on it would hang until TCP gives up — minutes, at
+    /// exactly the moment someone is sending a trace after a dead swipe.
+    func uploadDiagnostic(_ data: Data, filename: String, timeout: Duration = .seconds(20)) async throws -> String {
+        let connection = self.connection
+        return try await DiagnosticUploadRace.run(timeout: timeout) {
+            try await connection.uploadToInbox(data, filename: filename)
+        }
     }
 
     /// `countsAsResponse: false` marks machine-generated traffic — scroll
@@ -1257,6 +1377,8 @@ final class TerminalSession: Identifiable, Hashable {
             for await chunk in transport.output {
                 guard let self, !Task.isCancelled else { return }
                 let bytes = [UInt8](chunk)
+                self.lastInboundBytesAt = Date()
+                self.scrollTracer?.noteInbound(byteCount: bytes.count)
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
                 // No noteAgentStatus here: under meshyy the daemon's agent
@@ -1378,10 +1500,31 @@ final class TerminalSession: Identifiable, Hashable {
             // Under meshyy the SSH connection has no pty, so resizing it alone would
             // send this nowhere — and this call's whole job is making the pty match the
             // screen before a multiplexer draws into it.
-            try? await meshyy.resize(cols: size.cols, rows: size.rows)
+            await deliverResize(cols: size.cols, rows: size.rows, via: meshyy, else: connection)
             return
         }
-        try? await connection.resize(cols: size.cols, rows: size.rows)
+        await deliverResize(cols: size.cols, rows: size.rows, via: nil, else: connection)
+    }
+
+    /// Hands a resize to the transport carrying the pty (meshyy if given,
+    /// else the SSH connection). Errors are swallowed exactly as before; the
+    /// outcome is only remembered for the scroll trace.
+    private func deliverResize(
+        cols: Int, rows: Int, via meshyy: MeshyyTransport?, else connection: SSHConnection
+    ) async {
+        var failure: String?
+        do {
+            if let meshyy {
+                try await meshyy.resize(cols: cols, rows: rows)
+            } else {
+                try await connection.resize(cols: cols, rows: rows)
+            }
+        } catch {
+            failure = String(describing: error)
+        }
+        lastPtyResize = .init(
+            cols: cols, rows: rows, via: meshyy != nil ? .meshyy : .ssh, error: failure, at: Date()
+        )
     }
 
     /// Single consumer for all outbound traffic — strict FIFO per session,
@@ -1401,12 +1544,23 @@ final class TerminalSession: Identifiable, Hashable {
                     } else {
                         try? await connection.send(data)
                     }
-                case .resize(let cols, let rows):
-                    if let meshyy {
-                        try? await meshyy.resize(cols: cols, rows: rows)
-                    } else {
-                        try? await connection.resize(cols: cols, rows: rows)
+                case .tracedData(let data, let recordID, let enqueuedAt):
+                    var failure: String?
+                    do {
+                        if let meshyy {
+                            try await meshyy.send(data)
+                        } else {
+                            try await connection.send(data)
+                        }
+                    } catch {
+                        failure = String(describing: error)
                     }
+                    self.scrollTracer?.noteSend(
+                        recordID: recordID, via: meshyy != nil ? .meshyy : .ssh, error: failure,
+                        enqueuedAt: enqueuedAt
+                    )
+                case .resize(let cols, let rows):
+                    await self.deliverResize(cols: cols, rows: rows, via: meshyy, else: connection)
                 }
             }
         }
@@ -1417,6 +1571,8 @@ final class TerminalSession: Identifiable, Hashable {
             for await chunk in await connection.output {
                 guard let self, !Task.isCancelled else { return }
                 let bytes = [UInt8](chunk)
+                self.lastInboundBytesAt = Date()
+                self.scrollTracer?.noteInbound(byteCount: bytes.count)
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
                 self.noteAgentStatus(self.agentMonitor.status)
@@ -1563,6 +1719,8 @@ final class SessionManager {
     private let profiles: ProfileStore
     private let activityController = SessionActivityController()
     private let diagnostics: BackgroundExitDiagnostics
+    /// On-device swipe trace, shared by every session (nil = not traced).
+    private let scrollTrace: ScrollTraceStore?
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
@@ -1648,13 +1806,14 @@ final class SessionManager {
         }
     }
 
-    init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, diagnostics: BackgroundExitDiagnostics? = nil) {
+    init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, diagnostics: BackgroundExitDiagnostics? = nil, scrollTrace: ScrollTraceStore? = nil) {
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.passwords = passwords
         self.settings = settings
         self.profiles = profiles
         self.diagnostics = diagnostics ?? BackgroundExitDiagnostics()
+        self.scrollTrace = scrollTrace
         // A surviving Live Activity from a previous launch must reflect this
         // process's truth (no sessions yet) instead of stale ones (§4.5).
         // The controller adopts one survivor in its init; this zero push then
@@ -1671,7 +1830,8 @@ final class SessionManager {
             serverStore: serverStore,
             passwords: passwords,
             settings: settings,
-            profiles: profiles
+            profiles: profiles,
+            scrollTrace: scrollTrace
         )
         session.meshyyNamesInUse = { [weak self] in self?.meshyyNamesInUse() ?? [] }
         session.postAgentAlert = { [weak self, weak session] trigger in
