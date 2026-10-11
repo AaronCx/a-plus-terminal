@@ -40,6 +40,9 @@
 #     _ssh._tcp. with NWBrowser (multicast DNS on the local network), only on
 #     the Add Server discovery screen.
 # Neither is QUIC and neither leaves the local network.
+#
+# `test && pass || fail` is a real if/else here: pass() only echoes.
+# shellcheck disable=SC2015
 set -uo pipefail
 
 app="${1:-}"
