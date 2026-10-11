@@ -4,11 +4,10 @@ import UserNotifications
 /// When an agent alert may post. Pure logic, no UNUserNotificationCenter —
 /// the tests drive this directly, the shell below owns the system calls.
 ///
-/// The policy mirrors the daemon's AgentNotifier reasoning rather than
-/// reimplementing it differently: alert on the transition INTO waiting (and
-/// the completion bell), never on "working" (it fires constantly), with a
-/// 30-second per-session floor so a flapping agent cannot become a
-/// notification storm.
+/// The policy is the LAST gate. What reaches it is already an explicit signal
+/// from the agent (`TerminalSession.noteAgentSignal`) — never the timing
+/// heuristic — and it adds a 30-second per-session floor so a chatty agent
+/// cannot become a notification storm.
 struct AgentAlertPolicy {
     static let minimumInterval: TimeInterval = 30
     /// The floor this instance applies. The static default everywhere except
@@ -17,10 +16,24 @@ struct AgentAlertPolicy {
     private var lastPosted: [UUID: Date] = [:]
 
     enum Trigger: Equatable {
-        /// The agent moved INTO waiting from something else.
-        case becameWaiting
-        /// The terminal bell — agents ring it on completion.
+        /// A bare BEL: the agent wants attention and did not say why.
         case bell
+        /// OSC 9 / OSC 777: the agent's own words.
+        case message(title: String?, body: String)
+        /// OSC 7501 `blocked`: it needs an answer (permission, question, auth).
+        case blocked(kind: String?)
+        /// OSC 7501 `done`: the turn finished.
+        case finished
+
+        /// Request-identifier suffix: one pending banner per kind per session.
+        var slug: String {
+            switch self {
+            case .bell: return "bell"
+            case .message: return "message"
+            case .blocked: return "blocked"
+            case .finished: return "finished"
+            }
+        }
     }
 
     /// What the policy decided, with the reason when it said no — logged, so
@@ -124,11 +137,7 @@ final class AgentAlertCenter: NSObject {
         #endif
         guard decision == .post else { return }
 
-        let content = UNMutableNotificationContent()
-        let who = agentName ?? "The agent"
-        content.title = trigger == .bell ? "\(who) finished" : "\(who) needs you"
-        content.body = "In \(serverName). Tap to answer."
-        content.sound = .default
+        let content = Self.content(for: trigger, agentName: agentName, serverName: serverName)
         // The deep link lands the tap in the RIGHT session, not the app's
         // last state. By daemon session name when meshyy carries it — the
         // name outlives the tab — by session id otherwise.
@@ -142,7 +151,7 @@ final class AgentAlertCenter: NSObject {
         content.userInfo = ["url": "aplusterminal://session/\(sessionID.uuidString)"]
         #endif
         UNUserNotificationCenter.current().add(UNNotificationRequest(
-            identifier: "agent-\(sessionID.uuidString)-\(trigger == .bell ? "bell" : "waiting")",
+            identifier: "agent-\(sessionID.uuidString)-\(trigger.slug)",
             content: content,
             trigger: nil
         ))
@@ -150,6 +159,35 @@ final class AgentAlertCenter: NSObject {
         #if DEBUG
         AgentAlertProbe.shared.notePost()
         #endif
+    }
+
+    /// Title and body for one trigger. A bare bell says only that the agent
+    /// wants attention — Claude Code rings the same bell for "may I?" and for
+    /// "done", so claiming either would be a guess.
+    static func content(for trigger: AgentAlertPolicy.Trigger, agentName: String?, serverName: String) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        let who = agentName ?? "The agent"
+        switch trigger {
+        case .bell:
+            content.title = "\(who) wants your attention"
+            content.body = "In \(serverName). Tap to open the session."
+        case .message(let title, let body):
+            content.title = title ?? who
+            content.body = body.isEmpty ? "In \(serverName)." : "\(body) — \(serverName)"
+        case .blocked(let kind):
+            content.title = "\(who) needs you"
+            switch kind {
+            case "permission": content.body = "Waiting for your permission in \(serverName)."
+            case "question": content.body = "Waiting for your answer in \(serverName)."
+            case "auth": content.body = "Needs you to sign in again in \(serverName)."
+            default: content.body = "In \(serverName). Tap to answer."
+            }
+        case .finished:
+            content.title = "\(who) finished"
+            content.body = "In \(serverName)."
+        }
+        content.sound = .default
+        return content
     }
 
     func sessionClosed(_ sessionID: UUID) {

@@ -128,6 +128,7 @@ struct APlusTerminalApp: App {
         }
         .onChange(of: scenePhase) { _, phase in
             agentAlertLog.notice("scene \(String(describing: phase), privacy: .public)")
+            sessions.scenePhaseChanged(to: String(describing: phase))
             switch phase {
             case .background:
                 sessions.appDidEnterBackground()

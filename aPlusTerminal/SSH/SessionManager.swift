@@ -124,15 +124,21 @@ final class TerminalSession: Identifiable, Hashable {
     private(set) var daemonAgentID: String?
     #endif
 
-    /// Asset name for the detected agent's mascot mark, when one is detected.
-    var effectiveAgentIconName: String? {
+    /// The NAMED agent running here — a profile matched its marker (or the
+    /// daemon named it), never the generic "Agent" guess.
+    var namedAgentID: String? {
         #if MESHYY
         let id = (usesMeshyy ? daemonAgentID : nil) ?? agentMonitor.detected?.id
         #else
         let id = agentMonitor.detected?.id
         #endif
         guard let id, id != "generic" else { return nil }
-        return "agent-\(id)"
+        return id
+    }
+
+    /// Asset name for the detected agent's mascot mark, when one is detected.
+    var effectiveAgentIconName: String? {
+        namedAgentID.map { "agent-\($0)" }
     }
 
     /// What the surfaces show: the daemon's read when there is one, the
@@ -150,26 +156,36 @@ final class TerminalSession: Identifiable, Hashable {
         return agentMonitor.detected?.displayName
     }
 
-    /// Last agent status this session alerted on, for transition detection.
+    /// Last agent status the funnel noted — bookkeeping and logs only.
     @ObservationIgnored private var alertedAgentStatus: AgentActivityMonitor.Status = .none
-    /// When the current working phase began — the alert filter's evidence.
-    @ObservationIgnored private var workingSince: Date?
-    /// True once the user has LOOKED at this session while its agent waited —
-    /// and until they actually answer. An agent with background tasks cycles
-    /// working→waiting on its own timers, and every cycle used to read as a
-    /// brand-new "needs you": the user's report was notifications for a
-    /// session they had already checked out and deliberately not answered.
-    /// Seeing the wait is the mute; SENDING INPUT is what re-arms alerts,
-    /// because a response is the only signal that the next wait is news.
+    /// An agent signal got through to the user and they have not answered
+    /// since.
+    @ObservationIgnored private var signalPending = false
+    /// True once the user has LOOKED at this session while a signal was
+    /// pending — and until they actually answer. The user's report was
+    /// notifications for a session they had already checked out and
+    /// deliberately not answered. Seeing it is the mute; SENDING INPUT is
+    /// what re-arms alerts, because a response is the only signal that the
+    /// next ring is news.
     @ObservationIgnored private var currentWaitSeen = false
-    /// A waiting edge only alerts after this much REAL work. Anything shorter
-    /// is a redraw cycle wearing work's clothes: dismissing the keyboard on
-    /// the way out of the app resizes the pty, the TUI repaints (a burst, so
-    /// "working"), goes quiet, and ~2s later manufactures a waiting edge —
-    /// which posted a notification every single time the user left the app.
-    /// Typing does the same dance turn-by-turn. A real "the agent finished
-    /// and needs you" follows sustained work, not a two-second repaint.
-    static let minimumWorkBeforeAlert: TimeInterval = 4
+    /// The last real pty size change or app scene-phase change. Every one of
+    /// them makes a TUI repaint, and for a moment afterwards nothing the
+    /// session says is about the user — leaving the app dismisses the
+    /// keyboard, resizes the pty, and the agent redraws.
+    @ObservationIgnored private var lastDisruptionAt: Date?
+    /// Signals inside this window after a disruption are dropped.
+    static let disruptionQuietPeriod: TimeInterval = 2
+    /// The program here answered the OSC 7501 probe's promise with a record:
+    /// it announced itself, so it counts as an agent with or without a
+    /// marker match.
+    @ObservationIgnored private(set) var speaksProgramStatus = false
+    /// True while SwiftTerm parses server output. Anything SwiftTerm writes
+    /// back inside that window is its reply to a query in the output (DA,
+    /// XTVERSION, colors) — the terminal talking, not the user.
+    @ObservationIgnored var isFeedingOutput = false
+    /// Test seam: every write to the pty, and whether it counted as the
+    /// user's answer.
+    @ObservationIgnored var onSendInput: ((Data, Bool) -> Void)?
     /// Seams for the alert shell, injectable so tests never touch
     /// UNUserNotificationCenter. Defaults post through AgentAlertCenter.
     @ObservationIgnored var postAgentAlert: (AgentAlertPolicy.Trigger) -> Void = { _ in }
@@ -178,53 +194,84 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     /// Every observed agent-status change funnels here — from the SSH byte
-    /// heuristic and from meshyy's daemon events alike — so the notification
-    /// decision exists exactly once.
+    /// heuristic and from meshyy's daemon events alike. It NEVER posts a
+    /// notification. Inferring "needs you" from output timing posted one
+    /// every time the user left the app (keyboard dismissal → resize →
+    /// repaint burst → quiet → "waiting"), and two rounds of filters on the
+    /// guess did not stop it. The heuristic still drives the badge, the
+    /// server-row count, the Live Activity and the pop-out chip, where a
+    /// wrong guess is cheap; notifications come from `noteAgentSignal`.
     func noteAgentStatus(_ status: AgentActivityMonitor.Status, now: Date = Date()) {
         defer { alertedAgentStatus = status }
-        logNoteAgentStatus(status, now: now)
-        if status == .working, alertedAgentStatus != .working {
-            workingSince = now
-        }
-        if status != .none {
-            AgentAlertCenter.shared.agentDetected()
-        }
-        guard status == .waiting, alertedAgentStatus != .waiting else { return }
-        // The filter: only sustained work earns an alert on its end.
-        guard let since = workingSince,
-              now.timeIntervalSince(since) >= Self.minimumWorkBeforeAlert else { return }
-        // A wait the user has seen and chosen not to answer stays quiet —
-        // including the "new" edges its own background cycles manufacture —
-        // until the user responds.
-        guard !currentWaitSeen else { return }
-        postAgentAlert(.becameWaiting)
-    }
-
-    /// One debug line per noted status — the fields the alert decision reads,
-    /// and whether this call would post (ignoring the policy's own gates).
-    private func logNoteAgentStatus(_ status: AgentActivityMonitor.Status, now: Date) {
-        let since = workingSince.map { String(format: "%.1f", now.timeIntervalSince($0)) } ?? "nil"
-        let wouldPost = status == .waiting && alertedAgentStatus != .waiting
-            && (workingSince.map { now.timeIntervalSince($0) >= Self.minimumWorkBeforeAlert } ?? false)
-            && !currentWaitSeen
-        agentAlertLog.debug("note session=\(self.id.logTag, privacy: .public) status=\(status.rawValue, privacy: .public) alerted=\(self.alertedAgentStatus.rawValue, privacy: .public) workingFor=\(since, privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public) wouldPost=\(wouldPost, privacy: .public)")
+        agentAlertLog.debug("note session=\(self.id.logTag, privacy: .public) status=\(status.rawValue, privacy: .public) alerted=\(self.alertedAgentStatus.rawValue, privacy: .public) agent=\(self.namedAgentID ?? "nil", privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public) wouldPost=false")
         #if DEBUG
-        AgentAlertProbe.shared.noteAgent(agentMonitor.detected?.id)
+        AgentAlertProbe.shared.noteAgent(namedAgentID)
         #endif
+        if let agent = namedAgentID {
+            noteNamedAgent(agent)
+        }
     }
 
-    /// The session screen is in front of the user's eyes. If the agent is
-    /// waiting right now, that wait is officially seen.
-    ///
-    /// Judged against the FUNNEL's own record (the last status noted), not
-    /// re-derived from the monitors: the funnel is what decides alerts, so
-    /// the funnel's view of "waiting" is the one that must be marked — the
-    /// monitors can lag or disagree with it.
+    /// A named agent is running here: the moment notifications become
+    /// meaningful, so ask for permission now (once per process).
+    private func noteNamedAgent(_ agent: String) {
+        AgentAlertCenter.shared.agentDetected()
+    }
+
+    /// Why a signal did or did not reach the alert policy.
+    enum SignalOutcome: Equatable {
+        case forwarded(AgentAlertPolicy.Trigger)
+        /// A status update, not a request (7501 working/idle/…).
+        case notARequest
+        /// No named agent here: a plain shell's BEL is tab completion.
+        case noAgent
+        /// Within the quiet period after a resize or scene-phase change.
+        case disruption
+        /// The user saw the pending signal and has not answered yet.
+        case seenUnanswered
+    }
+
+    /// The ONLY path to a notification: the program in the terminal said
+    /// something meant for the user (BEL, OSC 9/777, OSC 7501). Gates, in
+    /// order: a named agent (or a 7501 speaker) is here; no resize or
+    /// scene-phase change in the last 2 s; the user has not seen-and-left an
+    /// earlier signal unanswered. The policy (floor, app active, pop-out)
+    /// gets the last word.
+    @discardableResult
+    func noteAgentSignal(_ signal: AgentSignal, now: Date = Date()) -> SignalOutcome {
+        let outcome = signalOutcome(signal, now: now)
+        agentAlertLog.notice("signal session=\(self.id.logTag, privacy: .public) kind=\(signal.logName, privacy: .public) agent=\(self.namedAgentID ?? (self.speaksProgramStatus ? "osc7501" : "nil"), privacy: .public) outcome=\(String(describing: outcome), privacy: .public)")
+        if case .forwarded(let trigger) = outcome {
+            signalPending = true
+            postAgentAlert(trigger)
+        }
+        return outcome
+    }
+
+    private func signalOutcome(_ signal: AgentSignal, now: Date) -> SignalOutcome {
+        guard let trigger = signal.trigger else { return .notARequest }
+        guard namedAgentID != nil || speaksProgramStatus else { return .noAgent }
+        if let last = lastDisruptionAt, now.timeIntervalSince(last) < Self.disruptionQuietPeriod {
+            return .disruption
+        }
+        guard !currentWaitSeen else { return .seenUnanswered }
+        return .forwarded(trigger)
+    }
+
+    /// A real pty size change or app scene-phase change (see
+    /// `lastDisruptionAt`).
+    func noteDisruption(_ reason: String, now: Date = Date()) {
+        lastDisruptionAt = now
+        agentAlertLog.notice("disruption session=\(self.id.logTag, privacy: .public) reason=\(reason, privacy: .public)")
+    }
+
+    /// The session screen is in front of the user's eyes. If a signal is
+    /// pending right now, it is officially seen.
     func markViewed() {
-        if alertedAgentStatus == .waiting {
+        if signalPending {
             currentWaitSeen = true
         }
-        agentAlertLog.notice("viewed session=\(self.id.logTag, privacy: .public) alerted=\(self.alertedAgentStatus.rawValue, privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public)")
+        agentAlertLog.notice("viewed session=\(self.id.logTag, privacy: .public) pending=\(self.signalPending, privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public)")
     }
 
     #if MESHYY
@@ -247,6 +294,7 @@ final class TerminalSession: Identifiable, Hashable {
             try await meshyy.performQuickAction(id: id)
             lastQuickActionRefusal = nil
             currentWaitSeen = false
+            signalPending = false
             return true
         } catch {
             lastQuickActionRefusal = "\(error)"
@@ -438,6 +486,7 @@ final class TerminalSession: Identifiable, Hashable {
         bridge.sendData = { [weak self] data in
             self?.sendInput(data)
         }
+        registerAgentSignalHandlers()
 
         let scrollBridge = ScrollBridge(
             sendData: { [weak self] data in self?.sendInput(data, countsAsResponse: false) },
@@ -536,16 +585,70 @@ final class TerminalSession: Identifiable, Hashable {
     #endif
 
     /// `countsAsResponse: false` marks machine-generated traffic — scroll
-    /// wheel events, internal multiplexer commands — which must not re-arm
-    /// notifications: only the USER answering does.
+    /// wheel events, internal multiplexer commands, focus reports, the
+    /// terminal's replies to queries — which must not re-arm notifications:
+    /// only the USER answering does.
     func sendInput(_ data: Data, countsAsResponse: Bool = true) {
         if countsAsResponse {
             if currentWaitSeen {
                 agentAlertLog.notice("answered session=\(self.id.logTag, privacy: .public) bytes=\(data.count, privacy: .public) — seen-wait mute cleared")
             }
             currentWaitSeen = false
+            signalPending = false
         }
+        onSendInput?(data, countsAsResponse)
         outboxContinuation.yield(.data(data))
+    }
+
+    /// The agent-signal escape sequences SwiftTerm does not deliver on iOS.
+    /// Registered once: the handlers live on the parser, which survives
+    /// `resetToInitialState()` on every (re)connect. They run synchronously
+    /// inside `feed`, on the main actor.
+    private func registerAgentSignalHandlers() {
+        let terminal = terminalView.getTerminal()
+        // OSC 777 notify;title;body. SwiftTerm parses it but forwards it to a
+        // delegate method the iOS view never implements.
+        terminal.registerOscHandler(code: 777) { [weak self] data in
+            MainActor.assumeIsolated {
+                guard let self, let signal = AgentSignal.parseOSC777(data) else { return }
+                self.noteAgentSignal(signal)
+            }
+        }
+        // OSC 9. Installing a handler replaces SwiftTerm's built-in, which
+        // only understood 9;4 progress — so progress is parsed here and
+        // handed back to the view's public progress API, keeping the bar.
+        terminal.registerOscHandler(code: 9) { [weak self, weak terminal] data in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                switch AgentSignal.parseOSC9(data) {
+                case .progress(let report):
+                    if let terminal {
+                        self.terminalView.progressReport(source: terminal, report: report)
+                    }
+                case .notification(let message):
+                    self.noteAgentSignal(.osc9(message: message))
+                case .ignored:
+                    break
+                }
+            }
+        }
+        // OSC 7501 Program Status. A program only reports after its probe is
+        // answered; the answer is the terminal speaking, not the user.
+        terminal.registerOscHandler(code: ProgramStatus.oscCode) { [weak self] data in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                switch ProgramStatus.parse(data) {
+                case .probe:
+                    agentAlertLog.notice("osc7501 probe answered session=\(self.id.logTag, privacy: .public)")
+                    self.sendInput(ProgramStatus.probeReply, countsAsResponse: false)
+                case .record(let record):
+                    self.speaksProgramStatus = true
+                    self.noteAgentSignal(.programStatus(record))
+                case nil:
+                    break
+                }
+            }
+        }
     }
 
     func resize(cols: Int, rows: Int) {
@@ -1436,7 +1539,7 @@ final class TerminalSession: Identifiable, Hashable {
                 let bytes = [UInt8](chunk)
                 self.lastInboundBytesAt = Date()
                 self.scrollTracer?.noteInbound(byteCount: bytes.count)
-                self.terminalView.feed(byteArray: ArraySlice(bytes))
+                self.feedOutput(bytes)
                 self.agentMonitor.observe(bytes)
                 // No noteAgentStatus here: under meshyy the daemon's agent
                 // events drive the alert funnel — feeding the heuristic too
@@ -1642,6 +1745,15 @@ final class TerminalSession: Identifiable, Hashable {
         }
     }
 
+    /// Server output into the emulator. Whatever SwiftTerm sends back while
+    /// parsing it is a reply to a query in that output (see
+    /// `isFeedingOutput`).
+    func feedOutput(_ bytes: [UInt8]) {
+        isFeedingOutput = true
+        defer { isFeedingOutput = false }
+        terminalView.feed(byteArray: ArraySlice(bytes))
+    }
+
     private func startPump(reading connection: SSHConnection) {
         pumpTask = Task { [weak self] in
             for await chunk in await connection.output {
@@ -1651,7 +1763,7 @@ final class TerminalSession: Identifiable, Hashable {
                 self.lastInboundBytesAt = Date()
                 self.scrollTracer?.noteInbound(byteCount: bytes.count)
                 #endif
-                self.terminalView.feed(byteArray: ArraySlice(bytes))
+                self.feedOutput(bytes)
                 self.agentMonitor.observe(bytes)
                 self.noteAgentStatus(self.agentMonitor.status)
                 // Source A of the preview's port detection. Cheap by
@@ -1735,10 +1847,20 @@ private final class SessionIO: TerminalViewDelegate {
 
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
         let payload = Data(data)
-        if let focus = Self.focusReport(payload) {
+        let focus = Self.focusReport(payload)
+        if let focus {
             agentAlertLog.notice("focus-\(focus, privacy: .public) report leaving via send")
         }
-        MainActor.assumeIsolated { session?.sendInput(payload) }
+        MainActor.assumeIsolated {
+            guard let session else { return }
+            // Focus in/out (mode 1004, sent when the terminal view gains or
+            // loses first responder — e.g. every app switch) and SwiftTerm's
+            // replies to queries are the terminal talking. Counting them as
+            // the user's answer cleared the seen-signal mute on every return
+            // to the app. Typing, paste and dictation still count.
+            let machine = focus != nil || session.isFeedingOutput
+            session.sendInput(payload, countsAsResponse: !machine)
+        }
     }
 
     /// "in"/"out" when `data` is exactly a mode-1004 focus report.
@@ -1750,9 +1872,15 @@ private final class SessionIO: TerminalViewDelegate {
         }
     }
 
+    /// SwiftTerm calls this only when cols/rows actually change — a real
+    /// resize, never the keepalive's same-size ping (that goes straight to
+    /// `TerminalSession.resize`).
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         agentAlertLog.notice("resize \(newCols, privacy: .public)x\(newRows, privacy: .public)")
-        MainActor.assumeIsolated { session?.resize(cols: newCols, rows: newRows) }
+        MainActor.assumeIsolated {
+            session?.noteDisruption("resize")
+            session?.resize(cols: newCols, rows: newRows)
+        }
     }
 
     func clipboardCopy(source: TerminalView, content: Data) {
@@ -1783,12 +1911,11 @@ private final class SessionIO: TerminalViewDelegate {
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
     func scrolled(source: TerminalView, position: Double) {}
     func bell(source: TerminalView) {
-        // Agents ring the bell on completion. Same funnel, same policy, same
-        // rate limit as the waiting transition — a bell storm is still a storm.
+        // Claude Code with the terminal_bell channel rings when a permission
+        // prompt waits and after a finished turn. Gated like every signal: a
+        // plain shell's BEL (tab completion) never reaches the policy.
         agentAlertLog.notice("bell")
-        Task { @MainActor [weak session] in
-            session?.postAgentAlert(.bell)
-        }
+        MainActor.assumeIsolated { session?.noteAgentSignal(.bell) }
     }
     func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
@@ -2154,6 +2281,14 @@ final class SessionManager {
                 }
                 try? await Task.sleep(for: .seconds(self.windDownPollInterval))
             }
+        }
+    }
+
+    /// Every scene-phase change (.active, .inactive, .background) makes the
+    /// sessions repaint; agent signals in the next moments are not news.
+    func scenePhaseChanged(to phase: String) {
+        for session in sessions {
+            session.noteDisruption("scene-\(phase)")
         }
     }
 
