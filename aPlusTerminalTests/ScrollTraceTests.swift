@@ -98,6 +98,8 @@ final class ScrollTraceStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("trace.json").path))
 
         let second = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        XCTAssertTrue(second.records.isEmpty, "the load runs off the launch path")
+        await second.waitUntilLoaded()
         XCTAssertEqual(second.records.map(\.id), records.map(\.id))
         for (loaded, original) in zip(second.records, records) {
             XCTAssertEqual(loaded.startedAt.timeIntervalSince1970, original.startedAt.timeIntervalSince1970, accuracy: 0.001)
@@ -114,11 +116,13 @@ final class ScrollTraceStoreTests: XCTestCase {
         try Data("{ not json".utf8).write(to: directory.appendingPathComponent("trace.json"))
         let settings = makeTraceSettings(enabled: true)
         let store = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        await store.waitUntilLoaded()
         XCTAssertTrue(store.records.isEmpty)
         // And it recovers: the next write replaces the corrupt file.
         store.append(makeRecord())
         await store.flush()
         let reloaded = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        await reloaded.waitUntilLoaded()
         XCTAssertEqual(reloaded.records.count, 1)
     }
 
@@ -132,17 +136,52 @@ final class ScrollTraceStoreTests: XCTestCase {
         XCTAssertTrue(store.records.isEmpty)
         await store.flush()
         let reloaded = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        await reloaded.waitUntilLoaded()
         XCTAssertTrue(reloaded.records.isEmpty)
     }
 
-    func testExportCarriesSchemaAppRecordsAndISODates() throws {
+    func testRecordsMadeWhileLoadingFollowThePersistedOnes() async {
+        let directory = makeDirectory()
+        let settings = makeTraceSettings(enabled: true)
+        let first = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        let old = (0..<2).map { makeRecord(startedAt: Date(timeIntervalSince1970: 1_760_000_000 + Double($0))) }
+        old.forEach(first.append)
+        await first.flush()
+
+        let second = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        let fresh = makeRecord(startedAt: Date(timeIntervalSince1970: 1_760_000_010))
+        second.append(fresh)   // before the load lands
+        await second.flush()   // must not clobber the file before reading it
+        XCTAssertEqual(second.records.map(\.id), old.map(\.id) + [fresh.id])
+
+        let third = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        await third.waitUntilLoaded()
+        XCTAssertEqual(third.records.map(\.id), old.map(\.id) + [fresh.id])
+    }
+
+    func testClearBeforeTheLoadLandsDiscardsIt() async {
+        let directory = makeDirectory()
+        let settings = makeTraceSettings(enabled: true)
+        let first = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        first.append(makeRecord())
+        await first.flush()
+
+        let second = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        second.clear()
+        await second.flush()
+        XCTAssertTrue(second.records.isEmpty)
+        let third = ScrollTraceStore(settings: settings, directory: directory, observesKeyboard: false)
+        await third.waitUntilLoaded()
+        XCTAssertTrue(third.records.isEmpty)
+    }
+
+    func testExportCarriesSchemaAppRecordsAndISODates() async throws {
         let store = ScrollTraceStore(settings: makeTraceSettings(enabled: true), directory: nil, observesKeyboard: false)
         store.append(makeRecord())
         store.append(makeRecord(route: .native))
         let exportedAt = Date(timeIntervalSince1970: 1_760_000_100.25)
-        let json = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: try store.exportData(now: exportedAt)) as? [String: Any]
-        )
+        let data = try await store.exportData(now: exportedAt)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(json["schema"] as? Int, 1)
         XCTAssertTrue((json["app"] as? String)?.hasPrefix("a+Terminal") ?? false)
         XCTAssertEqual(json["recordCount"] as? Int, 2)
@@ -167,9 +206,9 @@ final class ScrollTraceStoreTests: XCTestCase {
         XCTAssertEqual(belief["mouseMode"] as? String, "vt200")
     }
 
-    func testExportFileIsNamedForTheShareSheet() throws {
+    func testExportFileIsNamedForTheShareSheet() async throws {
         let store = ScrollTraceStore(settings: makeTraceSettings(enabled: true), directory: nil, observesKeyboard: false)
-        let url = try store.exportFileURL()
+        let url = try await store.exportFileURL()
         defer { try? FileManager.default.removeItem(at: url) }
         XCTAssertNotNil(url.lastPathComponent.range(
             of: #"^aplus-scroll-trace-\d{8}-\d{6}\.json$"#, options: .regularExpression

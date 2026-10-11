@@ -100,7 +100,7 @@ struct ScrollTraceView: View {
         Task {
             defer { sending.remove(session.id) }
             do {
-                let data = try store.exportData()
+                let data = try await store.exportData()
                 let path = try await session.uploadDiagnostic(data, filename: ScrollTraceStore.exportFileName())
                 inboxResults[session.id] = "Sent to \(path)"
             } catch {
@@ -139,7 +139,7 @@ struct ScrollTraceExport: Transferable {
     }
 
     @MainActor
-    private func makeFile() throws -> URL {
-        try store.exportFileURL()
+    private func makeFile() async throws -> URL {
+        try await store.exportFileURL()
     }
 }

@@ -199,8 +199,11 @@ final class ScrollTraceStore {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private let writer = ScrollTraceFileWriter()
     @ObservationIgnored private var keyboardObservers: KeyboardObservers?
-
-    private static let log = Logger(subsystem: "com.aaroncx.aplusterminal", category: "scrolltrace")
+    /// Reading the persisted ring (up to 500 records, possibly a few MB) runs
+    /// on the writer actor, never on the launch path. Every write waits for it.
+    @ObservationIgnored private var loadTask: Task<Void, Never>?
+    /// `clear()` ran before the load finished: what it loads is discarded.
+    @ObservationIgnored private var discardLoaded = false
 
     nonisolated static var defaultDirectory: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
@@ -219,7 +222,13 @@ final class ScrollTraceStore {
         self.settings = settings
         self.fileURL = directory?.appendingPathComponent("trace.json")
         self.persistDelay = persistDelay
-        self.records = Self.load(from: fileURL)
+        if let fileURL {
+            let writer = self.writer
+            loadTask = Task { [weak self] in
+                let loaded = await writer.load(from: fileURL, capacity: Self.capacity)
+                self?.adoptLoaded(loaded)
+            }
+        }
         if observesKeyboard {
             keyboardObservers = KeyboardObservers { [weak self] visible in
                 self?.keyboardVisible = visible
@@ -227,17 +236,17 @@ final class ScrollTraceStore {
         }
     }
 
-    /// Reads a previously persisted trace; anything unreadable starts empty.
-    private static func load(from url: URL?) -> [ScrollTrace.Record] {
-        guard let url, FileManager.default.fileExists(atPath: url.path) else { return [] }
-        do {
-            let data = try Data(contentsOf: url)
-            let file = try ScrollTrace.makeDecoder().decode(PersistedFile.self, from: data)
-            return Array(file.records.suffix(capacity))
-        } catch {
-            log.error("scroll trace unreadable, starting empty: \(error.localizedDescription, privacy: .public)")
-            return []
-        }
+    /// Puts the persisted records in front of anything recorded while they
+    /// were loading.
+    private func adoptLoaded(_ loaded: [ScrollTrace.Record]) {
+        loadTask = nil
+        guard !discardLoaded, !loaded.isEmpty else { return }
+        records = Array((loaded + records).suffix(Self.capacity))
+    }
+
+    /// Resolves once the persisted trace has been read (tests, export).
+    func waitUntilLoaded() async {
+        await loadTask?.value
     }
 
     // MARK: Mutation
@@ -260,6 +269,7 @@ final class ScrollTraceStore {
     }
 
     func clear() {
+        discardLoaded = true
         records = []
         persistTask?.cancel()
         persistTask = nil
@@ -288,40 +298,29 @@ final class ScrollTraceStore {
 
     private func writeNow() async {
         guard let fileURL else { return }
+        // Never write before the old file is read: the write would replace it
+        // with only what this launch recorded.
+        await waitUntilLoaded()
         generation += 1
         await writer.write(records, generation: generation, to: fileURL)
     }
 
-    private struct PersistedFile: Codable {
-        var schema: Int
-        var records: [ScrollTrace.Record]
-    }
-
     // MARK: Export
 
-    struct ExportEnvelope: Encodable {
-        struct Device: Encodable {
-            var model: String
-            var machine: String
-            var systemName: String
-            var systemVersion: String
-        }
-        var schema: Int
-        var app: String
-        var build: String?
-        var marketingVersion: String?
-        var device: Device
-        var traceEnabled: Bool
-        var exportedAt: Date
-        var timeZoneOffsetSeconds: Int
-        var recordCount: Int
-        var records: [ScrollTrace.Record]
+    /// The export as pretty JSON. The snapshot is taken here; encoding a full
+    /// ring (several MB) runs off the main actor.
+    func exportData(now: Date = Date()) async throws -> Data {
+        await waitUntilLoaded()
+        let envelope = exportEnvelope(now: now)
+        return try await Task.detached(priority: .userInitiated) {
+            try ScrollTrace.makeEncoder(pretty: true).encode(envelope)
+        }.value
     }
 
-    func exportData(now: Date = Date()) throws -> Data {
+    private func exportEnvelope(now: Date) -> ScrollTraceExportEnvelope {
         let info = Bundle.main.infoDictionary
         let device = UIDevice.current
-        let envelope = ExportEnvelope(
+        return ScrollTraceExportEnvelope(
             schema: ScrollTrace.schemaVersion,
             app: AppVersion.current,
             build: info?["CFBundleVersion"] as? String,
@@ -338,7 +337,6 @@ final class ScrollTraceStore {
             recordCount: records.count,
             records: records
         )
-        return try ScrollTrace.makeEncoder(pretty: true).encode(envelope)
     }
 
     static func exportFileName(now: Date = Date()) -> String {
@@ -349,10 +347,13 @@ final class ScrollTraceStore {
     }
 
     /// Writes the export to the temporary directory for the share sheet.
-    func exportFileURL(now: Date = Date()) throws -> URL {
+    func exportFileURL(now: Date = Date()) async throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(Self.exportFileName(now: now))
-        try exportData(now: now).write(to: url, options: .atomic)
+        let data = try await exportData(now: now)
+        try await Task.detached(priority: .userInitiated) {
+            try data.write(to: url, options: .atomic)
+        }.value
         return url
     }
 
@@ -366,11 +367,49 @@ final class ScrollTraceStore {
     }
 }
 
-/// Serializes trace writes off the main actor; a write older than the last
-/// one written is dropped, so the file never goes backwards.
+/// The shared-file envelope: device and build context around the records.
+struct ScrollTraceExportEnvelope: Encodable, Sendable {
+    struct Device: Encodable, Sendable {
+        var model: String
+        var machine: String
+        var systemName: String
+        var systemVersion: String
+    }
+    var schema: Int
+    var app: String
+    var build: String?
+    var marketingVersion: String?
+    var device: Device
+    var traceEnabled: Bool
+    var exportedAt: Date
+    var timeZoneOffsetSeconds: Int
+    var recordCount: Int
+    var records: [ScrollTrace.Record]
+}
+
+/// Serializes trace reads and writes off the main actor; a write older than
+/// the last one written is dropped, so the file never goes backwards.
 private actor ScrollTraceFileWriter {
     private var lastGeneration = 0
     private static let log = Logger(subsystem: "com.aaroncx.aplusterminal", category: "scrolltrace")
+
+    private struct PersistedFile: Decodable {
+        var schema: Int
+        var records: [ScrollTrace.Record]
+    }
+
+    /// Reads a previously persisted trace; anything unreadable starts empty.
+    func load(from url: URL, capacity: Int) -> [ScrollTrace.Record] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        do {
+            let data = try Data(contentsOf: url)
+            let file = try ScrollTrace.makeDecoder().decode(PersistedFile.self, from: data)
+            return Array(file.records.suffix(capacity))
+        } catch {
+            Self.log.error("scroll trace unreadable, starting empty: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+    }
 
     func write(_ records: [ScrollTrace.Record], generation: Int, to url: URL) {
         guard generation > lastGeneration else { return }
