@@ -19,6 +19,7 @@ struct APlusTerminalApp: App {
     @State private var router: DeepLinkRouter
     @State private var tipStore = TipStore()
     @State private var exitDiagnostics: BackgroundExitDiagnostics
+    @State private var scrollTrace: ScrollTraceStore
     @State private var pip: PiPCoordinator
     @State private var vncMonitors: VNCMonitorManager
 
@@ -40,7 +41,15 @@ struct APlusTerminalApp: App {
         // process left in UserDefaults, then resets the record for this run.
         let exitDiagnostics = BackgroundExitDiagnostics()
         _exitDiagnostics = State(initialValue: exitDiagnostics)
-        let sessions = SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles, diagnostics: exitDiagnostics)
+        // On-device swipe trace (Settings → Diagnostics → Scroll trace).
+        // Default ON for DEBUG/TestFlight, OFF for the App Store; the channel
+        // is resolved once, asynchronously, from StoreKit's app transaction.
+        let scrollTrace = ScrollTraceStore(settings: settings)
+        _scrollTrace = State(initialValue: scrollTrace)
+        Task { @MainActor in
+            settings.applyBuildChannel(await BuildChannel.resolve())
+        }
+        let sessions = SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles, diagnostics: exitDiagnostics, scrollTrace: scrollTrace)
         _sessions = State(initialValue: sessions)
         let router = DeepLinkRouter()
         _router = State(initialValue: router)
@@ -98,6 +107,7 @@ struct APlusTerminalApp: App {
             .environment(router)
             .environment(tipStore)
             .environment(exitDiagnostics)
+            .environment(scrollTrace)
             .environment(pip)
             .environment(vncMonitors)
             .preferredColorScheme(theme.theme.colorScheme)
@@ -111,6 +121,9 @@ struct APlusTerminalApp: App {
             case .background:
                 sessions.appDidEnterBackground()
                 vncMonitors.appDidEnterBackground()
+                // A force-quit from the app switcher must not lose the last
+                // couple of seconds of trace.
+                Task { await scrollTrace.flush() }
             case .active:
                 sessions.appWillEnterForeground()
                 vncMonitors.appWillEnterForeground()
