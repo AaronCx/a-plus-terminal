@@ -82,7 +82,19 @@ final class TerminalSession: Identifiable, Hashable {
     private(set) var connection = SSHConnection()
     /// The meshyy transport, when the toggle is on and the host has a daemon.
     /// The SSH connection above stays live regardless; this replaces only the pty.
-    private(set) var meshyy: MeshyyTransport?
+    private(set) var meshyy: MeshyyTransport? {
+        didSet {
+            // Scroll trace: frames belong to the daemon that sent them. Kept
+            // across `rebuilt()` (meshyy is replaced, never nil'd), dropped
+            // when meshyy stops carrying the pty — SSH fallback, clean exit,
+            // a closed tab — so a later record never reports another
+            // transport's far side as this one's.
+            if meshyy == nil {
+                lastModesFrame = nil
+                lastScreenModeFrame = nil
+            }
+        }
+    }
     /// Why meshyy is not carrying this session, when it was asked to.
     private(set) var meshyyUnavailable: String?
     /// True when meshyy is carrying this session's pty — the transport survives a
@@ -441,8 +453,9 @@ final class TerminalSession: Identifiable, Hashable {
             // nil — the app never sees heartbeat pongs, so any app-side stamp
             // would grow on a healthy idle session and mislead.
             lastInboundFrameAt: nil,
-            lastModesFrame: lastModesFrame,
-            lastScreenModeFrame: lastScreenModeFrame
+            // Only while meshyy carries the pty (see `meshyy`'s didSet).
+            lastModesFrame: meshyy != nil ? lastModesFrame : nil,
+            lastScreenModeFrame: meshyy != nil ? lastScreenModeFrame : nil
         )
     }
 
