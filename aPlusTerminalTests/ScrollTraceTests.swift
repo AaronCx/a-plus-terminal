@@ -216,6 +216,16 @@ final class ScrollTraceStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
     }
 
+    func testSummaryNamesAFinishedTransportUnderAConnectedTab() {
+        var record = makeRecord()
+        record.transportState = .dead
+        record.rawSessionState = "connected"
+        record.meshyyTransportFinished = true
+        let line = ScrollTraceView.summary(of: record)
+        XCTAssertTrue(line.contains("meshyy dead(finished, tab connected)"), line)
+        XCTAssertFalse(ScrollTraceView.summary(of: makeRecord()).contains("finished"))
+    }
+
     func testSettingFollowsTheChannelUntilOverridden() {
         let suite = "ScrollTraceTests-channel-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

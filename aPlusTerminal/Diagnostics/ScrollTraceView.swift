@@ -114,6 +114,9 @@ struct ScrollTraceView: View {
         let time = record.startedAt.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute().second())
         let route = record.declineReason.map { "declined(\($0.rawValue))" } ?? record.route.rawValue
         var line = "\(time) \(route) \(record.transport.rawValue) \(record.transportState.rawValue)"
+        if record.meshyyTransportFinished == true {
+            line += "(finished, tab \(record.rawSessionState))"
+        }
         if let belief = record.belief {
             line += " · mouse \(belief.mouseMode) alt \(belief.altScreen ? "on" : "off") kb \(belief.keyboardVisible ? "on" : "off")"
         }

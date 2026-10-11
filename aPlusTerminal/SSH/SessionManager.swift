@@ -434,10 +434,17 @@ final class TerminalSession: Identifiable, Hashable {
 
     /// The session half of a scroll-trace record.
     private func scrollTraceContext() -> ScrollTraceContext {
-        let transportState: ScrollTrace.TransportState = switch state {
+        var transportState: ScrollTrace.TransportState = switch state {
         case .connected: .connected
         case .connecting, .reconnecting: .reconnecting
         case .suspended, .closed: .dead
+        }
+        // A tab can sit `.connected` on a sealed meshyy transport (it finished
+        // inside establish()'s window-size await, before the pump could react):
+        // every byte sent there goes nowhere, so the transport is dead whatever
+        // the tab says. `rawSessionState` keeps what the tab said.
+        if transportState == .connected, meshyy?.isFinished == true {
+            transportState = .dead
         }
         return ScrollTraceContext(
             server: server.name,
