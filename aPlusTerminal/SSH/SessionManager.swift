@@ -273,6 +273,8 @@ final class TerminalSession: Identifiable, Hashable {
     @ObservationIgnored private(set) var lastModesFrame: (active: Set<Int>, at: Date)?
     @ObservationIgnored private(set) var lastScreenModeFrame: (alt: Bool, at: Date)?
     @ObservationIgnored private var scrollTracer: ScrollGestureTracer?
+    /// The store this session's swipes are recorded into (live tests read it).
+    @ObservationIgnored private(set) var scrollTraceStoreForTesting: ScrollTraceStore?
     /// The last pty resize a transport was actually handed, and how it went.
     /// A lost resize leaves tmux's pty smaller than the emulator, and wheel
     /// events aimed below tmux's last row are dropped.
@@ -432,6 +434,7 @@ final class TerminalSession: Identifiable, Hashable {
                 self?.outboxContinuation.yield(.tracedData(data, recordID: recordID, enqueuedAt: Date()))
             }
             scrollTracer = tracer
+            scrollTraceStoreForTesting = scrollTrace
         }
         self.scrollBridge = scrollBridge
     }
@@ -469,11 +472,11 @@ final class TerminalSession: Identifiable, Hashable {
             meshyyTransportFinished: meshyy?.isFinished,
             lastInboundBytesAt: lastInboundBytesAt,
             lastPtyResize: lastPtyResize,
-            // LATER (meshyy 0.1.22): a pong-inclusive `lastInboundFrameAt`,
-            // synchronously readable on MeshyySession, goes here. Until then
-            // nil — the app never sees heartbeat pongs, so any app-side stamp
-            // would grow on a healthy idle session and mislead.
-            lastInboundFrameAt: nil,
+            // Pong-inclusive (meshyy 0.1.22): an idle healthy session is still
+            // answered every heartbeat, so a large age here means the path went
+            // silent — the 3-4 s before the heartbeat declares death. Nil over
+            // SSH, which has no equivalent signal.
+            lastInboundFrameAt: meshyy?.lastInboundFrameAt,
             // Only while meshyy carries the pty (see `meshyy`'s didSet).
             lastModesFrame: meshyy != nil ? lastModesFrame : nil,
             lastScreenModeFrame: meshyy != nil ? lastScreenModeFrame : nil

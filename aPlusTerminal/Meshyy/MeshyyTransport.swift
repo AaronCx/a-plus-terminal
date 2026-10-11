@@ -568,6 +568,10 @@ final class MeshyyTransport {
         return true
     }
 
+    /// When the daemon last said anything on this session — pty bytes, control
+    /// frames or heartbeat pongs. Synchronous, for the scroll trace.
+    nonisolated var lastInboundFrameAt: Date? { session.lastInboundFrameAt }
+
     func send(_ data: Data) async throws {
         try await session.send([UInt8](data))
     }
