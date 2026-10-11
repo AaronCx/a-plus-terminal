@@ -16,8 +16,6 @@ The only traffic a+Terminal sends off your network is the connections **you** in
 
 **Attaching an image or file** sends the selected item over that same existing SSH connection to your own server; it is sent nowhere else.
 
-**The optional scroll trace** (Settings → Diagnostics → Scroll trace) is a record of how the app handled your recent scroll gestures — which way it sent each swipe and the scroll bytes involved, never what you type. Each record also names the server and terminal session it happened in, and an exported trace includes your iPhone model and iOS version. It is stored only on your iPhone and leaves it only if you share it yourself, through the share sheet or by sending it to your own server's inbox over your SSH connection.
-
 **Voice dictation** is transcribed entirely on your iPhone using Apple's on-device speech recognition. a+Terminal refuses to run dictation if on-device recognition is unavailable — it never falls back to cloud transcription.
 
 **Your keys and servers** stay on your device: SSH private keys and saved passwords live in the iOS Keychain (this device only, excluded from backups; keys leave the Keychain only when you explicitly reveal, copy, or export them in Manage Keys), and your server list is a local file containing no secrets.
