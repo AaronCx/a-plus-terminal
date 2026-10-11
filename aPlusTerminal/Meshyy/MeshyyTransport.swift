@@ -131,6 +131,16 @@ final class MeshyyTransport {
     private var eventTask: Task<Void, Never>?
     private(set) var isFinished = false
 
+    /// Scroll-trace telemetry (observation only): the last `.modes` and
+    /// `.screenMode` frames this transport's pump dequeued, and when. Kept
+    /// here for frames that arrive before the owning session wires the
+    /// callbacks below (the attach handshake delivers both); the session
+    /// keeps its own copy, because `rebuilt()` starts a fresh transport.
+    private(set) var lastModesFrame: (active: Set<Int>, at: Date)?
+    private(set) var lastScreenModeFrame: (alt: Bool, at: Date)?
+    var onModesFrame: (@MainActor (Set<Int>, Date) -> Void)?
+    var onScreenModeFrame: (@MainActor (Bool, Date) -> Void)?
+
     private init(session: MeshyySession, name: String) {
         self.session = session
         self.name = name
@@ -461,75 +471,101 @@ final class MeshyyTransport {
         eventTask = Task { [weak self] in
             guard let self else { return }
             for await event in await self.session.events {
-                switch event {
-                case .output(let bytes):
-                    self.outputContinuation.yield(Data(bytes))
-
-                case .geometryReset:
-                    // A replay carries the scroll region of whichever client produced
-                    // it: `ESC[1;24r` from a 24-row session confines a 60-row terminal
-                    // to its top 24 rows. These bytes release it. They reach the
-                    // emulator like any other, but meshyy never counts them as resumed
-                    // output, so the resume offset is untouched.
-                    self.outputContinuation.yield(Data(TerminalGeometry.reset))
-
-                case .modes(let active):
-                    // The daemon's record of what the running program believes
-                    // about its terminal — mouse reporting, SGR encoding,
-                    // focus events, bracketed paste, cursor keys. A fresh
-                    // emulator (relaunch, auto-resume) starts with all of it
-                    // off, and the arming escapes are consumed history the
-                    // ring no longer holds: measured, mouse mode stayed off
-                    // after every relaunch while tmux believed it was on, so
-                    // scroll input simply vanished. Locally synthesized like
-                    // the geometry reset above — never counted as resumed
-                    // output — and idempotent on an emulator that already
-                    // agrees.
-                    self.outputContinuation.yield(Self.modeEscapes(active: active))
-
-                case .quickActions(let actions):
-                    // The whole M6 tier-1 integration used to be this case
-                    // discarding the frame. The daemon already did the hard
-                    // part — matching the prompt, gating on waiting, and
-                    // withdrawing on any screen change.
-                    let offered = actions.map {
-                        MeshyyQuickAction(id: $0.id, label: $0.label)
-                    }
-                    Task { @MainActor [weak self] in
-                        self?.onQuickActions?(offered)
-                    }
-
-                case .agent(let kind, let agentID, let detail):
-                    let status: AgentActivityMonitor.Status = switch kind {
-                    case .waiting: .waiting
-                    case .working: .working
-                    default: .none
-                    }
-                    Task { @MainActor [weak self] in
-                        self?.onAgentStatus?(status, agentID, detail)
-                    }
-
-                case .screenRebuilt, .termios, .screenMode, .reconnecting:
-                    break   // not this type's business
-
-                case .exited(let status):
-                    // The user's shell ended — `exit`, or their program did.
-                    // Remembered so the session can tell this apart from a
-                    // dead transport when the output stream finishes: one is
-                    // a tab to close, the other a connection to win back.
-                    // Recovering THIS one is how `exit` used to respawn a
-                    // fresh shell nobody asked for.
-                    self.cleanExitStatus = status
-                    self.finish()
-                    return
-
-                case .ended, .failed:
-                    self.finish()
-                    return
-                }
+                guard self.handle(event) else { return }
             }
             self.finish()
         }
+    }
+
+    /// Test seam: a transport around an unattached session, with no pump, so
+    /// `handle(_:)` can be driven directly without a daemon.
+    static func makeForTesting(name: String = "aplus-test-0") -> MeshyyTransport {
+        MeshyyTransport(session: MeshyySession(), name: name)
+    }
+
+    /// Applies one session event, in order. Returns false once the transport
+    /// has finished (the pump stops).
+    @discardableResult
+    func handle(_ event: MeshyySessionEvent) -> Bool {
+        switch event {
+        case .output(let bytes):
+            self.outputContinuation.yield(Data(bytes))
+
+        case .geometryReset:
+            // A replay carries the scroll region of whichever client produced
+            // it: `ESC[1;24r` from a 24-row session confines a 60-row terminal
+            // to its top 24 rows. These bytes release it. They reach the
+            // emulator like any other, but meshyy never counts them as resumed
+            // output, so the resume offset is untouched.
+            self.outputContinuation.yield(Data(TerminalGeometry.reset))
+
+        case .modes(let active):
+            // The daemon's record of what the running program believes
+            // about its terminal — mouse reporting, SGR encoding,
+            // focus events, bracketed paste, cursor keys. A fresh
+            // emulator (relaunch, auto-resume) starts with all of it
+            // off, and the arming escapes are consumed history the
+            // ring no longer holds: measured, mouse mode stayed off
+            // after every relaunch while tmux believed it was on, so
+            // scroll input simply vanished. Locally synthesized like
+            // the geometry reset above — never counted as resumed
+            // output — and idempotent on an emulator that already
+            // agrees.
+            self.outputContinuation.yield(Self.modeEscapes(active: active))
+            // Scroll trace: what the far side last said it had armed.
+            let at = Date()
+            self.lastModesFrame = (active, at)
+            self.onModesFrame?(active, at)
+
+        case .quickActions(let actions):
+            // The whole M6 tier-1 integration used to be this case
+            // discarding the frame. The daemon already did the hard
+            // part — matching the prompt, gating on waiting, and
+            // withdrawing on any screen change.
+            let offered = actions.map {
+                MeshyyQuickAction(id: $0.id, label: $0.label)
+            }
+            Task { @MainActor [weak self] in
+                self?.onQuickActions?(offered)
+            }
+
+        case .agent(let kind, let agentID, let detail):
+            let status: AgentActivityMonitor.Status = switch kind {
+            case .waiting: .waiting
+            case .working: .working
+            default: .none
+            }
+            Task { @MainActor [weak self] in
+                self?.onAgentStatus?(status, agentID, detail)
+            }
+
+        case .screenMode(let alt):
+            // RECORDED ONLY (scroll trace) — deliberately not applied
+            // to the emulator. Honouring it is a routing change and is
+            // decided separately (docs/qa/scroll-divergence-audit.md).
+            let at = Date()
+            self.lastScreenModeFrame = (alt, at)
+            self.onScreenModeFrame?(alt, at)
+
+        case .screenRebuilt, .termios, .reconnecting:
+            break   // not this type's business
+
+        case .exited(let status):
+            // The user's shell ended — `exit`, or their program did.
+            // Remembered so the session can tell this apart from a
+            // dead transport when the output stream finishes: one is
+            // a tab to close, the other a connection to win back.
+            // Recovering THIS one is how `exit` used to respawn a
+            // fresh shell nobody asked for.
+            self.cleanExitStatus = status
+            self.finish()
+            return false
+
+        case .ended, .failed:
+            self.finish()
+            return false
+        }
+        return true
     }
 
     func send(_ data: Data) async throws {
