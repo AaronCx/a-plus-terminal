@@ -315,6 +315,12 @@ final class AgentTransitionTests: XCTestCase {
 
         feed(session, "\u{1B}]7501;state=done:app=claude-code\u{07}")
         XCTAssertEqual(fired, [.blocked(kind: "permission"), .finished])
+
+        // The program clears its records on the way out: the shell's next
+        // tab-completion bell is not an agent's.
+        feed(session, "\u{1B}]7501;state=clear\u{07}")
+        XCTAssertFalse(session.speaksProgramStatus)
+        XCTAssertEqual(session.noteAgentSignal(.bell), .noAgent)
     }
 
     func testOSC7501RecordsParseAndBadReportsAreDiscarded() {

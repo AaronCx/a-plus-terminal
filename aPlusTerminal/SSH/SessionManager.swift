@@ -266,6 +266,13 @@ final class TerminalSession: Identifiable, Hashable {
         return .forwarded(trigger)
     }
 
+    /// The program behind the pty is gone (suspend, close, reconnect): forget
+    /// what it was — the heuristic's latch and its 7501 announcement alike.
+    private func resetAgentDetection() {
+        agentMonitor.reset()
+        speaksProgramStatus = false
+    }
+
     /// A real pty size change or app scene-phase change (see
     /// `lastDisruptionAt`).
     func noteDisruption(_ reason: String, now: Date = Date()) {
@@ -650,7 +657,9 @@ final class TerminalSession: Identifiable, Hashable {
                     agentAlertLog.notice("osc7501 probe answered session=\(self.id.logTag, privacy: .public)")
                     self.sendInput(ProgramStatus.probeReply, countsAsResponse: false)
                 case .record(let record):
-                    self.speaksProgramStatus = true
+                    // A root `clear` is the program withdrawing all its
+                    // records — it is leaving; a later shell bell is not its.
+                    self.speaksProgramStatus = !(record.state == .clear && record.id == nil)
                     self.noteAgentSignal(.programStatus(record))
                 case nil:
                     break
@@ -987,7 +996,7 @@ final class TerminalSession: Identifiable, Hashable {
         await meshyy?.detach()
         #endif
         await connection.disconnect()
-        agentMonitor.reset()
+        resetAgentDetection()
         state = .suspended
     }
 
@@ -1009,7 +1018,7 @@ final class TerminalSession: Identifiable, Hashable {
         // never blocks, so this respects the handler's no-I/O contract while
         // still not leaking the bind across a suspend.
         stopPreviewImmediately()
-        agentMonitor.reset()
+        resetAgentDetection()
         state = .suspended
     }
 
@@ -1115,7 +1124,7 @@ final class TerminalSession: Identifiable, Hashable {
         // holding a shell nobody will reattach to, one per closed tab, forever.
         await stopMeshyy(endSession: true)
         #endif
-        agentMonitor.reset()
+        resetAgentDetection()
         portDetector.reset()
         await connection.disconnect()
     }
@@ -1291,7 +1300,7 @@ final class TerminalSession: Identifiable, Hashable {
         // Re-arm agent detection from a clean slate: a reconnect — or a tmux
         // reattach to a different window — must not inherit the previous
         // shell's working/waiting reading.
-        agentMonitor.reset()
+        resetAgentDetection()
 
         #if MESHYY
         await stopMeshyy(endSession: false)
