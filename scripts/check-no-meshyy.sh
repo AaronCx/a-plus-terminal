@@ -18,7 +18,10 @@
 #      and @Observable backing fields survive dead-stripping, so this only
 #      passes when the package is unlinked AND every meshyy symbol is gated);
 #   2. none of the meshyy / scroll-trace UI copy needles appear (also checked
-#      in the bundle's text resources — the bundled privacy policy ships);
+#      in the bundle's text resources — the bundled privacy policy ships), and
+#      no scroll-trace type or symbol name does (ScrollTraceStore,
+#      scrollTraceEnabled, ScrollGestureTracer, BuildChannel, … in any case:
+#      like "meshyy", type names survive -O, so these hold on an archive too);
 #   3. no Meshyy framework or file anywhere in the bundle;
 #   4. `otool -L` links nothing Meshyy;
 #   5. no QUIC symbol is imported from Network.framework. Plain "quic" STRINGS
@@ -79,8 +82,12 @@ fail() { echo "  FAIL  $1"; fails+=("$1"); }
 copy_needles=("Use meshyy" "meshyyd" "Resuming your session" "Still Running" "Resume Session"
               "Scroll trace" "Record scroll trace" "aplus-scroll-trace")
 # Distinctive enough to match in any case — also catches prose such as a
-# privacy-policy paragraph about "the optional scroll trace".
-icase_needles=("scroll trace" "aplus-scroll-trace")
+# privacy-policy paragraph about "the optional scroll trace". The rest are the
+# scroll trace's type/symbol names (ScrollTrace*, scrollTrace*, the tracer, the
+# build-channel probe that only sets its default, the SFTP send-to-inbox race):
+# the trace exists to debug meshyy and is compiled out with it.
+icase_needles=("scroll trace" "aplus-scroll-trace" "scrolltrace" "scrollgesturetracer"
+               "buildchannel" "diagnosticuploadrace")
 quic_symbols='NWProtocolQUIC|NWParametersC4quic|_nw_quic_|nw_protocol_copy_quic|nw_protocol_options_is_quic'
 
 plist_value() {  # plist_value <plist> <key> — prints the value as JSON, or nothing
