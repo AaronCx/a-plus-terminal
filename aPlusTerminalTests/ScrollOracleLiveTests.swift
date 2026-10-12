@@ -93,25 +93,35 @@ final class ScrollOracleLiveTests: XCTestCase {
         try await waitFor(10, "the x10 transcriber never started (meshyy)") {
             FileManager.default.fileExists(atPath: meshyyLog)
         }
-        // Not a harness check only: the daemon's live modes frame reaches THIS
-        // emulator too, right behind the program's ?1000h. Measured with the
-        // pre-#145 synthesis planted (?1006l emitted after the family), this is
-        // where the step goes red: the frame disarms even the live emulator.
-        try await waitFor(10, "the meshyy emulator does not believe mouse on after the program armed "
-                              + "X10 mouse — the modes-frame synthesis disarmed it (1006 ordering?)") {
-            first.terminalView.getTerminal().mouseMode != .off
-        }
+        // The LIVE meshyy emulator first. The daemon's modes frame reaches it
+        // too, right behind the program's ?1000h, so a synthesis that disarms
+        // shows here before any relaunch. Swiped and judged by what the program
+        // RECEIVED, not by `mouseMode`: measured 2026-10-12 with the pre-#145
+        // synthesis planted (?1006l emitted after the family), the frame
+        // disarmed this emulator too. A belief wait used to stand here and
+        // threw, so the fresh-emulator half below never ran under the mutant.
+        await settle(first, armed: { $0.terminalView.getTerminal().mouseMode != .off })
+        let liveSwipe = try await x10Swipe(first, log: meshyyLog)
+
         let second = try await relaunchMeshyy(first, server: server, control: control)
         addTeardownBlock { await second.close() }
         await settle(second, armed: { $0.terminalView.getTerminal().mouseMode != .off })
-        let meshyySwipe = try await x10Swipe(second, log: meshyyLog)
+        let meshyySwipe = try await x10Swipe(second, log: meshyyLog, after: liveSwipe.transcript)
 
         let trace = second.scrollTraceStoreForTesting?.records.last
         let modes = trace?.lastModesFrame?.active ?? []
+        print("MEASURE scrollOracle x10-live-emulator: ssh \(sshSwipe.summary) | meshyy \(liveSwipe.summary)")
         print("MEASURE scrollOracle x10-fresh-emulator: ssh \(sshSwipe.summary) | meshyy \(meshyySwipe.summary) "
               + "modesFrame=\(modes)")
         XCTAssertTrue(sshSwipe.received.contains("^[[<64;"),
                       "ORACLE BROKEN: the ssh side's wheel bytes never reached the x10 program\n\(sshSwipe.detail)")
+        XCTAssertEqual(liveSwipe.received, sshSwipe.received, """
+            DIVERGENCE x10-live-emulator: the program armed X10 mouse; over ssh its wheel \
+            bytes arrived, over meshyy — same emulator, no relaunch — they did not \
+            (the daemon's modes frame disarmed it: 1006 ordering?)
+            ssh:    \(sshSwipe.detail)
+            meshyy: \(liveSwipe.detail)
+            """)
         XCTAssertTrue(Set(modes).contains(1000) && !Set(modes).contains(1006), """
             the step is not what it says: the daemon's modes frame should carry 1000 \
             without 1006 (an X10 program), got \(modes)
@@ -992,7 +1002,10 @@ final class ScrollOracleLiveTests: XCTestCase {
     private struct X10Swipe {
         let decision: SwipeDecision?
         let bytes: Data
+        /// What THIS swipe added to the transcript.
         let received: String
+        /// The whole transcript after it, the baseline for the next swipe.
+        let transcript: String
         let trace: ScrollTrace.Record?
         var summary: String {
             "route=\(decision.map { "\($0.mode)" } ?? "nil") mouse=\(decision.map { "\($0.mouseMode)" } ?? "nil") "
@@ -1006,21 +1019,23 @@ final class ScrollOracleLiveTests: XCTestCase {
         }
     }
 
-    private func x10Swipe(_ session: TerminalSession, log: String) async throws -> X10Swipe {
+    /// `after` is the transcript before this swipe; only what follows it counts.
+    private func x10Swipe(_ session: TerminalSession, log: String, after baseline: String = "") async throws -> X10Swipe {
         let bridge = try XCTUnwrap(session.scrollBridge)
         let decision = bridge.beginSwipe()
         let bytes = bridge.injectSwipe(ticks: 3, up: true, at: CGPoint(x: 500, y: 300))
         bridge.endSwipe()
-        var received = ""
+        var transcript = baseline
         let by = Date().addingTimeInterval(bytes.isEmpty ? 1.5 : 8)
         var stableSince = Date()
         while Date() < by {
             let now = Self.read(log)
-            if now != received { received = now; stableSince = Date() }
-            if !received.isEmpty, Date().timeIntervalSince(stableSince) > 0.6 { break }
+            if now != transcript { transcript = now; stableSince = Date() }
+            if transcript != baseline, Date().timeIntervalSince(stableSince) > 0.6 { break }
             try await Task.sleep(for: .milliseconds(100))
         }
-        return X10Swipe(decision: decision, bytes: bytes, received: received,
+        let received = transcript.hasPrefix(baseline) ? String(transcript.dropFirst(baseline.count)) : transcript
+        return X10Swipe(decision: decision, bytes: bytes, received: received, transcript: transcript,
                         trace: session.scrollTraceStoreForTesting?.records.last)
     }
 
