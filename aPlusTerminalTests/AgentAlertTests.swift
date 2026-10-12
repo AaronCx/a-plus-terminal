@@ -438,7 +438,7 @@ final class NotificationSetupCardTests: XCTestCase {
         return session
     }
 
-    func testShownOnceForTheFirstClaudeCodeOnly() throws {
+    func testRaisedForClaudeCodeOnly() throws {
         let settings = AppSettings(defaults: UserDefaults(suiteName: "SetupCard-\(UUID().uuidString)")!)
 
         let other = session(settings)
@@ -452,12 +452,34 @@ final class NotificationSetupCardTests: XCTestCase {
         first.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
         first.noteAgentStatus(.none)
         XCTAssertTrue(first.showNotificationSetupCard)
-        XCTAssertTrue(settings.notificationSetupCardShown)
+    }
 
-        let second = session(settings)
-        second.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
-        second.noteAgentStatus(.none)
-        XCTAssertFalse(second.showNotificationSetupCard, "shown once, ever — Settings keeps it reachable")
+    func testUsedUpOnlyOnceItIsOnScreen() throws {
+        // Detection in a session the user never opens (or one whose card
+        // sits behind the tmux mouse hint) must not spend the one showing.
+        let settings = AppSettings(defaults: UserDefaults(suiteName: "SetupCard-\(UUID().uuidString)")!)
+        let manager = self.manager(settings)
+        defer { manager.closeAll() }
+        let unseen = manager.open(server: Server(name: "a", host: "127.0.0.1", username: "t"))
+        let seen = manager.open(server: Server(name: "b", host: "127.0.0.1", username: "t"))
+        for session in [unseen, seen] {
+            session.requestAlertAuthorization = {}
+            session.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
+            session.noteAgentStatus(.none)
+            XCTAssertTrue(session.showNotificationSetupCard)
+        }
+        XCTAssertFalse(settings.notificationSetupCardShown, "detection alone used up the card")
+
+        manager.notificationSetupCardAppeared(in: seen)
+        XCTAssertTrue(settings.notificationSetupCardShown)
+        XCTAssertTrue(seen.showNotificationSetupCard, "the card on screen stays until dismissed")
+        XCTAssertFalse(unseen.showNotificationSetupCard, "a second session would show it again")
+
+        let later = manager.open(server: Server(name: "c", host: "127.0.0.1", username: "t"))
+        later.requestAlertAuthorization = {}
+        later.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
+        later.noteAgentStatus(.none)
+        XCTAssertFalse(later.showNotificationSetupCard, "shown once, ever — Settings keeps it reachable")
     }
 
     func testAPopOutMutesOnlyTheSessionItShows() throws {

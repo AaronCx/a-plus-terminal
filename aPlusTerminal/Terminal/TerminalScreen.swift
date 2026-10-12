@@ -39,6 +39,9 @@ struct TerminalScreen: View {
                     NotificationSetupCard {
                         session.showNotificationSetupCard = false
                     }
+                    .onAppear {
+                        sessionManager.notificationSetupCardAppeared(in: session)
+                    }
                     Spacer()
                 }
             }

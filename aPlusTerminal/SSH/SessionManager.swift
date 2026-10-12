@@ -191,8 +191,10 @@ final class TerminalSession: Identifiable, Hashable {
     /// back inside that window is its reply to a query in the output (DA,
     /// XTVERSION, colors) — the terminal talking, not the user.
     @ObservationIgnored var isFeedingOutput = false
-    /// The one-time "how to get notified" card, raised the first time Claude
-    /// Code is detected in any session.
+    /// The one-time "how to get notified" card, raised when Claude Code is
+    /// detected and the card has never been ON SCREEN (the flag persists
+    /// when it appears — `SessionManager.notificationSetupCardAppeared` — so
+    /// a detection in a session the user never opens does not use it up).
     var showNotificationSetupCard = false
     /// Test seam: every write to the pty, and whether it counted as the
     /// user's answer.
@@ -234,7 +236,6 @@ final class TerminalSession: Identifiable, Hashable {
     private func noteNamedAgent(_ agent: String) {
         requestAlertAuthorization()
         if agent == "claude-code", !settings.notificationSetupCardShown {
-            settings.notificationSetupCardShown = true
             showNotificationSetupCard = true
         }
     }
@@ -2338,6 +2339,15 @@ final class SessionManager {
                 }
                 try? await Task.sleep(for: .seconds(self.windDownPollInterval))
             }
+        }
+    }
+
+    /// The setup card is on screen: it has now been shown, for good. Any
+    /// other session that also raised it lets it go, so it shows once.
+    func notificationSetupCardAppeared(in shown: TerminalSession) {
+        settings.notificationSetupCardShown = true
+        for session in sessions where session !== shown {
+            session.showNotificationSetupCard = false
         }
     }
 
