@@ -15,8 +15,10 @@ import XCTest
 /// the scheme forwards the settings into the host app (pass them unprefixed):
 ///   xcodebuild test ... -only-testing:aPlusTerminalTests/CustomAgentLiveTests \
 ///     APLUSTERMINAL_LIVE_QA=1 \
-///     APLUSTERMINAL_TEST_SERVER='{"name":"LiveQA","host":"127.0.0.1","port":22,"username":"<user>"}' \
-///     APLUSTERMINAL_TEST_PRIVATE_KEY='<base64 OpenSSH pem>'
+///     APLUSTERMINAL_TEST_SERVER='{"name":"LiveQA","host":"127.0.0.1","port":22,"username":"<user>"}'
+/// The SSH key is NOT passed on that command line: xcodebuild echoes every
+/// build setting into its log. The test reads `~/.ssh/aplus_probe` from the
+/// host itself (the simulator shares the host filesystem).
 @MainActor
 final class CustomAgentLiveTests: XCTestCase {
     private struct Seed: Decodable {
@@ -36,6 +38,22 @@ final class CustomAgentLiveTests: XCTestCase {
         try await super.tearDown()
     }
 
+    /// The probe key's OpenSSH file, read straight from the host's
+    /// `~/.ssh/aplus_probe`. A base64 key given the old way, as a build
+    /// setting, still wins, but that way echoes it into the log.
+    private static func probeKey(env: [String: String]) throws -> Data {
+        if let legacy = env["APLUSTERMINAL_TEST_PRIVATE_KEY"], !legacy.isEmpty {
+            return try XCTUnwrap(Data(base64Encoded: legacy), "APLUSTERMINAL_TEST_PRIVATE_KEY is not base64")
+        }
+        var home = env["SIMULATOR_HOST_HOME"] ?? NSHomeDirectory()
+        if env["SIMULATOR_HOST_HOME"] == nil, let range = home.range(of: "/Library/Developer/") {
+            home = String(home[..<range.lowerBound])
+        }
+        let path = "\(home)/.ssh/aplus_probe"
+        return try XCTUnwrap(FileManager.default.contents(atPath: path),
+                             "no probe key at \(path) — live QA needs it to log in to this Mac")
+    }
+
     func testCustomAgentOverRealSSHReachesLiveActivityWithIcon() async throws {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["APLUSTERMINAL_LIVE_QA"] == "1", "live QA disabled (set APLUSTERMINAL_LIVE_QA=1)")
@@ -44,8 +62,7 @@ final class CustomAgentLiveTests: XCTestCase {
             env["APLUSTERMINAL_TEST_SERVER"].flatMap { $0.isEmpty ? nil : $0 },
             "APLUSTERMINAL_TEST_SERVER not forwarded into the host app")
         let seed = try JSONDecoder().decode(Seed.self, from: Data(seedJSON.utf8))
-        let pemData = try XCTUnwrap(env["APLUSTERMINAL_TEST_PRIVATE_KEY"].flatMap { Data(base64Encoded: $0) },
-                                    "APLUSTERMINAL_TEST_PRIVATE_KEY missing or not base64")
+        let pemData = try Self.probeKey(env: env)
         XCTAssertTrue(ActivityAuthorizationInfo().areActivitiesEnabled,
                       "Live Activities must be enabled in this simulator for the live run")
 
