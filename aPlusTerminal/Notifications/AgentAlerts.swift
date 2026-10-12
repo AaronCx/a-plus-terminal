@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import UserNotifications
 
 /// When an agent alert may post. Pure logic, no UNUserNotificationCenter —
@@ -201,6 +202,14 @@ final class AgentAlertCenter: NSObject {
         return content
     }
 
+    /// How a notification that lands with the app in the foreground shows.
+    static func presentation(identifier: String, appIsActive: Bool) -> UNNotificationPresentationOptions {
+        if identifier == testNotificationID || !appIsActive {
+            return [.banner, .list, .sound]
+        }
+        return []
+    }
+
     func sessionClosed(_ sessionID: UUID) {
         policy.forget(session: sessionID)
     }
@@ -247,6 +256,23 @@ final class AgentAlertCenter: NSObject {
 }
 
 extension AgentAlertCenter: @preconcurrency UNUserNotificationCenterDelegate {
+    /// iOS asks here whenever a notification lands while the app is in the
+    /// foreground — which includes `.inactive` (the app switcher, Notification
+    /// Center pulled down). The policy only refuses `.active`, so an agent
+    /// alert can be posted in `.inactive`; showing nothing then would spend
+    /// the floor on a banner nobody saw. Only a user actually in the app goes
+    /// without it. The test notification always shows: it may land with the
+    /// user still in Settings, and a test that shows nothing proves nothing.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        Self.presentation(
+            identifier: notification.request.identifier,
+            appIsActive: UIApplication.shared.applicationState == .active
+        )
+    }
+
     /// A tap on the notification routes its deep link.
     ///
     /// NOT `nonisolated` — that one keyword was the crash-on-every-tap. The
@@ -259,16 +285,6 @@ extension AgentAlertCenter: @preconcurrency UNUserNotificationCenterDelegate {
     /// to main before it calls back into UIKit. Reproduced 3-for-3 in the
     /// simulator, with and without a matching server; the openurl path never
     /// crashed because it has no UIKit completion to misdeliver.
-    /// Agent alerts never reach here — the policy does not post while the
-    /// app is active — but the test notification may land with the user
-    /// still in Settings, and a test that shows nothing proves nothing.
-    func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        notification.request.identifier == Self.testNotificationID ? [.banner, .list, .sound] : []
-    }
-
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse

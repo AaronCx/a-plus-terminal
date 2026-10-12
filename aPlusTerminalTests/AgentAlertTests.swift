@@ -33,6 +33,17 @@ final class AgentAlertPolicyTests: XCTestCase {
                       "another session's agent is not this session's storm")
     }
 
+    @MainActor
+    func testForegroundPresentationShowsAlertsUnlessTheUserIsInTheApp() {
+        // `.inactive` (app switcher, Notification Center) is foreground to
+        // iOS but not to the policy: an alert posted then must show.
+        XCTAssertEqual(AgentAlertCenter.presentation(identifier: "agent-x-bell", appIsActive: false),
+                       [.banner, .list, .sound])
+        XCTAssertEqual(AgentAlertCenter.presentation(identifier: "agent-x-bell", appIsActive: true), [])
+        XCTAssertEqual(AgentAlertCenter.presentation(identifier: AgentAlertCenter.testNotificationID, appIsActive: true),
+                       [.banner, .list, .sound], "the test notification must show in the foreground")
+    }
+
     func testWatchingUsersAreNotTold() {
         var policy = AgentAlertPolicy()
         XCTAssertFalse(policy.shouldPost(session: session, trigger: .bell,
