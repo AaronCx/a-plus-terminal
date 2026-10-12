@@ -55,42 +55,52 @@ final class ScrollOracleLiveTests: XCTestCase {
 
     /// harness-design §6.2: the one step that can see the `modeEscapes` 1006
     /// ordering. No tmux (tmux always arms 1006 with the mouse family, so both
-    /// orderings end armed). A program arms X10 mouse — `?1000h` WITHOUT
-    /// `?1006h` — then clears the screen so the replay anchor postdates the
-    /// arming, and transcribes what it receives. Over ssh the emulator saw the
-    /// arming live; over meshyy the program's session is resumed into a FRESH
-    /// emulator that can only learn it from the daemon's modes frame. Correct
-    /// synthesis: the wheel bytes reach the program exactly as over ssh.
-    func testAnX10ProgramStillGetsWheelBytesAfterAFreshEmulatorResumes() async throws {
+    /// orderings end armed). A program arms VT200 normal mouse tracking —
+    /// `?1000h` WITHOUT `?1006h` (not X10, which is `?9h`) — then clears the
+    /// screen so the replay anchor postdates the arming, and transcribes what it
+    /// receives. Over ssh the emulator saw the arming live; over meshyy the
+    /// program's session is resumed into a FRESH emulator that can only learn it
+    /// from the daemon's modes frame (asserted from the replayed bytes, not
+    /// assumed). Correct synthesis: the program receives exactly what it
+    /// receives over ssh.
+    ///
+    /// The oracle is the APP's ssh path, not a reference terminal. ScrollBridge
+    /// always emits SGR wheel events (ScrollBridgeCore's documented limitation:
+    /// SwiftTerm does not expose the negotiated encoding), so over ssh this
+    /// program gets `CSI < 64 ; …` it never asked for and a real non-1006
+    /// program would misparse. The step measures whether the transport delivers
+    /// the app's own emission the same way on both sides — not whether the
+    /// program gets wheel bytes it can use.
+    func testANon1006MouseProgramGetsWhatSSHDeliversAfterAFreshEmulatorResumes() async throws {
         try requireLiveFixtures()
         let control = try await openControl()
         addTeardownBlock { await control.disconnect() }
 
         // ssh: the emulator sees the arming live.
-        let sshLog = "/tmp/aplus-oracle-x10-\(Self.hex(6))-ssh.keys"
+        let sshLog = "/tmp/aplus-oracle-vt200-\(Self.hex(6))-ssh.keys"
         addTeardownBlock { try? FileManager.default.removeItem(atPath: sshLog) }
         let (ssh, _) = try makeSession(meshyy: false)
         try await connect(ssh, meshyy: false)
-        ssh.sendInput(Data(Self.x10Program(log: sshLog).utf8))
-        try await waitFor(10, "the x10 transcriber never started (ssh)") {
+        ssh.sendInput(Data(Self.vt200Program(log: sshLog).utf8))
+        try await waitFor(10, "the vt200 transcriber never started (ssh)") {
             FileManager.default.fileExists(atPath: sshLog)
         }
         try await waitFor(10, "the ssh emulator never saw ?1000h") {
             ssh.terminalView.getTerminal().mouseMode != .off
         }
         try await Task.sleep(for: .milliseconds(300))
-        let sshSwipe = try await x10Swipe(ssh, log: sshLog)
+        let sshSwipe = try await vt200Swipe(ssh, log: sshLog)
         await ssh.close()
 
         // meshyy: same program, then a relaunch into a fresh emulator.
-        let meshyyLog = "/tmp/aplus-oracle-x10-\(Self.hex(6))-meshyy.keys"
+        let meshyyLog = "/tmp/aplus-oracle-vt200-\(Self.hex(6))-meshyy.keys"
         addTeardownBlock { try? FileManager.default.removeItem(atPath: meshyyLog) }
         let (first, server) = try makeSession(meshyy: true)
         let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
         addTeardownBlock { await self.killMeshyySessions(withPrefix: prefix, over: control) }
         try await connect(first, meshyy: true)
-        first.sendInput(Data(Self.x10Program(log: meshyyLog).utf8))
-        try await waitFor(10, "the x10 transcriber never started (meshyy)") {
+        first.sendInput(Data(Self.vt200Program(log: meshyyLog).utf8))
+        try await waitFor(10, "the vt200 transcriber never started (meshyy)") {
             FileManager.default.fileExists(atPath: meshyyLog)
         }
         // The LIVE meshyy emulator first. The daemon's modes frame reaches it
@@ -101,7 +111,7 @@ final class ScrollOracleLiveTests: XCTestCase {
         // disarmed this emulator too. A belief wait used to stand here and
         // threw, so the fresh-emulator half below never ran under the mutant.
         await settle(first, armed: { $0.terminalView.getTerminal().mouseMode != .off })
-        let liveSwipe = try await x10Swipe(first, log: meshyyLog)
+        let liveSwipe = try await vt200Swipe(first, log: meshyyLog)
 
         // Every pty byte the relaunch delivers — the replay — recorded on its way
         // to the fresh emulator, so the step can prove its own premise below.
@@ -114,29 +124,31 @@ final class ScrollOracleLiveTests: XCTestCase {
         let second = try await relaunchMeshyy(first, server: server, control: control)
         await settle(second, armed: { $0.terminalView.getTerminal().mouseMode != .off })
         MeshyyTransport.outputTapForTesting = nil
-        let meshyySwipe = try await x10Swipe(second, log: meshyyLog, after: liveSwipe.transcript)
+        let meshyySwipe = try await vt200Swipe(second, log: meshyyLog, after: liveSwipe.transcript)
 
         let trace = second.scrollTraceStoreForTesting?.records.last
         let modes = trace?.lastModesFrame?.active ?? []
         let replay = replayed.chunks.reduce(Data(), +)
         let replayArms = replay.range(of: Data("\u{1B}[?1000h".utf8)) != nil
-        print("MEASURE scrollOracle x10-fresh-emulator replay: \(replay.count)B in \(replayed.chunks.count) chunks, "
+        print("MEASURE scrollOracle vt200-fresh-emulator replay: \(replay.count)B in \(replayed.chunks.count) chunks, "
               + "contains ?1000h=\(replayArms)")
-        print("MEASURE scrollOracle x10-live-emulator: ssh \(sshSwipe.summary) | meshyy \(liveSwipe.summary)")
-        print("MEASURE scrollOracle x10-fresh-emulator: ssh \(sshSwipe.summary) | meshyy \(meshyySwipe.summary) "
+        print("MEASURE scrollOracle vt200-live-emulator: ssh \(sshSwipe.summary) | meshyy \(liveSwipe.summary)")
+        print("MEASURE scrollOracle vt200-fresh-emulator: ssh \(sshSwipe.summary) | meshyy \(meshyySwipe.summary) "
               + "modesFrame=\(modes)")
         XCTAssertTrue(sshSwipe.received.contains("^[[<64;"),
-                      "ORACLE BROKEN: the ssh side's wheel bytes never reached the x10 program\n\(sshSwipe.detail)")
+                      // SGR because that is what the app emits (see above), not
+                      // what a non-1006 program should get.
+                      "ORACLE BROKEN: the app's SGR wheel bytes never reached the program over ssh\n\(sshSwipe.detail)")
         XCTAssertEqual(liveSwipe.received, sshSwipe.received, """
-            DIVERGENCE x10-live-emulator: the program armed X10 mouse; over ssh its wheel \
-            bytes arrived, over meshyy — same emulator, no relaunch — they did not \
+            DIVERGENCE vt200-live-emulator: the program armed ?1000h without ?1006h; over ssh \
+            the app's wheel bytes arrived, over meshyy — same emulator, no relaunch — they did not \
             (the daemon's modes frame disarmed it: 1006 ordering?)
             ssh:    \(sshSwipe.detail)
             meshyy: \(liveSwipe.detail)
             """)
         XCTAssertTrue(Set(modes).contains(1000) && !Set(modes).contains(1006), """
             the step is not what it says: the daemon's modes frame should carry 1000 \
-            without 1006 (an X10 program), got \(modes)
+            without 1006 (a non-SGR mouse program), got \(modes)
             """)
         // The premise: the fresh emulator could learn the arming ONLY from the
         // modes frame. If the replay carried ?1000h (an anchor before the
@@ -147,8 +159,8 @@ final class ScrollOracleLiveTests: XCTestCase {
             (\(replay.count) bytes replayed)
             """)
         XCTAssertEqual(meshyySwipe.received, sshSwipe.received, """
-            DIVERGENCE x10-fresh-emulator: the program armed X10 mouse; over ssh its \
-            wheel bytes arrived, over meshyy a fresh emulator resumed and they did not
+            DIVERGENCE vt200-fresh-emulator: the program armed ?1000h without ?1006h; over ssh \
+            the app's wheel bytes arrived, over meshyy a fresh emulator resumed and they did not
             ssh:    \(sshSwipe.detail)
             meshyy: \(meshyySwipe.detail)
             """)
@@ -1151,16 +1163,16 @@ final class ScrollOracleLiveTests: XCTestCase {
         }
     }
 
-    // MARK: - X10 step
+    // MARK: - VT200 (non-SGR) mouse step
 
-    /// Arms X10 mouse (no SGR), clears the screen so the replay anchor
+    /// Arms VT200 normal mouse tracking (no SGR), clears the screen so the replay anchor
     /// postdates the arming, then transcribes raw input.
-    private static func x10Program(log: String) -> String {
+    private static func vt200Program(log: String) -> String {
         #"printf '\033[?1000h\033[2J'; stty -icanon -echo min 1; dd bs=1 of="#
             + log + " 2>/dev/null; stty sane\n"
     }
 
-    private struct X10Swipe {
+    private struct VT200Swipe {
         let decision: SwipeDecision?
         let bytes: Data
         /// What THIS swipe added to the transcript.
@@ -1186,7 +1198,7 @@ final class ScrollOracleLiveTests: XCTestCase {
     }
 
     /// `after` is the transcript before this swipe; only what follows it counts.
-    private func x10Swipe(_ session: TerminalSession, log: String, after baseline: String = "") async throws -> X10Swipe {
+    private func vt200Swipe(_ session: TerminalSession, log: String, after baseline: String = "") async throws -> VT200Swipe {
         let bridge = try XCTUnwrap(session.scrollBridge)
         let decision = bridge.beginSwipe()
         let bytes = bridge.injectSwipe(ticks: 3, up: true, at: CGPoint(x: 500, y: 300))
@@ -1201,7 +1213,7 @@ final class ScrollOracleLiveTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(100))
         }
         let received = transcript.hasPrefix(baseline) ? String(transcript.dropFirst(baseline.count)) : transcript
-        return X10Swipe(decision: decision, bytes: bytes, received: received, transcript: transcript,
+        return VT200Swipe(decision: decision, bytes: bytes, received: received, transcript: transcript,
                         trace: session.scrollTraceStoreForTesting?.records.last)
     }
 
