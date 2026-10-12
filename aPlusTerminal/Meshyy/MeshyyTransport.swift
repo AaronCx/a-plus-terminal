@@ -312,6 +312,13 @@ final class MeshyyTransport {
     /// untouched. Always nil in the app.
     static var bootstrapRewriteForTesting: (@Sendable (inout BootstrapResponse) -> Void)?
 
+    /// Test seam for the same harness: sees every `.output` chunk — the daemon's
+    /// pty bytes, replay included — on its way to the emulator, and NOT what this
+    /// type synthesizes locally (the geometry reset, the modes-frame escapes). It
+    /// lets a live test prove a fresh emulator could only have learned a mode from
+    /// the modes frame, not from replayed history. Always nil in the app.
+    static var outputTapForTesting: ((MeshyyTransport, Data) -> Void)?
+
     /// Opens a NEW session, named by the daemon: the lowest free slot in this server's
     /// group, allocated atomically where the sessions actually live. The one thing this
     /// can never do is land in a session that already belonged to someone — which is
@@ -500,7 +507,9 @@ final class MeshyyTransport {
     func handle(_ event: MeshyySessionEvent) -> Bool {
         switch event {
         case .output(let bytes):
-            self.outputContinuation.yield(Data(bytes))
+            let data = Data(bytes)
+            Self.outputTapForTesting?(self, data)
+            self.outputContinuation.yield(data)
 
         case .geometryReset:
             // A replay carries the scroll region of whichever client produced
