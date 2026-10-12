@@ -358,6 +358,25 @@ final class CustomAgentsTests: XCTestCase {
 
     // MARK: - Icons
 
+    func testIconsSavedBeforeTheExclusionAreExcludedAtLaunch() throws {
+        // Builds 70–75 never set the exclusion, and a write is what sets it
+        // now, so an icon those builds saved would stay eligible for backup
+        // until the user picks a new one. The launch pass must cover it.
+        let id = "custom-old-\(UUID().uuidString.prefix(8).lowercased())"
+        iconIDs.append(id)
+        XCTAssertTrue(CustomAgentIconStore.save(png(width: 40, height: 40, bands: [.red]), for: id))
+        var dir = try XCTUnwrap(CustomAgentIconStore.imageURL(for: id)).deletingLastPathComponent()
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = false
+        try dir.setResourceValues(values)
+        dir.removeAllCachedResourceValues()
+        XCTAssertFalse(CustomAgentIconStore.isExcludedFromBackupForTesting(), "precondition: an old build's folder")
+
+        CustomAgentIconStore.excludeStoredIconsFromBackup()
+        XCTAssertTrue(CustomAgentIconStore.isExcludedFromBackupForTesting(),
+                      "icons already on disk stay in backups until the next write")
+    }
+
     func testIconIsCenterCroppedTo360Square() throws {
         let id = "custom-crop-\(UUID().uuidString.prefix(8).lowercased())"
         iconIDs.append(id)

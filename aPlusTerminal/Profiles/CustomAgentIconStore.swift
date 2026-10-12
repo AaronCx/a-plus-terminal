@@ -17,11 +17,13 @@ enum CustomAgentIconStore {
     /// Stored edge length in pixels.
     static let side: CGFloat = 360
 
+    private static func directoryURL() -> URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID)?
+            .appendingPathComponent("AgentIcons", isDirectory: true)
+    }
+
     private static func directory() -> URL? {
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: groupID
-        ) else { return nil }
-        let dir = container.appendingPathComponent("AgentIcons", isDirectory: true)
+        guard let dir = directoryURL() else { return nil }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -134,6 +136,16 @@ enum CustomAgentIconStore {
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? dir.setResourceValues(values)
+    }
+
+    /// The same exclusion for icons ALREADY on disk. Builds that never set
+    /// it stored icons that would stay eligible for backup until the user
+    /// picked a new one. Called once per app launch; creates
+    /// nothing when the user has no icons.
+    static func excludeStoredIconsFromBackup() {
+        guard let dir = directoryURL(),
+              FileManager.default.fileExists(atPath: dir.path) else { return }
+        excludeFromBackup(dir)
     }
 
     #if DEBUG

@@ -35,6 +35,9 @@ struct APlusTerminalApp: App {
         TestSeed.prepareAgentsIfRequested()
         #endif
         let profiles = ProfileStore()
+        // User icons never leave the device, including icons saved before
+        // every write excluded them from backup.
+        CustomAgentIconStore.excludeStoredIconsFromBackup()
         _theme = State(initialValue: theme)
         _servers = State(initialValue: servers)
         _keys = State(initialValue: keys)
