@@ -182,6 +182,49 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.detected?.id, "claude-code", "explicit pick keeps its name")
     }
 
+    func testAnEchoedCommandNameUnlatchesAtThePrompt() async {
+        // A command-name marker matches the shell echoing a line that only
+        // mentions it. The echo is too short to leave `.none`, and the
+        // un-latch used to run only after a status change — so the name
+        // (and its icon, and the bell gate) stuck until a later burst.
+        let monitor = autoMonitor(quietInterval: 0.1)
+        var changes = 0
+        monitor.onChange = { changes += 1 }
+        monitor.observe(bytes("cd hermes-repo\r\n"))
+        XCTAssertEqual(monitor.detected?.id, "hermes", "the echo latches the marker")
+        XCTAssertEqual(monitor.status, .none, "a short echo never reads as working")
+        XCTAssertTrue(monitor.hasRunningAgentEvidence)
+
+        monitor.observe(bytes("aaron@mini hermes-repo % "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(monitor.detected, "an echo-latched name must un-latch at the idle prompt")
+        XCTAssertFalse(monitor.hasRunningAgentEvidence)
+        XCTAssertEqual(changes, 1, "the un-latch must tell the surfaces showing the icon")
+    }
+
+    func testExplicitPickIsEvidenceOnlyWhileActive() async {
+        let monitor = explicitMonitor(quietInterval: 0.1)
+        XCTAssertFalse(monitor.hasRunningAgentEvidence, "named up front is not running")
+        monitor.observe(bytes(String(repeating: "x", count: 300)))
+        XCTAssertTrue(monitor.hasRunningAgentEvidence)
+        monitor.observe(bytes("\r\nmini# "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.detected?.id, "claude-code")
+        XCTAssertFalse(monitor.hasRunningAgentEvidence, "back at a bare shell prompt")
+    }
+
+    func testDetectionOffStillReportsTheIdlePrompt() async {
+        // With no candidates the heuristic is off, but an OSC 7501 speaker
+        // can still latch the session; it needs to hear the shell is back.
+        let monitor = AgentActivityMonitor(candidates: [], quietInterval: 0.1)
+        var prompts = 0
+        monitor.onIdleShellPrompt = { prompts += 1 }
+        monitor.observe(bytes("\r\naaron@mini ~ % "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(prompts, 1)
+        XCTAssertEqual(monitor.status, .none)
+    }
+
     func testWaitingClearsWhenAgentExitsToPrompt() async {
         let monitor = explicitMonitor(quietInterval: 0.1)
         monitor.observe(bytes(String(repeating: "agent output ", count: 50)))

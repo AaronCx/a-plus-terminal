@@ -152,6 +152,60 @@ final class AgentTransitionTests: XCTestCase {
         XCTAssertEqual(fired, [])
     }
 
+    /// The user's explicit pick (one agent, no generic fallback), with a
+    /// short quiet window so the idle-prompt check runs inside a test.
+    private func explicitClaudeSession() -> (TerminalSession, () -> [AgentAlertPolicy.Trigger]) {
+        var quick = claudeCode
+        quick.quietInterval = 0.1
+        let session = bareSession(agents: [quick])
+        var fired: [AgentAlertPolicy.Trigger] = []
+        session.postAgentAlert = { fired.append($0) }
+        return (session, { fired })
+    }
+
+    func testAnExplicitPickAtABareShellPromptDoesNotOwnTheBell() async throws {
+        // An explicit pick is NAMED before anything runs. A build script's
+        // `\a` at a plain shell on that server is not Claude Code asking.
+        let (session, fired) = explicitClaudeSession()
+        XCTAssertEqual(session.namedAgentID, "claude-code", "explicit pick is named up front")
+        session.agentMonitor.observe(Array("\r\naaron@mini ~ $ ".utf8))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(session.agentMonitor.status, .none)
+        XCTAssertEqual(session.noteAgentSignal(.bell), .noAgent, "a bare shell's bell posted as the agent's")
+
+        // The agent starts and draws: now its bell is its own.
+        session.agentMonitor.observe(Array((String(repeating: "─", count: 120) + "\r\n│ ❯ │").utf8))
+        XCTAssertEqual(session.agentMonitor.status, .working)
+        XCTAssertEqual(session.noteAgentSignal(.bell), .forwarded(.bell))
+
+        // It exits back to the shell: the next bell is the shell's again.
+        session.sendInput(Data("y".utf8))
+        session.agentMonitor.observe(Array("\r\naaron@mini ~ $ ".utf8))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(session.agentMonitor.status, .none)
+        XCTAssertEqual(session.noteAgentSignal(.bell), .noAgent)
+        XCTAssertEqual(fired(), [.bell])
+    }
+
+    func testA7501SpeakerThatExitsWithoutClearingIsForgottenAtThePrompt() async throws {
+        // A program that announced itself over OSC 7501 and then exited
+        // without its root `clear` (crash, ^C, kill) must not leave the
+        // shell's bells passing the gate.
+        let (session, fired) = explicitClaudeSession()
+        session.agentMonitor.observe(Array("\r\naaron@mini ~ $ ".utf8))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        feed(session, "\u{1B}]7501;state=working:app=claude-code\u{07}")
+        XCTAssertTrue(session.speaksProgramStatus)
+        XCTAssertEqual(session.noteAgentSignal(.bell), .forwarded(.bell), "a live 7501 speaker owns its bell")
+
+        session.sendInput(Data("y".utf8))
+        session.agentMonitor.observe(Array("^C\r\naaron@mini ~ $ ".utf8))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(session.speaksProgramStatus, "the 7501 latch outlived the program")
+        XCTAssertEqual(session.noteAgentSignal(.bell), .noAgent)
+        XCTAssertEqual(fired(), [.bell])
+    }
+
     func testSignalsRightAfterAResizeOrSceneChangeAreDropped() throws {
         let (session, fired) = claudeSession()
         let t0 = Date()

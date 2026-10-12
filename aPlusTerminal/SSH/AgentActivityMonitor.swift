@@ -29,6 +29,24 @@ final class AgentActivityMonitor {
     private(set) var detected: AgentProfile?
     /// Fired on every status transition (main actor).
     var onChange: (() -> Void)?
+    /// Fired whenever the quiet timer finds the session sitting at a bare
+    /// shell prompt — whatever was running there has exited. The session
+    /// uses it to drop latches the monitor does not own (OSC 7501).
+    var onIdleShellPrompt: (() -> Void)?
+
+    /// Positive evidence that the named agent is running right now, not
+    /// just that one was configured or once mentioned. A marker latch counts
+    /// (an idle shell prompt un-latches it). An explicit pick is named from
+    /// the start, so for it the evidence is the heuristic being active: a
+    /// pick on a server sitting at a bare shell prompt reads `.none`, and a
+    /// shell's bell there is not the agent's.
+    var hasRunningAgentEvidence: Bool {
+        guard let detected else { return false }
+        if let explicitAgent, detected.id == explicitAgent.id {
+            return status != .none
+        }
+        return true
+    }
 
     private static let tailWindowBytes = 128
     /// Raw tail of recent output kept for idle-prompt detection — wider than
@@ -96,12 +114,16 @@ final class AgentActivityMonitor {
         if detected == nil, !markerCandidates.isEmpty {
             scanForMarker(bytes)
         }
-        guard agentSeen else { return }
-
-        burstBytes += bytes.count
-        if status != .working, burstBytes >= activeBurst {
-            transition(to: .working)
+        if agentSeen {
+            burstBytes += bytes.count
+            if status != .working, burstBytes >= activeBurst {
+                transition(to: .working)
+            }
         }
+        // Scheduled even with detection off or status `.none`: the
+        // idle-prompt check also un-latches a marker that matched a typed
+        // command's echo (`cd codex-repo`, `man aider`), which is too short
+        // to ever leave `.none`, and tells the session a program exited.
         scheduleQuiet()
     }
 
@@ -153,15 +175,21 @@ final class AgentActivityMonitor {
             try? await Task.sleep(nanoseconds: UInt64(quiet * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
             self.burstBytes = 0
-            guard self.status != .none else { return }
             if self.tailShowsIdleShellPrompt() {
                 // The "burst" was a login banner / MOTD / multiplexer redraw,
-                // or the agent has exited: the session sits at a bare shell
-                // prompt, so nothing is waiting for input. Clear status and
-                // un-latch a name the marker scan may have picked up from
-                // banner text (an explicit user pick keeps its name).
+                // a typed command's echo, or the agent has exited: the
+                // session sits at a bare shell prompt, so nothing is waiting
+                // for input. Clear status and un-latch a name the marker
+                // scan may have picked up from banner or echo text (an
+                // explicit user pick keeps its name).
+                let unlatched = self.detected?.id != self.explicitAgent?.id
                 self.detected = self.explicitAgent
-                self.transition(to: .none)
+                self.onIdleShellPrompt?()
+                if self.status != .none {
+                    self.transition(to: .none)
+                } else if unlatched {
+                    self.onChange?()
+                }
             } else if self.status == .working {
                 // Quiet is not waiting while the agent SAYS it is busy: a
                 // silent tool call keeps the profile's busy marker near the

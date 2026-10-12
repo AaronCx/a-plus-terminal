@@ -245,7 +245,8 @@ final class TerminalSession: Identifiable, Hashable {
         case forwarded(AgentAlertPolicy.Trigger)
         /// A status update, not a request (7501 working/idle/…).
         case notARequest
-        /// No named agent here: a plain shell's BEL is tab completion.
+        /// No agent evidently running here: a plain shell's BEL is tab
+        /// completion or a script's `\a`, even on a server with an agent picked.
         case noAgent
         /// Within the quiet period after a resize or scene-phase change.
         case disruption
@@ -266,7 +267,7 @@ final class TerminalSession: Identifiable, Hashable {
 
     /// The ONLY path to a notification: the program in the terminal said
     /// something meant for the user (BEL, OSC 9/777, OSC 7501). Gates, in
-    /// order: a named agent (or a 7501 speaker) is here; no resize or
+    /// order: a named agent is evidently running (or a 7501 speaker is); no resize or
     /// scene-phase change in the last 2 s; the user has not seen-and-left an
     /// earlier signal unanswered. The policy (floor, app active, pop-out)
     /// gets the last word.
@@ -283,12 +284,23 @@ final class TerminalSession: Identifiable, Hashable {
 
     private func signalOutcome(_ signal: AgentSignal, now: Date) -> SignalOutcome {
         guard let trigger = signal.trigger else { return .notARequest }
-        guard namedAgentID != nil || speaksProgramStatus else { return .noAgent }
+        guard agentEvidentlyRunning || speaksProgramStatus else { return .noAgent }
         if let last = lastDisruptionAt, now.timeIntervalSince(last) < Self.disruptionQuietPeriod {
             return .disruption
         }
         guard !currentWaitSeen else { return .seenUnanswered }
         return .forwarded(trigger)
+    }
+
+    /// Positive evidence that a named agent is running here NOW — the
+    /// notification gate. Naming alone is not enough: an explicit pick is
+    /// named before anything runs, so a build script's bell at a bare shell
+    /// prompt would have posted "Claude Code wants your attention".
+    private var agentEvidentlyRunning: Bool {
+        #if MESHYY
+        if usesMeshyy, let id = daemonAgentID, id != "generic" { return true }
+        #endif
+        return agentMonitor.hasRunningAgentEvidence
     }
 
     /// The program behind the pty is gone (suspend, close, reconnect): forget
@@ -527,6 +539,12 @@ final class TerminalSession: Identifiable, Hashable {
             self?.sendInput(data)
         }
         registerAgentSignalHandlers()
+        // A bare shell prompt means the program that announced itself over
+        // OSC 7501 has exited, even if it never sent its root `clear`; a
+        // later shell bell is not its.
+        agentMonitor.onIdleShellPrompt = { [weak self] in
+            self?.speaksProgramStatus = false
+        }
 
         let scrollBridge = ScrollBridge(
             sendData: { [weak self] data in self?.sendInput(data, countsAsResponse: false) },
