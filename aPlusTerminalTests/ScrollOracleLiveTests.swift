@@ -103,12 +103,25 @@ final class ScrollOracleLiveTests: XCTestCase {
         await settle(first, armed: { $0.terminalView.getTerminal().mouseMode != .off })
         let liveSwipe = try await x10Swipe(first, log: meshyyLog)
 
+        // Every pty byte the relaunch delivers — the replay — recorded on its way
+        // to the fresh emulator, so the step can prove its own premise below.
+        let firstTransport = try XCTUnwrap(first.meshyy)
+        let replayed = ReplayLog()
+        addTeardownBlock { @MainActor in MeshyyTransport.outputTapForTesting = nil }
+        MeshyyTransport.outputTapForTesting = { transport, bytes in
+            if transport !== firstTransport { replayed.chunks.append(bytes) }
+        }
         let second = try await relaunchMeshyy(first, server: server, control: control)
         await settle(second, armed: { $0.terminalView.getTerminal().mouseMode != .off })
+        MeshyyTransport.outputTapForTesting = nil
         let meshyySwipe = try await x10Swipe(second, log: meshyyLog, after: liveSwipe.transcript)
 
         let trace = second.scrollTraceStoreForTesting?.records.last
         let modes = trace?.lastModesFrame?.active ?? []
+        let replay = replayed.chunks.reduce(Data(), +)
+        let replayArms = replay.range(of: Data("\u{1B}[?1000h".utf8)) != nil
+        print("MEASURE scrollOracle x10-fresh-emulator replay: \(replay.count)B in \(replayed.chunks.count) chunks, "
+              + "contains ?1000h=\(replayArms)")
         print("MEASURE scrollOracle x10-live-emulator: ssh \(sshSwipe.summary) | meshyy \(liveSwipe.summary)")
         print("MEASURE scrollOracle x10-fresh-emulator: ssh \(sshSwipe.summary) | meshyy \(meshyySwipe.summary) "
               + "modesFrame=\(modes)")
@@ -124,6 +137,14 @@ final class ScrollOracleLiveTests: XCTestCase {
         XCTAssertTrue(Set(modes).contains(1000) && !Set(modes).contains(1006), """
             the step is not what it says: the daemon's modes frame should carry 1000 \
             without 1006 (an X10 program), got \(modes)
+            """)
+        // The premise: the fresh emulator could learn the arming ONLY from the
+        // modes frame. If the replay carried ?1000h (an anchor before the
+        // program's printf), a pass below would prove nothing about synthesis.
+        XCTAssertFalse(replayArms, """
+            the step is not what it says: the relaunch replay itself carries ?1000h, so the \
+            fresh emulator could learn the arming from history, not the modes frame \
+            (\(replay.count) bytes replayed)
             """)
         XCTAssertEqual(meshyySwipe.received, sshSwipe.received, """
             DIVERGENCE x10-fresh-emulator: the program armed X10 mouse; over ssh its \
@@ -1157,6 +1178,11 @@ final class ScrollOracleLiveTests: XCTestCase {
             return "decision=\(decision.map { "\($0)" } ?? "nil") bytes=\(ScrollTrace.hex(bytes)) "
                 + "received=\(received.debugDescription) trace=\(traceJSON)"
         }
+    }
+
+    /// What the output tap saw, in arrival order.
+    private final class ReplayLog {
+        var chunks: [Data] = []
     }
 
     /// `after` is the transcript before this swipe; only what follows it counts.
