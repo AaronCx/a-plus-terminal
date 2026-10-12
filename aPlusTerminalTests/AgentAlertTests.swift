@@ -105,9 +105,11 @@ final class AgentTransitionTests: XCTestCase {
         return (session, { fired })
     }
 
-    /// Feeds raw server output through the emulator, the way the pump does.
+    /// Feeds raw server output into the emulator exactly as both pumps do —
+    /// `terminalView.feed`, with no wrapper, so a test cannot pass on a seam
+    /// the pumps do not go through.
     private func feed(_ session: TerminalSession, _ text: String) {
-        session.feedOutput(Array(text.utf8))
+        session.terminalView.feed(byteArray: ArraySlice(Array(text.utf8)))
     }
 
     func testTheHeuristicNeverPosts() throws {
@@ -232,6 +234,57 @@ final class AgentTransitionTests: XCTestCase {
         // Real typing still answers.
         session.terminalView.send(txt: "y")
         XCTAssertEqual(session.noteAgentSignal(.bell), .forwarded(.bell))
+    }
+
+    func testQueryRepliesFromRealOutputAreNotAnAnswerButTypingIs() throws {
+        // The marking lives in the emulator's own write funnel
+        // (TerminalEmulatorView.send(source:data:)), so it holds for output
+        // fed exactly as the pumps feed it. What a TUI asks at startup:
+        // primary and secondary DA, a cursor-position report, the
+        // foreground color.
+        let (session, fired) = claudeSession()
+        var writes: [(Data, Bool)] = []
+        session.onSendInput = { writes.append(($0, $1)) }
+        session.noteAgentSignal(.bell)
+        session.markViewed()
+        feed(session, "\u{1B}[c\u{1B}[>c\u{1B}[6n\u{1B}]10;?\u{07}")
+        let replies = writes.map { String(decoding: $0.0, as: UTF8.self) }
+        XCTAssertTrue(replies.contains { $0.hasPrefix("\u{1B}[?") && $0.hasSuffix("c") }, "no DA reply: \(replies.map(\.debugDescription))")
+        XCTAssertTrue(replies.contains { $0.hasPrefix("\u{1B}[>") && $0.hasSuffix("c") }, "no secondary DA reply")
+        XCTAssertTrue(replies.contains { $0.hasSuffix("R") }, "no cursor-position reply")
+        XCTAssertTrue(replies.contains { $0.hasPrefix("\u{1B}]10;") }, "no color reply")
+        XCTAssertEqual(writes.filter(\.1).count, 0, "a query reply counted as the user's answer")
+        XCTAssertEqual(session.noteAgentSignal(.bell), .seenUnanswered)
+        XCTAssertFalse(session.terminalView.isEmulatorWriting, "the marking leaked past the reply")
+
+        // The soft keyboard's path: insertText → the input bridge / send(data:).
+        writes.removeAll()
+        session.terminalView.insertText("y")
+        XCTAssertEqual(writes.map(\.0), [Data("y".utf8)])
+        XCTAssertEqual(writes.map(\.1), [true], "typing no longer counts as the answer")
+        XCTAssertEqual(session.noteAgentSignal(.bell), .forwarded(.bell))
+        XCTAssertEqual(fired(), [.bell, .bell])
+    }
+
+    func testAMouseClickIsAnAnswerEvenThoughTheEmulatorWritesIt() throws {
+        // SwiftTerm encodes a tap on a mouse-reporting TUI through the same
+        // emulator path as its query replies; a tap on an option is still
+        // the user choosing.
+        // Every encoding SwiftTerm can be switched into: X10, SGR, urxvt.
+        for (modes, expected) in [("\u{1B}[?1000h", "\u{1B}[M $%"),
+                                  ("\u{1B}[?1000h\u{1B}[?1006h", "\u{1B}[<0;4;5M"),
+                                  ("\u{1B}[?1000h\u{1B}[?1015h", "\u{1B}[32;4;5M")] {
+            let (session, _) = claudeSession()
+            var writes: [(Data, Bool)] = []
+            session.onSendInput = { writes.append(($0, $1)) }
+            session.noteAgentSignal(.bell)
+            session.markViewed()
+            feed(session, modes)
+            session.terminalView.getTerminal().sendEvent(buttonFlags: 0, x: 3, y: 4)
+            XCTAssertEqual(writes.last?.0, Data(expected.utf8))
+            XCTAssertEqual(writes.last?.1, true, "a mouse click (\(expected.debugDescription)) did not count as the user's answer")
+            XCTAssertEqual(session.noteAgentSignal(.bell), .forwarded(.bell))
+        }
     }
 
     func testTheFloorStillAppliesBehindTheGates() throws {

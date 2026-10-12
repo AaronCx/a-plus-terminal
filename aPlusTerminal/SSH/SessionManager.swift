@@ -187,10 +187,6 @@ final class TerminalSession: Identifiable, Hashable {
     /// it announced itself, so it counts as an agent with or without a
     /// marker match.
     @ObservationIgnored private(set) var speaksProgramStatus = false
-    /// True while SwiftTerm parses server output. Anything SwiftTerm writes
-    /// back inside that window is its reply to a query in the output (DA,
-    /// XTVERSION, colors) — the terminal talking, not the user.
-    @ObservationIgnored var isFeedingOutput = false
     /// The one-time "how to get notified" card, raised when Claude Code is
     /// detected and the card has never been ON SCREEN (the flag persists
     /// when it appears — `SessionManager.notificationSetupCardAppeared` — so
@@ -1588,7 +1584,7 @@ final class TerminalSession: Identifiable, Hashable {
                 let bytes = [UInt8](chunk)
                 self.lastInboundBytesAt = Date()
                 self.scrollTracer?.noteInbound(byteCount: bytes.count)
-                self.feedOutput(bytes)
+                self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
                 // No noteAgentStatus here: under meshyy the daemon's agent
                 // events drive the alert funnel — feeding the heuristic too
@@ -1794,15 +1790,6 @@ final class TerminalSession: Identifiable, Hashable {
         }
     }
 
-    /// Server output into the emulator. Whatever SwiftTerm sends back while
-    /// parsing it is a reply to a query in that output (see
-    /// `isFeedingOutput`).
-    func feedOutput(_ bytes: [UInt8]) {
-        isFeedingOutput = true
-        defer { isFeedingOutput = false }
-        terminalView.feed(byteArray: ArraySlice(bytes))
-    }
-
     private func startPump(reading connection: SSHConnection) {
         pumpTask = Task { [weak self] in
             for await chunk in await connection.output {
@@ -1812,7 +1799,7 @@ final class TerminalSession: Identifiable, Hashable {
                 self.lastInboundBytesAt = Date()
                 self.scrollTracer?.noteInbound(byteCount: bytes.count)
                 #endif
-                self.feedOutput(bytes)
+                self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
                 self.noteAgentStatus(self.agentMonitor.status)
                 // Source A of the preview's port detection. Cheap by
@@ -1906,8 +1893,13 @@ private final class SessionIO: TerminalViewDelegate {
             // loses first responder — e.g. every app switch) and SwiftTerm's
             // replies to queries are the terminal talking. Counting them as
             // the user's answer cleared the seen-signal mute on every return
-            // to the app. Typing, paste and dictation still count.
-            let machine = focus != nil || session.isFeedingOutput
+            // to the app. Typing, paste and dictation still count, and so
+            // does a mouse report: SwiftTerm writes those through the same
+            // emulator path, but a tap on a TUI's option is the user
+            // choosing. (Wheel scrolling never gets here — ScrollBridge
+            // sends it as non-response itself.)
+            let emulatorReply = session.terminalView.isEmulatorWriting && !Self.isMouseReport(payload)
+            let machine = focus != nil || emulatorReply
             session.sendInput(payload, countsAsResponse: !machine)
         }
     }
@@ -1919,6 +1911,19 @@ private final class SessionIO: TerminalViewDelegate {
         case [0x1B, 0x5B, 0x4F]: return "out"
         default: return nil
         }
+    }
+
+    /// A mouse report in any encoding SwiftTerm emits: X10/UTF-8
+    /// (`ESC [ M …`), SGR (`ESC [ < …`), urxvt (`ESC [ b;x;y M`). No query
+    /// reply has those shapes (DA ends in `c`, cursor position in `R`).
+    static func isMouseReport(_ data: Data) -> Bool {
+        let bytes = Array(data)
+        guard bytes.count >= 3, bytes[0] == 0x1B, bytes[1] == 0x5B else { return false }
+        if bytes[2] == 0x4D || bytes[2] == 0x3C { return true }
+        guard bytes.last == 0x4D else { return false }
+        let body = bytes[2..<(bytes.count - 1)]
+        return body.split(separator: 0x3B, omittingEmptySubsequences: false).count == 3
+            && body.allSatisfy { $0 == 0x3B || (0x30...0x39).contains($0) }
     }
 
     /// SwiftTerm calls this only when cols/rows actually change — a real
