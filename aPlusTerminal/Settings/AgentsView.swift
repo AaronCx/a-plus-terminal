@@ -8,8 +8,9 @@ import UniformTypeIdentifiers
 /// the same way as a built-in, from what appears in the terminal.
 ///
 /// Icons: the app ships only original doodles; whatever a user picks is
-/// their own copy, kept in the App Group for the Live Activity and never
-/// exported or uploaded — consistent with zero data collection.
+/// their own copy, kept in the App Group for the Live Activity, left out of
+/// exports and device backups, and never sent anywhere — consistent with
+/// zero data collection.
 struct AgentsView: View {
     @Environment(ProfileStore.self) private var profiles
     @Environment(AppSettings.self) private var settings
@@ -88,7 +89,7 @@ struct AgentsView: View {
             } header: {
                 Text("Built-in")
             } footer: {
-                Text("Pick any image from Photos or Files for any agent. It's cropped to a square from the center and stored at 360px (PNG with transparency looks best). Icons show in the session list and Live Activity when an agent is detected, stay on this device, and are never exported or uploaded. Agent names, icons and mascots are trademarks or artwork of their respective owners; a+Terminal is independent and not affiliated with, sponsored by, or endorsed by any of them.")
+                Text("Pick any image from Photos or Files for any agent. It's cropped to a square from the center and stored at 360px (PNG with transparency looks best). Icons show in the session list and Live Activity when an agent is detected, and stay on this device: they're left out of exported files and device backups, and a+Terminal never sends them anywhere. Agent names, icons and mascots are trademarks or artwork of their respective owners; a+Terminal is independent and not affiliated with, sponsored by, or endorsed by any of them.")
             }
 
             #if DEBUG

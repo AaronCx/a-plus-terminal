@@ -337,6 +337,8 @@ final class CustomAgentsTests: XCTestCase {
         // green; the old aspect-fit pad left transparent bars top and bottom.
         let source = png(width: 300, height: 100, bands: [.red, .green, .blue])
         XCTAssertTrue(CustomAgentIconStore.save(source, for: id))
+        XCTAssertTrue(CustomAgentIconStore.isExcludedFromBackupForTesting(),
+                      "user icons stay on this device: not in iCloud or computer backups")
         let url = try XCTUnwrap(CustomAgentIconStore.imageURL(for: id))
         let image = try XCTUnwrap(UIImage(contentsOfFile: url.path))
         XCTAssertEqual(image.cgImage?.width, 360)

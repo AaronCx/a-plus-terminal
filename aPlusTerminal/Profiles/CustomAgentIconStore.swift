@@ -117,11 +117,32 @@ enum CustomAgentIconStore {
         guard let url = fileURL(for: profileID) else { return false }
         do {
             try png.write(to: url, options: .atomic)
+            excludeFromBackup(url.deletingLastPathComponent())
             return true
         } catch {
             return false
         }
     }
+
+    /// User icons stay on this device: a picked image may be someone else's
+    /// artwork (a vendor mascot), the user's own copy for their own phone,
+    /// so it is kept out of iCloud and computer backups as well as exports.
+    /// Set on the directory, which covers every file in it; repeated on each
+    /// write because a restore or a fresh container starts without it.
+    private static func excludeFromBackup(_ directory: URL) {
+        var dir = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? dir.setResourceValues(values)
+    }
+
+    #if DEBUG
+    /// Test seam: whether the icons directory is excluded from backup.
+    static func isExcludedFromBackupForTesting() -> Bool {
+        guard let dir = directory() else { return false }
+        return (try? dir.resourceValues(forKeys: [.isExcludedFromBackupKey]))?.isExcludedFromBackup ?? false
+    }
+    #endif
 
     static func clear(for profileID: String) {
         guard let url = fileURL(for: profileID) else { return }
