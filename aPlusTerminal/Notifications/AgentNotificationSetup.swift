@@ -25,7 +25,7 @@ struct NotificationSetupCard: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Get notified by Claude Code")
                     .font(.subheadline.weight(.semibold))
-                Text("To get notified, run this on your server: add this line to \(AgentNotificationSetup.settingsPath):")
+                Text("To get notified, run this on your server: add this line to \(AgentNotificationSetup.settingsPath) (inside the outer { }):")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 SettingLineRow(copied: $copied)
