@@ -136,6 +136,14 @@ final class TerminalSession: Identifiable, Hashable {
         return id
     }
 
+    /// Log-safe agent name: a profile id this app knows. Under meshyy the
+    /// id comes from the remote daemon, so one that matches no local
+    /// profile logs as "other" — never the remote's string.
+    var agentLogName: String {
+        guard let id = namedAgentID else { return speaksProgramStatus ? "osc7501" : "nil" }
+        return profiles.agent(id: id) != nil ? id : "other"
+    }
+
     /// Asset name for the detected agent's mascot mark, when one is detected.
     var effectiveAgentIconName: String? {
         namedAgentID.map { "agent-\($0)" }
@@ -211,7 +219,7 @@ final class TerminalSession: Identifiable, Hashable {
     /// wrong guess is cheap; notifications come from `noteAgentSignal`.
     func noteAgentStatus(_ status: AgentActivityMonitor.Status, now: Date = Date()) {
         defer { alertedAgentStatus = status }
-        agentAlertLog.debug("note session=\(self.id.logTag, privacy: .public) status=\(status.rawValue, privacy: .public) alerted=\(self.alertedAgentStatus.rawValue, privacy: .public) agent=\(self.namedAgentID ?? "nil", privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public) wouldPost=false")
+        agentAlertLog.debug("note session=\(self.id.logTag, privacy: .public) status=\(status.rawValue, privacy: .public) alerted=\(self.alertedAgentStatus.rawValue, privacy: .public) agent=\(self.agentLogName, privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public) wouldPost=false")
         #if DEBUG
         AgentAlertProbe.shared.noteAgent(namedAgentID)
         #endif
@@ -242,6 +250,17 @@ final class TerminalSession: Identifiable, Hashable {
         case disruption
         /// The user saw the pending signal and has not answered yet.
         case seenUnanswered
+
+        /// Log-safe: a forwarded trigger by its slug, never its text.
+        var logName: String {
+            switch self {
+            case .forwarded(let trigger): return "forwarded-\(trigger.slug)"
+            case .notARequest: return "notARequest"
+            case .noAgent: return "noAgent"
+            case .disruption: return "disruption"
+            case .seenUnanswered: return "seenUnanswered"
+            }
+        }
     }
 
     /// The ONLY path to a notification: the program in the terminal said
@@ -253,7 +272,7 @@ final class TerminalSession: Identifiable, Hashable {
     @discardableResult
     func noteAgentSignal(_ signal: AgentSignal, now: Date = Date()) -> SignalOutcome {
         let outcome = signalOutcome(signal, now: now)
-        agentAlertLog.notice("signal session=\(self.id.logTag, privacy: .public) kind=\(signal.logName, privacy: .public) agent=\(self.namedAgentID ?? (self.speaksProgramStatus ? "osc7501" : "nil"), privacy: .public) outcome=\(String(describing: outcome), privacy: .public)")
+        agentAlertLog.notice("signal session=\(self.id.logTag, privacy: .public) kind=\(signal.logName, privacy: .public) agent=\(self.agentLogName, privacy: .public) outcome=\(outcome.logName, privacy: .public)")
         if case .forwarded(let trigger) = outcome {
             signalPending = true
             postAgentAlert(trigger)

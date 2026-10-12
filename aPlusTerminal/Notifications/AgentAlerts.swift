@@ -26,6 +26,8 @@ struct AgentAlertPolicy {
         case finished
 
         /// Request-identifier suffix: one pending banner per kind per session.
+        /// Also the ONLY form a trigger takes in the log — the associated
+        /// title, body and kind are the remote program's words.
         var slug: String {
             switch self {
             case .bell: return "bell"
@@ -164,7 +166,7 @@ final class AgentAlertCenter: NSObject {
             content: content,
             trigger: nil
         ))
-        agentAlertLog.notice("posted session=\(sessionID.logTag, privacy: .public) trigger=\(String(describing: trigger), privacy: .public)")
+        agentAlertLog.notice("posted session=\(sessionID.logTag, privacy: .public) trigger=\(trigger.slug, privacy: .public)")
         #if DEBUG
         AgentAlertProbe.shared.notePost()
         #endif

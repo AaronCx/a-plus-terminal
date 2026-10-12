@@ -331,6 +331,33 @@ final class AgentTransitionTests: XCTestCase {
         XCTAssertEqual(session.noteAgentSignal(.bell), .noAgent)
     }
 
+    func testLogNamesNeverCarryTheProgramsWords() {
+        // The unified log is persistent and ends up in sysdiagnoses: only
+        // kinds, never the title, body or a free-form 7501 kind.
+        XCTAssertEqual(AgentSignal.osc777(title: "secret", body: "token=hunter2").logName, "osc777")
+        XCTAssertEqual(AgentSignal.osc9(message: "token=hunter2").logName, "osc9")
+        XCTAssertEqual(AgentSignal.programStatus(.init(state: .blocked, kind: "token=hunter2")).logName,
+                       "osc7501-blocked-other")
+        XCTAssertEqual(AgentSignal.programStatus(.init(state: .blocked, kind: "permission")).logName,
+                       "osc7501-blocked-permission")
+        XCTAssertEqual(TerminalSession.SignalOutcome.forwarded(.message(title: "secret", body: "token=hunter2")).logName,
+                       "forwarded-message")
+        XCTAssertEqual(AgentAlertPolicy.Trigger.blocked(kind: "token=hunter2").slug, "blocked")
+        XCTAssertEqual(AgentAlertPolicy.Trigger.message(title: "secret", body: "token=hunter2").slug, "message")
+        for name in [TerminalSession.SignalOutcome.forwarded(.message(title: "secret", body: "token=hunter2")).logName,
+                     AgentSignal.osc777(title: "secret", body: "token=hunter2").logName,
+                     AgentAlertPolicy.Trigger.message(title: "secret", body: "token=hunter2").slug] {
+            XCTAssertFalse(name.contains("secret") || name.contains("hunter2"), "\(name) carries the program's words")
+        }
+    }
+
+    func testTheLoggedAgentIsAKnownProfileOrNothing() {
+        let session = bareSession(agents: [claudeCode, generic])
+        XCTAssertEqual(session.agentLogName, "nil")
+        session.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
+        XCTAssertEqual(session.agentLogName, "claude-code")
+    }
+
     func testOSC7501RecordsParseAndBadReportsAreDiscarded() {
         let title = Data("Bash".utf8).base64EncodedString()
         let parsed = ProgramStatus.parse(ArraySlice(Array("state=blocked:app=claude-code:kind=question:title=\(title):junk:state=blocked".utf8)))

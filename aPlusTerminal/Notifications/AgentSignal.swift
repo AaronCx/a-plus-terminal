@@ -40,16 +40,21 @@ enum AgentSignal: Equatable {
         }
     }
 
-    /// Log-safe name: the kind of signal, never its text.
+    /// Log-safe name: the kind of signal, never its text. A 7501 `kind` is
+    /// the remote program's string, so only the spec's known kinds are
+    /// named; anything else logs as "other".
     var logName: String {
         switch self {
         case .bell: return "bell"
         case .osc9: return "osc9"
         case .osc777: return "osc777"
         case .programStatus(let record):
-            return "osc7501-\(record.state.rawValue)\(record.kind.map { "-\($0)" } ?? "")\(record.id == nil ? "" : "-sub")"
+            let kind = record.kind.map { Self.knownBlockedKinds.contains($0) ? "-\($0)" : "-other" } ?? ""
+            return "osc7501-\(record.state.rawValue)\(kind)\(record.id == nil ? "" : "-sub")"
         }
     }
+
+    static let knownBlockedKinds: Set<String> = ["permission", "question", "auth"]
 
     /// What an OSC 9 payload is. `9;4;…` is ConEmu's progress report, which
     /// SwiftTerm draws as a bar; other `9;<digits>;…` forms are ConEmu
