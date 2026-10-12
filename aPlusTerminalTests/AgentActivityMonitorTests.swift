@@ -251,6 +251,26 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.detected?.id, "claude-code", "explicit pick keeps its name")
     }
 
+    func testACustomAgentsCommandNameInATypedArgumentUnlatches() async {
+        // The editor recommends the command name as a marker, so `man
+        // mytool` — echoed in zsh's syntax colors — latches the custom
+        // agent. Back at the prompt, with no burst in between, it must let go.
+        let mytool = AgentProfile(id: "custom-mytool-abc123", displayName: "mytool",
+                                  detectionMarkers: ["mytool"], attachTemplate: "{path} ", builtIn: false)
+        let monitor = AgentActivityMonitor(candidates: [claudeCode, mytool, generic], quietInterval: 0.1)
+        var detectedChanges = 0
+        monitor.onDetectedChange = { detectedChanges += 1 }
+        monitor.observe(bytes("\u{1B}[32mman\u{1B}[39m my\u{1B}[4mtool\u{1B}[24m\r\nNo manual entry for mytool\r\n"))
+        XCTAssertEqual(monitor.detected?.id, "custom-mytool-abc123")
+        XCTAssertEqual(monitor.status, .none)
+
+        monitor.observe(bytes("aaron@mini ~ % "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(monitor.detected, "a command name typed as an argument kept the custom agent latched")
+        XCTAssertFalse(monitor.hasRunningAgentEvidence, "its bell gate stayed open at a bare prompt")
+        XCTAssertEqual(detectedChanges, 2, "latch and un-latch must both reach the row icon and Live Activity")
+    }
+
     func testAnEchoedCommandNameUnlatchesAtThePrompt() async {
         // A command-name marker matches the shell echoing a line that only
         // mentions it. The echo is too short to leave `.none`, and the
