@@ -28,8 +28,12 @@ import XCTest
 /// UNPREFIXED; the scheme forwards them (see PreviewPortPickerUITests for why):
 ///   make test DEST='platform=iOS Simulator,id=<udid>' \
 ///     APLUSTERMINAL_LIVE_QA=1 \
-///     APLUSTERMINAL_TEST_SERVER='{"name":"LiveQA","host":"127.0.0.1","port":22,"username":"<user>"}' \
-///     APLUSTERMINAL_TEST_PRIVATE_KEY="$(base64 < ~/.ssh/aplus_probe)"
+///     APLUSTERMINAL_TEST_SERVER='{"name":"LiveQA","host":"127.0.0.1","port":22,"username":"<user>"}'
+/// The SSH key is NOT passed on that command line: xcodebuild echoes every
+/// build setting into its log, so a key handed over that way lands in every
+/// test log and transcript. This runner reads `~/.ssh/aplus_probe` from the
+/// host itself (see `probeKeyBase64`) and hands it to the app through
+/// launchEnvironment, which xcodebuild does not echo.
 /// Erase the simulator first — `TestSeed` reuses a stale "uitest" key — and
 /// make sure the software keyboard is used (hardware keyboard disconnected),
 /// or backgrounding never resizes the pty and the test proves nothing.
@@ -46,7 +50,7 @@ final class AgentNotificationLiveUITests: XCTestCase {
 
         app = XCUIApplication()
         app.launchEnvironment["APLUSTERMINAL_TEST_SERVER"] = env["APLUSTERMINAL_TEST_SERVER"]
-        app.launchEnvironment["APLUSTERMINAL_TEST_PRIVATE_KEY"] = env["APLUSTERMINAL_TEST_PRIVATE_KEY"]
+        app.launchEnvironment["APLUSTERMINAL_TEST_PRIVATE_KEY"] = try probeKeyBase64(env: env)
         // The QA directory lives in the host's home, outside any repo; the
         // probe file starts absent so a reading always comes from this run.
         try FileManager.default.createDirectory(atPath: qaPath, withIntermediateDirectories: true)
@@ -324,6 +328,18 @@ final class AgentNotificationLiveUITests: XCTestCase {
     }
 
     private var qaPath: String { "\(hostHome)/\(Self.qaDir)" }
+
+    /// The probe key as TestSeed wants it (base64 of the OpenSSH file), read
+    /// by this runner straight from the host's `~/.ssh/aplus_probe` — the
+    /// simulator shares the host filesystem. A key given the old way, as a
+    /// build setting, still wins, but that way echoes it into the log.
+    private func probeKeyBase64(env: [String: String]) throws -> String {
+        if let legacy = env["APLUSTERMINAL_TEST_PRIVATE_KEY"], !legacy.isEmpty { return legacy }
+        let path = "\(hostHome)/.ssh/aplus_probe"
+        let data = try XCTUnwrap(FileManager.default.contents(atPath: path),
+                                 "no probe key at \(path) — live QA needs it to log in to this Mac")
+        return data.base64EncodedString()
+    }
     private var probePath: String { "\(qaPath)/probe.txt" }
 
     private func paneText() -> String? {
