@@ -154,6 +154,8 @@ final class ScrollOracleLiveTests: XCTestCase {
         let received: String
         let landedAfter: TimeInterval?
         let trace: ScrollTrace.Record?
+        /// The daemon session the tab rode when it swiped (nil over ssh).
+        let daemonSession: String?
 
         var outcome: Outcome {
             Outcome(inMode: after.inMode, scrollPosition: after.scrollPosition,
@@ -186,6 +188,7 @@ final class ScrollOracleLiveTests: XCTestCase {
                   bytes=\(ScrollTrace.hex(bytes))
                   tmux before=\(before) after=\(after)
                   received=\(received.debugDescription) landed=\(landedAfter.map { "\(Int($0 * 1000))ms" } ?? "never")
+                  daemonSession=\(daemonSession ?? "-")
                   trace=\(traceJSON)
                 """
         }
@@ -318,6 +321,8 @@ final class ScrollOracleLiveTests: XCTestCase {
             XCTAssertTrue(isCorrect(record.outcome, mouse: mouse, program: program),
                           "ORACLE BROKEN at \(variant) \(step): ssh did not scroll correctly "
                               + "(\(expectedText(mouse: mouse, program: program)))\n\(record.detail)")
+            XCTAssertTrue(record.before.clients == 1 && record.after.clients == 1,
+                          "ORACLE BROKEN at \(variant) \(step): tmux did not have exactly one client\n\(record.detail)")
         }
 
         // ---------------- meshyy phase: the subject ----------------
@@ -327,6 +332,7 @@ final class ScrollOracleLiveTests: XCTestCase {
         let prefix = MeshyyTransport.groupPrefix(serverID: server.id)
         addTeardownBlock { await self.killMeshyySessions(withPrefix: prefix, over: control) }
         try await connect(b, meshyy: true)
+        expectedDaemonSession = b.meshyy?.sessionName
         try await attachTmux(b, bench, control: control)
         await settle(b, bench)
 
@@ -703,9 +709,16 @@ final class ScrollOracleLiveTests: XCTestCase {
         return mouse ? "copy mode entered, scroll position > 0" : "exactly 9 Up arrows to the program"
     }
 
+    /// The daemon session the meshyy phase started on. Relaunches and
+    /// redials must land back in it: a swipe judged in another session (a
+    /// fresh shell with no tmux behind it) is not this scenario.
+    private var expectedDaemonSession: String?
+
     /// Asserts (1) the meshyy OUTCOME is a correct scroll and (2) it equals the
     /// ssh outcome. Known deferred divergences run inside a strict expected
-    /// failure — never loosened.
+    /// failure — never loosened — and only after the divergence's own
+    /// SIGNATURE has been asserted outside it: an expected failure that would
+    /// swallow any failure is a green that proves nothing.
     private func judge(_ step: String, _ oracle: Swipe?, _ subject: Swipe, _ bench: Bench,
                        program: PaneProgram = .plain) {
         let variant = bench.mouse ? "mouse-on" : "mouse-off"
@@ -720,29 +733,57 @@ final class ScrollOracleLiveTests: XCTestCase {
             ssh:    \(oracle.detail)
             meshyy: \(subject.detail)
             """
+        // Every step, known divergence or not: the swipe was judged against the
+        // one tmux client, in the session the scenario is about.
+        XCTAssertTrue(subject.before.clients == 1 && subject.after.clients == 1,
+                      "\(variant) \(step): tmux did not have exactly one client\n" + message)
+        XCTAssertEqual(subject.daemonSession, expectedDaemonSession,
+                       "\(variant) \(step): the tab is not in the scenario's daemon session\n" + message)
         let assertions = {
             XCTAssertTrue(correct, "OUTCOME: meshyy did not scroll\n" + message)
             XCTAssertEqual(subject.outcome, oracle.outcome, "meshyy != ssh\n" + message)
         }
-        if let known = Self.knownDivergence(step: step, mouse: bench.mouse) {
-            let options = XCTExpectedFailure.Options()
-            options.isStrict = true
-            XCTExpectFailure(known, options: options) { assertions() }
-        } else {
+        guard let known = Self.knownDivergence(step: step, mouse: bench.mouse) else {
             assertions()
+            return
         }
+        // The documented failure, and only it — any other way of going wrong
+        // fails here, outside the expected failure.
+        switch known {
+        case .screenModeIgnored:
+            XCTAssertEqual(subject.decision?.mode, .native,
+                           "\(variant) \(step): not the known divergence (route)\n" + message)
+            XCTAssertEqual(subject.decision?.altScreen, false,
+                           "\(variant) \(step): not the known divergence (belief)\n" + message)
+            XCTAssertTrue(subject.bytes.isEmpty,
+                          "\(variant) \(step): not the known divergence (bytes were sent)\n" + message)
+            // The pane itself never uses alt (alternate_on is the PANE's); it is
+            // tmux's own client screen ssh saw armed and meshyy did not.
+            XCTAssertEqual(oracle.decision?.altScreen, true,
+                           "\(variant) \(step): not the known divergence (ssh did not believe alt)\n" + message)
+        case .pathLost:
+            XCTAssertEqual(subject.decision?.mode, .sgrWheel,
+                           "\(variant) \(step): not the known divergence (route)\n" + message)
+            XCTAssertEqual(subject.trace?.sendOK, 1,
+                           "\(variant) \(step): not the known divergence (the send did not succeed once)\n" + message)
+            XCTAssertEqual(subject.trace?.sendFailed, 0,
+                           "\(variant) \(step): not the known divergence (the send errored)\n" + message)
+            XCTAssertNil(subject.landedAfter,
+                         "\(variant) \(step): not the known divergence (something landed)\n" + message)
+        }
+        let options = XCTExpectedFailure.Options()
+        options.isStrict = true
+        XCTExpectFailure(known.reason, options: options) { assertions() }
     }
 
-    /// The divergences deliberately deferred to the PR C audit. Each is red on
-    /// current code; a strict expected failure makes a fix show up as an
-    /// unexpected pass instead of passing silently.
-    private static func knownDivergence(step: String, mouse: Bool) -> String? {
-        // claude-fullscreen is absent on purpose: its pane arms mouse tracking,
-        // tmux arms the outer terminal for it, the modes frame carries that to a
-        // fresh emulator, and the route is the wheel — measured equal to ssh.
-        if !mouse, ["relaunch", "reconnect-mid-burst", "path-drop-after",
-                    "path-change", "path-change-after", "claude-inline"].contains(step) {
-            return """
+    private enum KnownDivergence {
+        case screenModeIgnored
+        case pathLost
+
+        var reason: String {
+            switch self {
+            case .screenModeIgnored:
+                """
                 KNOWN (deferred): MeshyyTransport ignores .screenMode, and establish() resets \
                 the emulator, so after the first relaunch/reconnect the meshyy emulator believes \
                 the primary screen while tmux (mouse off) holds the alternate one; ScrollBridge \
@@ -750,16 +791,38 @@ final class ScrollOracleLiveTests: XCTestCase {
                 persists for every later step — nothing re-sends ?1049h until tmux re-attaches. \
                 See docs/qa/scroll-divergence-audit.md
                 """
-        }
-        if mouse, step == "path-change" {
-            // Lost every time measured. On a path that HEALS (path-drop) the same
-            // swipe races the abandoned connection's retransmission — see there.
-            return """
+            case .pathLost:
+                """
                 KNOWN (deferred): a swipe written into a QUIC path that never returns is \
                 lost. The heartbeat declares the path dead, the app redials over a new path \
                 (no connection migration), and nothing carries input written into the \
                 abandoned connection to the new one. See docs/qa/scroll-divergence-audit.md
                 """
+            }
+        }
+    }
+
+    /// The divergences deliberately deferred to the PR C audit. Each is red on
+    /// current code; a strict expected failure makes a fix show up as an
+    /// unexpected pass instead of passing silently.
+    private static func knownDivergence(step: String, mouse: Bool) -> KnownDivergence? {
+        // claude-fullscreen is absent on purpose: its pane arms mouse tracking,
+        // tmux arms the outer terminal for it, the modes frame carries that to a
+        // fresh emulator, and the route is the wheel — measured equal to ssh.
+        //
+        // Mouse-off path-change is classed by the bug that decides it: with the
+        // .screenMode belief wrong nothing is sent, so the lost-path bug is never
+        // reached there (mouse-on path-change is its test). Its signature pins
+        // that: once .screenMode is honoured the swipe goes out, the signature
+        // fails, and the step must be re-classed against the path loss.
+        if !mouse, ["relaunch", "reconnect-mid-burst", "path-drop-after",
+                    "path-change", "path-change-after", "claude-inline"].contains(step) {
+            return .screenModeIgnored
+        }
+        if mouse, step == "path-change" {
+            // Lost every time measured. On a path that HEALS (path-drop) the same
+            // swipe races the abandoned connection's retransmission — see there.
+            return .pathLost
         }
         return nil
     }
@@ -817,7 +880,7 @@ final class ScrollOracleLiveTests: XCTestCase {
         } ?? trace
         return Swipe(step: step, side: side, decision: decision, bytes: bytes,
                      before: transcript.before, after: state, received: received,
-                     landedAfter: landed, trace: finalTrace)
+                     landedAfter: landed, trace: finalTrace, daemonSession: session.meshyy?.sessionName)
     }
 
     private struct Prepared {
