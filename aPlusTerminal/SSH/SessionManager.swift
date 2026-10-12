@@ -180,7 +180,7 @@ final class TerminalSession: Identifiable, Hashable {
     /// them makes a TUI repaint, and for a moment afterwards nothing the
     /// session says is about the user — leaving the app dismisses the
     /// keyboard, resizes the pty, and the agent redraws.
-    @ObservationIgnored private var lastDisruptionAt: Date?
+    @ObservationIgnored private(set) var lastDisruptionAt: Date?
     /// Signals inside this window after a disruption are dropped.
     static let disruptionQuietPeriod: TimeInterval = 2
     /// The program here answered the OSC 7501 probe's promise with a record:

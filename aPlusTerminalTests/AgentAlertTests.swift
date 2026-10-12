@@ -165,13 +165,45 @@ final class AgentTransitionTests: XCTestCase {
         XCTAssertEqual(fired(), [.bell, .bell])
     }
 
+    func testARealGridResizeOpensTheQuietWindow() throws {
+        // Through the real chain: the view's bounds change → SwiftTerm
+        // recomputes the grid → its delegate (SessionIO.sizeChanged) → the
+        // session's quiet window. Leaving the app on a device hides the
+        // keyboard, which is exactly this.
+        let (session, fired) = claudeSession()
+        let view = session.terminalView
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+        view.layoutIfNeeded()
+        let first = try XCTUnwrap(session.lastDisruptionAt, "a grid change did not reach the disruption gate")
+        XCTAssertEqual(session.noteAgentSignal(.bell, now: first.addingTimeInterval(1)), .disruption)
+        XCTAssertEqual(session.noteAgentSignal(.bell, now: first.addingTimeInterval(2.5)), .forwarded(.bell))
+
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 400)
+        view.layoutIfNeeded()
+        let second = try XCTUnwrap(session.lastDisruptionAt)
+        XCTAssertGreaterThan(second, first, "the keyboard-sized resize was not a disruption")
+        XCTAssertEqual(session.noteAgentSignal(.bell, now: second.addingTimeInterval(0.5)), .disruption)
+        XCTAssertEqual(fired(), [.bell])
+    }
+
     func testOnlyARealResizeIsADisruption() throws {
         // SwiftTerm reports a size change only when cols/rows change; the
-        // keepalive's same-size ping goes straight to resize() and must not
-        // open a quiet window every 25 s.
+        // keepalive's same-size ping goes straight to resize(), and a layout
+        // pass at the same size changes nothing — neither may open a quiet
+        // window (the keepalive would mute alerts every 25 s).
         let (session, _) = claudeSession()
-        session.resize(cols: 80, rows: 24)
-        XCTAssertEqual(session.noteAgentSignal(.bell), .forwarded(.bell))
+        let view = session.terminalView
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+        view.layoutIfNeeded()
+        let marked = session.lastDisruptionAt
+        XCTAssertNotNil(marked)
+        let grid = view.getTerminal()
+        session.resize(cols: grid.cols, rows: grid.rows)
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+        view.layoutIfNeeded()
+        XCTAssertEqual(session.lastDisruptionAt, marked, "a same-size resize counted as a disruption")
     }
 
     func testASeenSignalStaysQuietUntilTheUserAnswers() throws {
@@ -334,6 +366,20 @@ final class AgentTransitionTests: XCTestCase {
         XCTAssertEqual(fired(), [], "progress and ConEmu commands are not notifications")
         feed(session, "\u{1B}]9;Claude Code: Claude is waiting for your input\u{07}")
         XCTAssertEqual(fired(), [.message(title: nil, body: "Claude Code: Claude is waiting for your input")])
+    }
+
+    func testOSC9ProgressStillDrivesTheBar() throws {
+        // Registering an OSC 9 handler replaces SwiftTerm's built-in, so the
+        // progress bar only lives if the handler hands 9;4 back to the view.
+        let (session, _) = claudeSession()
+        let view = session.terminalView
+        let bar = try XCTUnwrap(view.subviews.first { String(describing: type(of: $0)) == "TerminalProgressBarView" },
+                                "SwiftTerm's progress bar view is gone — check the pinned version")
+        XCTAssertTrue(bar.isHidden)
+        feed(session, "\u{1B}]9;4;1;40\u{07}")
+        XCTAssertFalse(bar.isHidden, "9;4 progress no longer reaches the bar")
+        feed(session, "\u{1B}]9;4;0\u{07}")
+        XCTAssertTrue(bar.isHidden, "9;4;0 did not remove the bar")
     }
 
     func testOSC9ProgressIsStillParsedForTheBar() {
@@ -533,6 +579,24 @@ final class NotificationSetupCardTests: XCTestCase {
         later.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
         later.noteAgentStatus(.none)
         XCTAssertFalse(later.showNotificationSetupCard, "shown once, ever — Settings keeps it reachable")
+    }
+
+    func testASceneChangeQuietsEverySession() throws {
+        let settings = AppSettings(defaults: UserDefaults(suiteName: "Scene-\(UUID().uuidString)")!)
+        let manager = self.manager(settings)
+        defer { manager.closeAll() }
+        let sessions = [claudeSession(in: manager, "a"), claudeSession(in: manager, "b")]
+        for session in sessions {
+            session.postAgentAlert = { _ in }
+        }
+        let before = Date()
+        manager.scenePhaseChanged(to: "inactive")
+        for session in sessions {
+            let marked = try XCTUnwrap(session.lastDisruptionAt, "scenePhaseChanged skipped a session")
+            XCTAssertGreaterThanOrEqual(marked, before)
+            XCTAssertEqual(session.noteAgentSignal(.bell, now: marked.addingTimeInterval(1)), .disruption)
+            XCTAssertEqual(session.noteAgentSignal(.bell, now: marked.addingTimeInterval(2.5)), .forwarded(.bell))
+        }
     }
 
     func testAPopOutMutesOnlyTheSessionItShows() throws {
