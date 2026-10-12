@@ -69,6 +69,13 @@ extension AgentProfile {
     /// never collide with a bundled asset name (`agent-<id>`).
     static let customIDPrefix = "custom-"
 
+    /// Log-safe name for an agent id. A custom agent's id carries a slug of
+    /// the name the user typed, and the unified log is persistent, so every
+    /// custom agent logs as "custom"; built-in ids are the app's own words.
+    static func logName(forID id: String) -> String {
+        id.hasPrefix(customIDPrefix) ? "custom" : id
+    }
+
     /// What the attach action types when a profile doesn't say otherwise.
     static let defaultAttachTemplate = "{path} "
     /// Longest attach text a custom agent may carry.

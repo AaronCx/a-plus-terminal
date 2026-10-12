@@ -295,7 +295,7 @@ final class AgentActivityMonitor {
     }
 
     private func transition(to newStatus: Status) {
-        agentAlertLog.notice("monitor \(self.status.rawValue, privacy: .public)->\(newStatus.rawValue, privacy: .public) burst=\(self.burstBytes, privacy: .public) agent=\(self.detected?.id ?? "nil", privacy: .public)")
+        agentAlertLog.notice("monitor \(self.status.rawValue, privacy: .public)->\(newStatus.rawValue, privacy: .public) burst=\(self.burstBytes, privacy: .public) agent=\(self.detected.map { AgentProfile.logName(forID: $0.id) } ?? "nil", privacy: .public)")
         status = newStatus
         onChange?()
     }

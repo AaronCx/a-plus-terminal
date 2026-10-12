@@ -206,6 +206,28 @@ final class AgentTransitionTests: XCTestCase {
         XCTAssertEqual(fired(), [.bell])
     }
 
+    func testABellFromACustomAgentPostsLikeABuiltIn() throws {
+        // A user-made agent is a NAMED agent: once its marker latches — here
+        // through zsh's colorized echo of the typed command — its bell rings
+        // the phone exactly as a built-in's does, through the emulator's own
+        // bell like both pumps deliver it.
+        let fakeAgent = AgentProfile(
+            id: "custom-fake-agent-abc123", displayName: "Fake Agent",
+            detectionMarkers: ["fakeagent"], attachTemplate: "{path} ", builtIn: false)
+        let session = bareSession(agents: [claudeCode, generic, fakeAgent])
+        var fired: [AgentAlertPolicy.Trigger] = []
+        session.postAgentAlert = { fired.append($0) }
+        feed(session, "\u{07}")
+        XCTAssertEqual(fired, [], "no agent yet: a plain shell's bell")
+
+        session.agentMonitor.observe(Array("\u{1B}[32mfake\u{1B}[39m\u{1B}[32magent\u{1B}[39m --serve\r\n".utf8))
+        XCTAssertEqual(session.namedAgentID, "custom-fake-agent-abc123")
+        XCTAssertEqual(session.effectiveAgentName, "Fake Agent")
+        feed(session, "\u{07}")
+        XCTAssertEqual(fired, [.bell])
+        XCTAssertEqual(session.agentLogName, "custom", "a custom id carries the name the user typed")
+    }
+
     func testSignalsRightAfterAResizeOrSceneChangeAreDropped() throws {
         let (session, fired) = claudeSession()
         let t0 = Date()

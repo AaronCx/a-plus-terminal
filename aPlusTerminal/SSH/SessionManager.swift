@@ -138,10 +138,11 @@ final class TerminalSession: Identifiable, Hashable {
 
     /// Log-safe agent name: a profile id this app knows. Under meshyy the
     /// id comes from the remote daemon, so one that matches no local
-    /// profile logs as "other" — never the remote's string.
+    /// profile logs as "other" — never the remote's string. A custom agent
+    /// logs as "custom" (its id carries the name the user typed).
     var agentLogName: String {
         guard let id = namedAgentID else { return speaksProgramStatus ? "osc7501" : "nil" }
-        return profiles.agent(id: id) != nil ? id : "other"
+        return profiles.agent(id: id) != nil ? AgentProfile.logName(forID: id) : "other"
     }
 
     /// Bumped whenever the monitor's status or latched agent changes. The

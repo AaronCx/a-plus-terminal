@@ -41,8 +41,9 @@ unreleased work accumulates at the top.
   create your own agent for any command-line tool, with its own icon from
   Photos or Files: a+Terminal recognizes it from the command name or what
   it prints when it starts, and shows it on the session, the Live Activity
-  and the Dynamic Island like a built-in. Agents export and import as JSON;
-  your icons stay on your device. (#143, #144, #145, #146, #148)
+  and the Dynamic Island like a built-in; its bell or notification sequence
+  reaches your phone like a built-in's too. Agents export and import as
+  JSON; your icons stay on your device. (#143, #144, #145, #146, #148)
 - **Fixes:** returning from a preview refocuses the terminal program, and
   the Sessions widget orders sessions correctly (#136); scrolling is
   consistent and alerts are honest about state (#145); the session picker
