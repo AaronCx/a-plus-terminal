@@ -404,6 +404,19 @@ final class ScrollOracleLiveTests: XCTestCase {
         session.terminalView.layoutIfNeeded()
         // Up long enough for tmux to apply the size and pulse the modes.
         try await Task.sleep(for: .milliseconds(800))
+        // And tmux must actually have applied it: a resize that never reached
+        // tmux (dropped, debounced, a layout no-op) would make the dismiss wait
+        // below pass on its first poll, and the step would silently repeat
+        // `attach` without ever opening the resize-pulse window it exists for.
+        let shrunkBy = Date().addingTimeInterval(5)
+        var shrunk = fullHeight
+        repeat {
+            shrunk = try await windowHeight(bench, control: control)
+            if shrunk < fullHeight { break }
+            try await Task.sleep(for: .milliseconds(100))
+        } while Date() < shrunkBy
+        try require(shrunk < fullHeight,
+                    "\(step): tmux never applied the keyboard show (window_height stayed \(shrunk))")
         session.terminalView.frame = full
         session.terminalView.layoutIfNeeded()
         // The swipe goes the instant tmux has APPLIED the dismiss — exactly when
@@ -415,7 +428,7 @@ final class ScrollOracleLiveTests: XCTestCase {
         // measures tmux, not the transport.
         let by = Date().addingTimeInterval(5)
         while try await windowHeight(bench, control: control) != fullHeight {
-            try require(Date() < by, "tmux never applied the keyboard dismiss")
+            try require(Date() < by, "\(step): tmux never applied the keyboard dismiss")
         }
         return try await fireSwipe(session, step, bench, transcript: transcript, control: control)
     }
