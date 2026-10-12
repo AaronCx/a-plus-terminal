@@ -75,6 +75,9 @@ struct APlusTerminalApp: App {
         // While a pop-out is live, the background wind-down must not kill
         // the sessions it is monitoring…
         sessions.pipKeepsProcessAlive = { [weak pip] in pip?.isActive ?? false }
+        // …and a pop-out of a session's terminal is the user watching it:
+        // that session's agent alerts stay quiet (only that session's).
+        sessions.pipShowsTerminal = { [weak pip] in pip?.isShowingTerminal(of: $0) ?? false }
         // Agent alerts: a notification tap routes its deep link through the
         // same router every other entry point uses.
         UNUserNotificationCenter.current().delegate = AgentAlertCenter.shared

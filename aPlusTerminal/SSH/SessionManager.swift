@@ -2120,7 +2120,7 @@ final class SessionManager {
             #else
             let daemonSessionName: String? = nil
             #endif
-            AgentAlertCenter.shared.agentNeedsYou(
+            self.alertCenter.agentNeedsYou(
                 sessionID: session.id,
                 serverID: session.server.id,
                 serverName: session.server.name,
@@ -2128,7 +2128,7 @@ final class SessionManager {
                 agentName: session.agentMonitor.detected?.displayName,
                 trigger: trigger,
                 appIsActive: session.appIsActive(),
-                pipIsShowing: self.pipKeepsProcessAlive()
+                pipShowsThisSession: self.pipShowsTerminal(session.id)
             )
         }
         session.onStateChange = { [weak self, weak session] in
@@ -2167,7 +2167,7 @@ final class SessionManager {
     func close(_ session: TerminalSession) {
         sessions.removeAll { $0.id == session.id }
         Task { await session.close() }
-        AgentAlertCenter.shared.sessionClosed(session.id)
+        alertCenter.sessionClosed(session.id)
         refreshActivity()
         pipSessionClosed?(session)
     }
@@ -2252,6 +2252,15 @@ final class SessionManager {
     /// suspend sessions — live monitoring is the feature. Wired to
     /// PiPCoordinator at app init; tests override.
     @ObservationIgnored var pipKeepsProcessAlive: () -> Bool = { false }
+    /// Seam: true while an active pop-out is showing THIS session's terminal
+    /// — the user is watching that agent, so its alerts are noise. A pop-out
+    /// of another session, a preview or a VNC monitor mutes nothing: it only
+    /// keeps the app running, which is what lets those alerts arrive at all.
+    /// Wired to PiPCoordinator at app init.
+    @ObservationIgnored var pipShowsTerminal: (UUID) -> Bool = { _ in false }
+    /// Where agent alerts are decided and posted. Tests inject one that
+    /// records requests instead of handing them to iOS.
+    @ObservationIgnored var alertCenter: AgentAlertCenter = .shared
 
     func appDidEnterBackground() {
         guard sessions.contains(where: { $0.state == .connected }) else { return }

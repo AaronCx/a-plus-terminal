@@ -34,6 +34,14 @@ final class PiPCoordinator {
         self.settings = settings
     }
 
+    /// True while a live pop-out is showing `sessionID`'s TERMINAL. A
+    /// preview pop-out carries the same session id but shows a web page, and
+    /// a VNC pop-out shows a screen — neither is watching the agent.
+    func isShowingTerminal(of sessionID: UUID) -> Bool {
+        guard isActive, let source = engine?.source as? TerminalPiPFrameSource else { return false }
+        return source.restoreSessionID == sessionID
+    }
+
     /// Feature gate for the toolbar button and screen arming: supported
     /// hardware AND the beta master toggle.
     var isAvailable: Bool { Self.isSupported && settings.popOutSessions }

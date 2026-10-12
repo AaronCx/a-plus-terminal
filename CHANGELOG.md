@@ -24,8 +24,12 @@ unreleased work accumulates at the top.
   (also in Settings → Notifications) shows with a Copy button; Settings
   also sends a test notification. A ring you have already seen stays
   quiet until you answer. Notifications arrive only while a+Terminal is
-  still running: briefly after you leave it, or while a pop-out is
-  showing. Agent status is surfaced where you are already looking.
+  still running: briefly after you leave it, or while a pop-out keeps it
+  running. A pop-out of a session's terminal mutes that session, since
+  you are already watching it. Claude Code's "finished" ring comes about
+  a minute after a turn, so it usually arrives only while a pop-out keeps
+  the app running. Agent status is surfaced where you are already
+  looking.
   (#132, #138, #139, #140, #143, #149)
 - **Sessions widget:** a home-screen widget that lists live sessions and
   opens exactly the session it shows. (#135, #136)

@@ -29,7 +29,7 @@ struct NotificationSetupCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 SettingLineRow(copied: $copied)
-                Text("Claude Code then rings when it needs your permission (after a few seconds) and about a minute after it finishes.")
+                Text("Claude Code then rings a few seconds into a permission prompt, and a+Terminal turns the ring into a notification. It rings again about a minute after it finishes, but iOS has usually suspended a+Terminal by then: that one usually arrives only while a pop-out keeps the app running.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -87,7 +87,7 @@ struct NotificationSetupDetailView: View {
                 Text("To get notified, run this on your server: add this line to \(AgentNotificationSetup.settingsPath) (inside the outer { }):")
                 SettingLineRow(copied: $copied)
             } footer: {
-                Text("Claude Code then rings the terminal bell when it needs your permission (after a few seconds) and about a minute after it finishes. a+Terminal turns that bell into a notification. The bell needs no tmux configuration.")
+                Text("Claude Code then rings the terminal bell a few seconds into a permission prompt, and a+Terminal turns the bell into a notification. It rings again about a minute after it finishes, but iOS has usually suspended a+Terminal by then: that one usually arrives only while a pop-out keeps the app running. The bell needs no tmux configuration.")
             }
             Section {
                 Text("If you pick the \"iterm2\" or \"ghostty\" channel instead, Claude Code sends a notification sequence with its message rather than a bell. Inside tmux those sequences are dropped unless you add set -g allow-passthrough on to ~/.tmux.conf.")
@@ -156,7 +156,7 @@ struct NotificationSettingsSection: View {
         } header: {
             Text("Notifications")
         } footer: {
-            Text("Notifications come only from the agent's own signal — the terminal bell or a notification sequence it sends — never from guessing at its output. They arrive only while a+Terminal is still running: for a short time after you leave it, or while a pop-out is showing. They do not arrive once iOS suspends the app.")
+            Text("Notifications come only from the agent's own signal — the terminal bell or a notification sequence it sends — never from guessing at its output. They arrive only while a+Terminal is still running: for a short time after you leave it, or while a pop-out keeps it running. They do not arrive once iOS suspends the app. A pop-out of a session's terminal mutes that session: you are already watching it.")
         }
     }
 }

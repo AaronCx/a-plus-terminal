@@ -9,17 +9,17 @@ final class AgentAlertPolicyTests: XCTestCase {
         var policy = AgentAlertPolicy()
         let start = Date()
         XCTAssertTrue(policy.shouldPost(session: session, trigger: .bell,
-                                        appIsActive: false, pipIsShowing: false, now: start))
+                                        appIsActive: false, pipShowsThisSession: false, now: start))
         // A flapping agent inside the 30s floor is silence, not a storm.
         for seconds in [1.0, 5, 15, 29] {
             XCTAssertFalse(policy.shouldPost(
                 session: session, trigger: .bell,
-                appIsActive: false, pipIsShowing: false,
+                appIsActive: false, pipShowsThisSession: false,
                 now: start.addingTimeInterval(seconds)
             ), "posted again after \(seconds)s — the storm the daemon's policy exists to stop")
         }
         XCTAssertTrue(policy.shouldPost(session: session, trigger: .bell,
-                                        appIsActive: false, pipIsShowing: false,
+                                        appIsActive: false, pipShowsThisSession: false,
                                         now: start.addingTimeInterval(31)))
     }
 
@@ -27,23 +27,23 @@ final class AgentAlertPolicyTests: XCTestCase {
         var policy = AgentAlertPolicy()
         let now = Date()
         XCTAssertTrue(policy.shouldPost(session: session, trigger: .bell,
-                                        appIsActive: false, pipIsShowing: false, now: now))
+                                        appIsActive: false, pipShowsThisSession: false, now: now))
         XCTAssertTrue(policy.shouldPost(session: UUID(), trigger: .bell,
-                                        appIsActive: false, pipIsShowing: false, now: now),
+                                        appIsActive: false, pipShowsThisSession: false, now: now),
                       "another session's agent is not this session's storm")
     }
 
     func testWatchingUsersAreNotTold() {
         var policy = AgentAlertPolicy()
         XCTAssertFalse(policy.shouldPost(session: session, trigger: .bell,
-                                         appIsActive: true, pipIsShowing: false),
+                                         appIsActive: true, pipShowsThisSession: false),
                        "a user looking at the app can see the prompt")
         XCTAssertFalse(policy.shouldPost(session: session, trigger: .bell,
-                                         appIsActive: false, pipIsShowing: true),
-                       "the pop-out exists so they can watch — telling them is noise")
+                                         appIsActive: false, pipShowsThisSession: true),
+                       "a pop-out of this session's terminal is them watching — telling them is noise")
         // Suppression must not burn the rate-limit slot.
         XCTAssertTrue(policy.shouldPost(session: session, trigger: .bell,
-                                        appIsActive: false, pipIsShowing: false),
+                                        appIsActive: false, pipShowsThisSession: false),
                       "a suppressed alert consumed the rate-limit window")
     }
 }
@@ -233,7 +233,7 @@ final class AgentTransitionTests: XCTestCase {
         var now = t0
         session.postAgentAlert = { trigger in
             if policy.shouldPost(session: session.id, trigger: trigger,
-                                 appIsActive: false, pipIsShowing: false, now: now) {
+                                 appIsActive: false, pipShowsThisSession: false, now: now) {
                 posted += 1
             }
         }
@@ -371,6 +371,35 @@ final class NotificationSetupCardTests: XCTestCase {
         )
     }
 
+    /// A real SessionManager over in-memory stores. Sessions it opens have
+    /// no credentials, so connect() fails before any network.
+    private func manager(_ settings: AppSettings) -> SessionManager {
+        let temporary = FileManager.default.temporaryDirectory
+        let suffix = UUID().uuidString
+        return SessionManager(
+            keyStore: KeyStore(secrets: InMemorySecretStore(),
+                               metadataURL: temporary.appendingPathComponent("mk-\(suffix).json")),
+            serverStore: ServerStore(fileURL: temporary.appendingPathComponent("ms-\(suffix).json")),
+            passwords: PasswordStore(secrets: InMemorySecretStore()),
+            settings: settings,
+            profiles: ProfileStore(
+                agents: [claudeCode, hermes],
+                multiplexers: [MultiplexerProfile(id: "none", displayName: "None (raw shell)")]
+            )
+        )
+    }
+
+    /// Opens a session in `manager` with Claude Code detected, the app
+    /// backgrounded and no permission dialog.
+    private func claudeSession(in manager: SessionManager, _ name: String) -> TerminalSession {
+        let session = manager.open(server: Server(name: name, host: "127.0.0.1", username: "t"))
+        session.requestAlertAuthorization = {}
+        session.appIsActive = { false }
+        session.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
+        session.noteAgentStatus(.none)
+        return session
+    }
+
     func testShownOnceForTheFirstClaudeCodeOnly() throws {
         let settings = AppSettings(defaults: UserDefaults(suiteName: "SetupCard-\(UUID().uuidString)")!)
 
@@ -391,6 +420,36 @@ final class NotificationSetupCardTests: XCTestCase {
         second.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
         second.noteAgentStatus(.none)
         XCTAssertFalse(second.showNotificationSetupCard, "shown once, ever — Settings keeps it reachable")
+    }
+
+    func testAPopOutMutesOnlyTheSessionItShows() throws {
+        // Through the real wiring: session → SessionManager → AgentAlertCenter
+        // → its policy, with only the final hand-off to iOS recorded.
+        let settings = AppSettings(defaults: UserDefaults(suiteName: "PiPMute-\(UUID().uuidString)")!)
+        let manager = self.manager(settings)
+        defer { manager.closeAll() }
+        var posted: [String] = []
+        manager.alertCenter = AgentAlertCenter(addRequest: { posted.append($0.identifier) })
+        let watched = claudeSession(in: manager, "a")
+        let other = claudeSession(in: manager, "b")
+        manager.pipShowsTerminal = { $0 == watched.id }
+
+        XCTAssertEqual(watched.noteAgentSignal(.bell), .forwarded(.bell))
+        XCTAssertEqual(other.noteAgentSignal(.bell), .forwarded(.bell))
+        XCTAssertEqual(posted, ["agent-\(other.id.uuidString)-bell"],
+                       "a pop-out of session A must mute A only — B's agent still notifies")
+
+        // A pop-out of something else (a preview, a VNC monitor) mutes nothing.
+        manager.pipShowsTerminal = { _ in false }
+        XCTAssertEqual(watched.noteAgentSignal(.programStatus(.init(state: .blocked, kind: "permission"))),
+                       .forwarded(.blocked(kind: "permission")))
+        XCTAssertEqual(posted.last, "agent-\(watched.id.uuidString)-blocked")
+    }
+
+    func testNoPopOutShowsATerminalWhileNoneIsActive() {
+        let pip = PiPCoordinator(settings: AppSettings(defaults: UserDefaults(suiteName: "PiP-\(UUID().uuidString)")!))
+        XCTAssertFalse(pip.isActive)
+        XCTAssertFalse(pip.isShowingTerminal(of: UUID()))
     }
 
     func testTheCopiedTextIsTheSetting() {

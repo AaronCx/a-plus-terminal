@@ -48,17 +48,19 @@ struct AgentAlertPolicy {
     /// Decides, and records the post when it says yes.
     ///
     /// `appIsActive`: a user looking at the app does not need a banner about
-    /// what they can see. `pipIsShowing`: same reasoning — the pop-out exists
-    /// so they can watch; being told what they are watching is noise.
+    /// what they can see. `pipShowsThisSession`: same reasoning — a pop-out
+    /// showing this session's terminal is the user watching it; being told
+    /// what they are watching is noise. A pop-out of anything else (another
+    /// session, a preview, a VNC monitor) mutes nothing.
     mutating func decide(
         session: UUID,
         trigger: Trigger,
         appIsActive: Bool,
-        pipIsShowing: Bool,
+        pipShowsThisSession: Bool,
         now: Date = Date()
     ) -> Decision {
         if appIsActive { return .appActive }
-        if pipIsShowing { return .pipShowing }
+        if pipShowsThisSession { return .pipShowing }
         if let last = lastPosted[session], now.timeIntervalSince(last) < minimumInterval {
             return .floor
         }
@@ -70,11 +72,11 @@ struct AgentAlertPolicy {
         session: UUID,
         trigger: Trigger,
         appIsActive: Bool,
-        pipIsShowing: Bool,
+        pipShowsThisSession: Bool,
         now: Date = Date()
     ) -> Bool {
         decide(session: session, trigger: trigger, appIsActive: appIsActive,
-               pipIsShowing: pipIsShowing, now: now) == .post
+               pipShowsThisSession: pipShowsThisSession, now: now) == .post
     }
 
     mutating func forget(session: UUID) {
@@ -92,8 +94,14 @@ final class AgentAlertCenter: NSObject {
     private var authorizationRequested = false
     /// Injected in tests; the real router in the app.
     var openURL: ((URL) -> Void)?
+    /// Hands a decided-yes request to iOS. A seam so a test can see what
+    /// posts through the real policy without UNUserNotificationCenter.
+    private let addRequest: (UNNotificationRequest) -> Void
 
-    override init() {
+    init(addRequest: @escaping (UNNotificationRequest) -> Void = {
+        UNUserNotificationCenter.current().add($0)
+    }) {
+        self.addRequest = addRequest
         super.init()
         #if DEBUG
         if let floor = AgentAlertProbe.floorOverride {
@@ -126,13 +134,13 @@ final class AgentAlertCenter: NSObject {
         agentName: String?,
         trigger: AgentAlertPolicy.Trigger,
         appIsActive: Bool,
-        pipIsShowing: Bool
+        pipShowsThisSession: Bool
     ) {
         let decision = policy.decide(
             session: sessionID, trigger: trigger,
-            appIsActive: appIsActive, pipIsShowing: pipIsShowing
+            appIsActive: appIsActive, pipShowsThisSession: pipShowsThisSession
         )
-        agentAlertLog.notice("policy session=\(sessionID.logTag, privacy: .public) trigger=\(String(describing: trigger), privacy: .public) decision=\(String(describing: decision), privacy: .public) appActive=\(appIsActive, privacy: .public) pip=\(pipIsShowing, privacy: .public)")
+        agentAlertLog.notice("policy session=\(sessionID.logTag, privacy: .public) trigger=\(trigger.slug, privacy: .public) decision=\(String(describing: decision), privacy: .public) appActive=\(appIsActive, privacy: .public) pipThisSession=\(pipShowsThisSession, privacy: .public)")
         #if DEBUG
         AgentAlertProbe.shared.noteWouldPost()
         #endif
@@ -151,7 +159,7 @@ final class AgentAlertCenter: NSObject {
         #else
         content.userInfo = ["url": "aplusterminal://session/\(sessionID.uuidString)"]
         #endif
-        UNUserNotificationCenter.current().add(UNNotificationRequest(
+        addRequest(UNNotificationRequest(
             identifier: "agent-\(sessionID.uuidString)-\(trigger.slug)",
             content: content,
             trigger: nil
