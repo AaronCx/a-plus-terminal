@@ -55,14 +55,20 @@ final class AgentNotificationLiveUITests: XCTestCase {
         app.launchEnvironment["APLUSTERMINAL_TEST_ALERT_PROBE_FILE"] = probePath
         let floor = env["APLUSTERMINAL_TEST_ALERT_FLOOR"].flatMap { $0.isEmpty ? nil : $0 } ?? "0"
         app.launchEnvironment["APLUSTERMINAL_TEST_ALERT_FLOOR"] = floor
-        // Launch TWICE. On Xcode 26 the first launch of a run arrives with
-        // none of launchEnvironment (xcodebuild logs "IDELaunchParametersSnapshot:
-        // no debugger version" right then); the second launch gets all of it.
-        // Measured: a probe-only test saw no APLUSTERMINAL_* variables in the
-        // first process and both in the second. Without this the probe never
-        // runs and the seed only "works" because the server persisted.
+        // Leaving hides the keyboard, as on a device (see the idle test).
+        app.launchEnvironment["APLUSTERMINAL_TEST_HIDE_KEYBOARD_ON_LEAVE"] = "1"
+        // Launch TWICE. On Xcode 26 a launch INTERMITTENTLY arrives with
+        // none of launchEnvironment — seen on the first launch of a run,
+        // alongside xcodebuild's "IDELaunchParametersSnapshot: no debugger
+        // version", but not on every run. In one measured run a probe-only
+        // test saw no APLUSTERMINAL_* variables in the first process and all
+        // of them in the second. The probe file is removed again between
+        // the launches, so the check below proves the process under test
+        // got the environment — a file left by the first launch cannot
+        // stand in for it.
         app.launch()
         app.terminate()
+        try? FileManager.default.removeItem(atPath: probePath)
         app.launch()
         XCTAssertNoThrow(try probe(), "the app did not start its alert probe — launchEnvironment did not arrive")
     }
@@ -84,23 +90,43 @@ final class AgentNotificationLiveUITests: XCTestCase {
     /// notifications. Nothing is ever asked of the agent here: a fresh
     /// Claude Code with no answered turn never rings its idle bell, so any
     /// post is the app inventing a need.
+    ///
+    /// Every trip must resize the pty — the repaint is the whole bug. On a
+    /// device leaving the app hides the keyboard; in the simulator it does
+    /// not reliably (measured: only the first of 20 trips resized, and
+    /// XCUIDevice rotation resized nothing at all). So the app is launched
+    /// with `APLUSTERMINAL_TEST_HIDE_KEYBOARD_ON_LEAVE`: the session screen
+    /// really dismisses the keyboard as the app goes inactive — the pty
+    /// grows and the TUI repaints into the background, as on a device — and
+    /// refocuses on return. (Tapping the accessory bar's toggle instead
+    /// costs XCUITest's 60 s wait-for-idle per tap, which Claude Code never
+    /// grants, and puts the resize a minute before leaving.) The probe is
+    /// read while the app is away: a trip whose pty did not resize on the
+    /// way out fails — it tested nothing.
     func testBackgroundingAnIdleAgentNeverNotifies() throws {
         try startIdleClaudeCode()
         let start = try probe()
         var timeline: [String] = []
         for trip in 1...20 {
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                          "trip \(trip): the keyboard was not up to hide")
+            let before = try probe()
             XCUIDevice.shared.press(.home)
-            // Longer than tmux's 15 s status refresh (the small chunk that
-            // used to carry the bogus waiting edge to the funnel), shorter
-            // than the background grace window.
-            sleep(18)
+            sleep(2)
+            let away = try probe()
+            XCTAssertGreaterThan(away.resizes, before.resizes,
+                                 "trip \(trip): the pty never resized on the way out — this trip tested nothing (\(away.summary))")
+            // 18 s away in all: longer than tmux's 15 s status refresh (the
+            // small chunk that used to carry the bogus waiting edge to the
+            // funnel), shorter than the background grace window.
+            sleep(16)
             app.activate()
             XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 15),
                           "trip \(trip): never came back to the live session")
             XCTAssertFalse(app.staticTexts["Session Paused"].exists,
                            "trip \(trip): the session was suspended — the stay was too long to test anything")
             let now = try probe()
-            timeline.append("trip \(trip): \(now.summary)")
+            timeline.append("trip \(trip): \(now.summary) (+\(away.resizes - before.resizes) resizing on the way out)")
         }
         let end = try probe()
         attach(text: timeline.joined(separator: "\n"), name: "probe-timeline")
@@ -202,6 +228,7 @@ final class AgentNotificationLiveUITests: XCTestCase {
         let posts: Int
         let wouldPost: Int
         let agent: String
+        let resizes: Int
         let summary: String
     }
 
@@ -219,11 +246,13 @@ final class AgentNotificationLiveUITests: XCTestCase {
             if kv.count == 2 { fields[kv[0]] = kv[1] }
         }
         guard let posts = fields["posts"].flatMap(Int.init),
-              let wouldPost = fields["wouldPost"].flatMap(Int.init) else {
+              let wouldPost = fields["wouldPost"].flatMap(Int.init),
+              let resizes = fields["resizes"].flatMap(Int.init) else {
             XCTFail("unreadable probe: \(summary)")
-            return ProbeReading(posts: 0, wouldPost: 0, agent: "none", summary: summary)
+            return ProbeReading(posts: 0, wouldPost: 0, agent: "none", resizes: 0, summary: summary)
         }
-        return ProbeReading(posts: posts, wouldPost: wouldPost, agent: fields["agent"] ?? "none", summary: summary)
+        return ProbeReading(posts: posts, wouldPost: wouldPost, agent: fields["agent"] ?? "none",
+                            resizes: resizes, summary: summary)
     }
 
     private func waitForProbe(timeout: TimeInterval, _ condition: (ProbeReading) -> Bool) -> Bool {

@@ -1932,6 +1932,9 @@ private final class SessionIO: TerminalViewDelegate {
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         agentAlertLog.notice("resize \(newCols, privacy: .public)x\(newRows, privacy: .public)")
         MainActor.assumeIsolated {
+            #if DEBUG
+            AgentAlertProbe.shared.noteResize()
+            #endif
             session?.noteDisruption("resize")
             session?.resize(cols: newCols, rows: newRows)
         }

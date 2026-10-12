@@ -42,6 +42,16 @@ final class AgentAlertProbe {
     /// The most recently detected agent profile id, so a test can wait for
     /// detection without reading terminal text.
     private(set) var agent = "none"
+    /// Real pty size changes, so a test can prove each trip actually made the
+    /// agent repaint — a trip that resized nothing tested nothing.
+    private(set) var resizes = 0
+
+    /// `APLUSTERMINAL_TEST_HIDE_KEYBOARD_ON_LEAVE=1`: the session screen
+    /// hides the keyboard as the app goes inactive and raises it on return,
+    /// as leaving does on a device (see TerminalScreen).
+    var hidesKeyboardOnLeave: Bool {
+        isEnabled && ProcessInfo.processInfo.environment["APLUSTERMINAL_TEST_HIDE_KEYBOARD_ON_LEAVE"] == "1"
+    }
 
     /// `APLUSTERMINAL_TEST_ALERT_FLOOR` (seconds) overrides the per-session
     /// floor so repeated posts in a test are not masked by it.
@@ -49,7 +59,7 @@ final class AgentAlertProbe {
         ProcessInfo.processInfo.environment["APLUSTERMINAL_TEST_ALERT_FLOOR"].flatMap(TimeInterval.init)
     }
 
-    var summary: String { "posts=\(posts) wouldPost=\(wouldPost) agent=\(agent)" }
+    var summary: String { "posts=\(posts) wouldPost=\(wouldPost) agent=\(agent) resizes=\(resizes)" }
 
     /// Writes the starting summary, so the runner can tell "zero" from
     /// "probe never ran".
@@ -65,6 +75,10 @@ final class AgentAlertProbe {
     }
     func noteWouldPost() {
         wouldPost += 1
+        write()
+    }
+    func noteResize() {
+        resizes += 1
         write()
     }
     func noteAgent(_ id: String?) {
