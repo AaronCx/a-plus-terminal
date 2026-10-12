@@ -22,9 +22,9 @@ CI → merge → signed archive → metadata gate → upload → poll to VALID.
 
 App Store candidates are cut with `scripts/ship-testflight.sh <build> --app-store`.
 It archives the `aPlusTerminalAppStore` scheme, which is built without the
-`MESHYY` condition and without the Meshyy package, so meshyy is not in the
-binary at all (App Review tests the exact uploaded binary; a runtime "off" is
-not enough). On top of the usual gates it refuses a dirty tree or a local
+`MESHYY` condition and without the Meshyy package, so meshyy, and the scroll
+trace that exists to debug it, are not in the binary at all (App Review tests
+the exact uploaded binary; a runtime "off" is not enough). On top of the usual gates it refuses a dirty tree or a local
 `develop` that differs from `origin/develop`, runs `scripts/check-no-meshyy.sh`
 on a Debug simulator build of the same commit (only an unoptimized binary
 shows short UI strings) and on the archived app, requires 0 `@rpath`

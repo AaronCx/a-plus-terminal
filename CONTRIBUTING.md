@@ -23,11 +23,12 @@ encodes.
 - **Tests ride with the change.** Live meshyy tests skip cleanly on machines
   without a local daemon (`./scripts/meshyy-repro-setup.sh` sets one up).
 - **meshyy is beta-only and compiled out of App Store builds.** Code that
-  touches it goes inside `#if MESHYY`. The `aPlusTerminal` scheme (beta,
-  TestFlight) sets the condition and links the package; the
-  `aPlusTerminalAppStore` scheme (App Store candidate) does neither. CI builds
-  both, runs the App Store Settings UI test, and fails if
-  `scripts/check-no-meshyy.sh` finds meshyy in the App Store binary.
+  touches it, and the scroll-trace diagnostics that exist to debug it, goes
+  inside `#if MESHYY`. The `aPlusTerminal` scheme (beta, TestFlight) sets the
+  condition and links the package; the `aPlusTerminalAppStore` scheme (App
+  Store candidate) does neither. CI builds both, runs the App Store Settings
+  UI test, and fails if `scripts/check-no-meshyy.sh` finds meshyy or the
+  scroll trace in the App Store binary.
 
 ## Building
 
