@@ -85,6 +85,7 @@ final class AppSettings {
         didSet { defaults.set(previewConsoleCapture, forKey: Keys.previewConsoleCapture) }
     }
 
+    #if MESHYY
     /// Scroll trace (Settings → Diagnostics): the user's explicit choice, nil
     /// when they never touched the toggle. nil follows the build channel —
     /// ON for DEBUG and TestFlight builds, OFF for the App Store — so a
@@ -121,6 +122,7 @@ final class AppSettings {
             scrollTraceChannelDefault = value
         }
     }
+    #endif
 
     private let defaults: UserDefaults
 
@@ -151,6 +153,7 @@ final class AppSettings {
         self.autoPopOutOnAppSwitch = defaults.bool(forKey: Keys.autoPopOutOnAppSwitch)
         // OFF by default — JS injection into the user's page is opt-in.
         self.previewConsoleCapture = defaults.bool(forKey: Keys.previewConsoleCapture)
+        #if MESHYY
         self.scrollTraceOverride = defaults.object(forKey: Keys.scrollTraceOverride) as? Bool
         #if DEBUG
         self.scrollTraceChannelDefault = true
@@ -161,6 +164,7 @@ final class AppSettings {
         self.scrollTraceChannelDefault = BuildChannel.synchronousHint.scrollTraceDefault
             ?? defaults.object(forKey: Keys.scrollTraceChannelDefault) as? Bool
             ?? false
+        #endif
         #endif
     }
 
@@ -178,9 +182,9 @@ final class AppSettings {
         static let previewConsoleCapture = "previewConsoleCapture"
         #if MESHYY
         static let meshyyTransport = "meshyyTransport"
-        #endif
         static let scrollTraceOverride = "scrollTraceEnabled"
         static let scrollTraceChannelDefault = "scrollTraceChannelDefault"
+        #endif
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"

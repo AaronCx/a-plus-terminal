@@ -1,3 +1,6 @@
+// Beta-only (`MESHYY`): the trace exists to debug meshyy, and App Review tests
+// the exact uploaded binary (no dormant features), so candidates compile it out.
+#if MESHYY
 import Foundation
 import Observation
 import SwiftTerm
@@ -734,3 +737,4 @@ final class ScrollGestureTracer {
         )
     }
 }
+#endif

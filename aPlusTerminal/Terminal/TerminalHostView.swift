@@ -38,6 +38,7 @@ final class TerminalEmulatorView: TerminalView {
         }
     }
 
+    #if MESHYY
     /// When the emulator's mouse-mode belief last moved (scroll trace). Every
     /// scroll bug so far was this belief diverging from the far side's, so
     /// the trace needs to say how fresh it was when a swipe was routed on it.
@@ -73,6 +74,7 @@ final class TerminalEmulatorView: TerminalView {
         }
         super.bufferActivated(source: source)
     }
+    #endif
 }
 
 /// Connects the SwiftUI layer (accessory bar, screens) to the UIKit terminal

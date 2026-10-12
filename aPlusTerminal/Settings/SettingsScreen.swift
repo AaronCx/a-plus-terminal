@@ -141,14 +141,17 @@ struct SettingsScreen: View {
                     }
                 }
 
+                #if MESHYY
                 // On-device diagnostics. Nothing here leaves the phone unless
-                // the user shares it from inside the screen.
+                // the user shares it from inside the screen. Beta-only: the
+                // scroll trace exists to debug meshyy.
                 Section("Diagnostics") {
                     NavigationLink("Scroll trace") {
                         ScrollTraceView()
                     }
                     .accessibilityIdentifier("settings.scrollTrace")
                 }
+                #endif
 
                 Section {
                     Link(destination: supportURL) {

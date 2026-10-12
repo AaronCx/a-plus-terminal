@@ -1,3 +1,4 @@
+#if MESHYY
 import XCTest
 import SwiftTerm
 @testable import aPlusTerminal
@@ -645,3 +646,4 @@ final class ScrollBridgeTraceTests: XCTestCase {
         XCTAssertNil(h.store.records[1].endedAt, "still open")
     }
 }
+#endif

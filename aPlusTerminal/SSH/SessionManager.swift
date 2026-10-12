@@ -387,9 +387,11 @@ final class TerminalSession: Identifiable, Hashable {
     /// starts "the second you type".
     private enum Outbound {
         case data(Data)
+        #if MESHYY
         /// Scroll bytes that belong to a scroll-trace record: sent exactly
         /// like `.data`, but the send's outcome is reported to the trace.
         case tracedData(Data, recordID: UUID, enqueuedAt: Date)
+        #endif
         case resize(cols: Int, rows: Int)
     }
 
@@ -397,7 +399,7 @@ final class TerminalSession: Identifiable, Hashable {
     private let outboxContinuation: AsyncStream<Outbound>.Continuation
     private var outboxTask: Task<Void, Never>?
 
-    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, scrollTrace: ScrollTraceStore? = nil) {
+    init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore) {
         self.server = server
         self.keyStore = keyStore
         self.serverStore = serverStore
@@ -435,20 +437,27 @@ final class TerminalSession: Identifiable, Hashable {
             self.showMultiplexerHint = true
         }
         scrollBridge.attach(to: terminalView)
-        if let scrollTrace {
-            let tracer = ScrollGestureTracer(store: scrollTrace) { [weak self] in
-                self?.scrollTraceContext()
-            }
-            scrollBridge.tracer = tracer
-            scrollBridge.sendTraced = { [weak self] data, recordID in
-                // Same path as sendInput(_, countsAsResponse: false): the
-                // FIFO outbox, nothing else.
-                self?.outboxContinuation.yield(.tracedData(data, recordID: recordID, enqueuedAt: Date()))
-            }
-            scrollTracer = tracer
-            scrollTraceStoreForTesting = scrollTrace
-        }
         self.scrollBridge = scrollBridge
+    }
+
+    #if MESHYY
+    /// Beta builds: the same session, its swipes recorded into `scrollTrace`
+    /// (nil records nothing, exactly like the plain init). An overload rather
+    /// than a defaulted parameter so App Store candidates carry no trace type.
+    convenience init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, scrollTrace: ScrollTraceStore?) {
+        self.init(server: server, keyStore: keyStore, serverStore: serverStore, passwords: passwords, settings: settings, profiles: profiles)
+        guard let scrollTrace, let scrollBridge else { return }
+        let tracer = ScrollGestureTracer(store: scrollTrace) { [weak self] in
+            self?.scrollTraceContext()
+        }
+        scrollBridge.tracer = tracer
+        scrollBridge.sendTraced = { [weak self] data, recordID in
+            // Same path as sendInput(_, countsAsResponse: false): the
+            // FIFO outbox, nothing else.
+            self?.outboxContinuation.yield(.tracedData(data, recordID: recordID, enqueuedAt: Date()))
+        }
+        scrollTracer = tracer
+        scrollTraceStoreForTesting = scrollTrace
     }
 
     /// The session half of a scroll-trace record.
@@ -509,6 +518,7 @@ final class TerminalSession: Identifiable, Hashable {
             try await connection.uploadToInbox(data, filename: filename)
         }
     }
+    #endif
 
     /// `countsAsResponse: false` marks machine-generated traffic — scroll
     /// wheel events, internal multiplexer commands — which must not re-arm
@@ -1534,10 +1544,13 @@ final class TerminalSession: Identifiable, Hashable {
             await deliverResize(cols: size.cols, rows: size.rows, via: meshyy, else: connection)
             return
         }
-        #endif
         await deliverResize(cols: size.cols, rows: size.rows, via: nil, else: connection)
+        #else
+        try? await connection.resize(cols: size.cols, rows: size.rows)
+        #endif
     }
 
+    #if MESHYY
     /// Hands a resize to the transport carrying the pty (meshyy if given,
     /// else the SSH connection). Errors are swallowed exactly as before; the
     /// outcome is only remembered for the scroll trace.
@@ -1558,6 +1571,7 @@ final class TerminalSession: Identifiable, Hashable {
             cols: cols, rows: rows, via: meshyy != nil ? .meshyy : .ssh, error: failure, at: Date()
         )
     }
+    #endif
 
     /// Single consumer for all outbound traffic — strict FIFO per session,
     /// always targeting the current connection.
@@ -1582,6 +1596,7 @@ final class TerminalSession: Identifiable, Hashable {
                     #else
                     try? await connection.send(data)
                     #endif
+                #if MESHYY
                 case .tracedData(let data, let recordID, let enqueuedAt):
                     var failure: String?
                     do {
@@ -1597,8 +1612,13 @@ final class TerminalSession: Identifiable, Hashable {
                         recordID: recordID, via: meshyy != nil ? .meshyy : .ssh, error: failure,
                         enqueuedAt: enqueuedAt
                     )
+                #endif
                 case .resize(let cols, let rows):
+                    #if MESHYY
                     await self.deliverResize(cols: cols, rows: rows, via: meshyy, else: connection)
+                    #else
+                    try? await connection.resize(cols: cols, rows: rows)
+                    #endif
                 }
             }
         }
@@ -1609,8 +1629,10 @@ final class TerminalSession: Identifiable, Hashable {
             for await chunk in await connection.output {
                 guard let self, !Task.isCancelled else { return }
                 let bytes = [UInt8](chunk)
+                #if MESHYY
                 self.lastInboundBytesAt = Date()
                 self.scrollTracer?.noteInbound(byteCount: bytes.count)
+                #endif
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
                 self.noteAgentStatus(self.agentMonitor.status)
@@ -1763,8 +1785,11 @@ final class SessionManager {
     private let profiles: ProfileStore
     private let activityController = SessionActivityController()
     private let diagnostics: BackgroundExitDiagnostics
+    #if MESHYY
     /// On-device swipe trace, shared by every session (nil = not traced).
-    private let scrollTrace: ScrollTraceStore?
+    /// Set once by the beta-only init overload below.
+    @ObservationIgnored private var scrollTrace: ScrollTraceStore?
+    #endif
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
@@ -1850,14 +1875,13 @@ final class SessionManager {
         }
     }
 
-    init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, diagnostics: BackgroundExitDiagnostics? = nil, scrollTrace: ScrollTraceStore? = nil) {
+    init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, diagnostics: BackgroundExitDiagnostics? = nil) {
         self.keyStore = keyStore
         self.serverStore = serverStore
         self.passwords = passwords
         self.settings = settings
         self.profiles = profiles
         self.diagnostics = diagnostics ?? BackgroundExitDiagnostics()
-        self.scrollTrace = scrollTrace
         // A surviving Live Activity from a previous launch must reflect this
         // process's truth (no sessions yet) instead of stale ones (§4.5).
         // The controller adopts one survivor in its init; this zero push then
@@ -1866,8 +1890,19 @@ final class SessionManager {
         refreshActivity()
     }
 
+    #if MESHYY
+    /// Beta builds: every session this manager opens records its swipes into
+    /// `scrollTrace`. An overload rather than a defaulted parameter so App
+    /// Store candidates carry no trace type.
+    convenience init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, diagnostics: BackgroundExitDiagnostics? = nil, scrollTrace: ScrollTraceStore?) {
+        self.init(keyStore: keyStore, serverStore: serverStore, passwords: passwords, settings: settings, profiles: profiles, diagnostics: diagnostics)
+        self.scrollTrace = scrollTrace
+    }
+    #endif
+
     @discardableResult
     func open(server: Server) -> TerminalSession {
+        #if MESHYY
         let session = TerminalSession(
             server: server,
             keyStore: keyStore,
@@ -1877,6 +1912,16 @@ final class SessionManager {
             profiles: profiles,
             scrollTrace: scrollTrace
         )
+        #else
+        let session = TerminalSession(
+            server: server,
+            keyStore: keyStore,
+            serverStore: serverStore,
+            passwords: passwords,
+            settings: settings,
+            profiles: profiles
+        )
+        #endif
         #if MESHYY
         session.meshyyNamesInUse = { [weak self] in self?.meshyyNamesInUse() ?? [] }
         #endif
