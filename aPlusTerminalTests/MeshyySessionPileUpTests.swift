@@ -1,3 +1,4 @@
+#if MESHYY
 import Crypto
 import MeshyyCore
 import XCTest
@@ -244,3 +245,4 @@ final class MeshyySessionPileUpTests: XCTestCase {
         await ssh.disconnect()
     }
 }
+#endif

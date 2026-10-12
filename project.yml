@@ -33,7 +33,9 @@ packages:
   # demo. MIT licensed (transitives: CryptoSwift fork, system zlib, d3des).
   RoyalVNCKit:
     path: Vendor/royalvnc
-  # Resumable terminal transport, opt-in via a Settings toggle. Aaron's own MIT,
+  # Resumable terminal transport, opt-in via a Settings toggle — BETA ONLY: linked
+  # by the aPlusTerminal (TestFlight) target, never by aPlusTerminalAppStore. Kept
+  # declared here so Package.resolved stays identical for both. Aaron's own MIT,
   # clean-room, zero-dependency package. Only the CLIENT half is linked — MeshyyCore
   # (wire format) and MeshyyKit (session/transport); the daemon targets are macOS-only.
   #
@@ -42,8 +44,17 @@ packages:
   Meshyy:
     url: https://github.com/AaronCx/meshyy.git
     exactVersion: "0.1.22"
-targets:
-  aPlusTerminal:
+# The app target's body lives in a template so the App Store candidate can be
+# the SAME app minus meshyy (brief 1.0.4 §1: App Review tests the uploaded
+# binary, and guideline 2.3.1 forbids dormant features, so a runtime "off"
+# isn't enough). Two targets, one template:
+#   aPlusTerminal          beta/TestFlight — links Meshyy and compiles with
+#                          MESHYY. What develop, CI, Run and Test use.
+#   aPlusTerminalAppStore  App Store candidate — no Meshyy package, no MESHYY.
+#                          Same bundle id, Info.plist, entitlements and widget.
+# Every meshyy entry point in the sources is wrapped in `#if MESHYY`.
+targetTemplates:
+  aPlusTerminalApp:
     type: application
     platform: iOS
     entitlements:
@@ -64,10 +75,6 @@ targets:
       - package: Citadel
       - package: SwiftTerm
       - package: RoyalVNCKit
-      - package: Meshyy
-        product: MeshyyKit
-      - package: Meshyy
-        product: MeshyyCore
     settings:
       base:
         # Locks into App Store Connect at first upload — do not rename after that.
@@ -105,6 +112,37 @@ targets:
           - CFBundleURLName: com.aaroncx.aplusterminal
             CFBundleURLSchemes:
               - aplusterminal
+targets:
+  aPlusTerminal:
+    templates: [aPlusTerminalApp]
+    dependencies:
+      - package: Meshyy
+        product: MeshyyKit
+      - package: Meshyy
+        product: MeshyyCore
+    settings:
+      base:
+        # Target level, not project level: here `$(inherited)` picks up the
+        # project's Debug `DEBUG`, which a project-level base value would drop.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY"
+  aPlusTerminalAppStore:
+    templates: [aPlusTerminalApp]
+    settings:
+      configs:
+        # Release (what Archive uses) is named exactly like the beta app, so
+        # the archived .app, its binary and the Swift module are aPlusTerminal
+        # either way. Archives build in per-scheme ArchiveIntermediates, so
+        # the two never meet there.
+        Release:
+          PRODUCT_NAME: aPlusTerminal
+          PRODUCT_MODULE_NAME: aPlusTerminal
+        # Debug keeps its own name. Both schemes build into ONE products
+        # directory, and with a shared name the second scheme's build finds
+        # the first one's aPlusTerminal.debug.dylib "up to date" and skips the
+        # link: measured, the beta app then ran the App Store code (zero
+        # meshyy strings) and vice versa. Distinct names make that impossible.
+        Debug:
+          PRODUCT_NAME: aPlusTerminalAppStore
   aPlusTerminalWidgets:
     type: app-extension
     platform: iOS
@@ -117,7 +155,9 @@ targets:
       - aPlusTerminalWidgets
       - path: AgentIcons.xcassets
         buildPhase: resources
-      # Shared with the app target — must compile identically in both.
+      # Shared with the app target — must compile identically in both. The
+      # widget never defines MESHYY: it only reads servers.json (never writes
+      # it), so Server's meshyy-only field is simply absent here.
       - path: aPlusTerminal/LiveActivity/SessionActivityAttributes.swift
       - path: aPlusTerminal/LiveActivity/SessionSnapshotStore.swift
       - path: aPlusTerminal/Servers/Server.swift
@@ -142,6 +182,8 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        # Hosted by the beta app, so the meshyy suites compile and run here.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY"
     sources:
       - aPlusTerminalTests
     dependencies:
@@ -175,8 +217,24 @@ targets:
         PROVISIONING_PROFILE_SPECIFIER: "$(APLUSTERMINAL_PROFILE_UITESTS)"
     sources:
       - aPlusTerminalUITests
+      # The form walker shared with the App Store UI test (BetaBuildSettingsUITests
+      # is its mirror, so both must walk identically).
+      - path: aPlusTerminalAppStoreUITests/SettingsFormWalker.swift
     dependencies:
       - target: aPlusTerminal
+  # UI tests against the App Store candidate (TEST_TARGET_NAME =
+  # aPlusTerminalAppStore): proves the shipped Settings has no meshyy row.
+  aPlusTerminalAppStoreUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.aPlusTerminalAppStoreUITests
+    sources:
+      - aPlusTerminalAppStoreUITests
+    dependencies:
+      - target: aPlusTerminalAppStore
 schemes:
   aPlusTerminal:
     build:
@@ -208,3 +266,18 @@ schemes:
       targets:
         - aPlusTerminalTests
         - aPlusTerminalUITests
+  # The App Store candidate: `scripts/ship-testflight.sh N --app-store` archives
+  # this scheme (Release). Its test action is the no-meshyy Settings UI test.
+  aPlusTerminalAppStore:
+    build:
+      targets:
+        aPlusTerminalAppStore: all
+    run:
+      config: Debug
+      storeKitConfiguration: aPlusTerminal.storekit
+    test:
+      config: Debug
+      targets:
+        - aPlusTerminalAppStoreUITests
+    archive:
+      config: Release

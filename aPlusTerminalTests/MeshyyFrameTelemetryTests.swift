@@ -1,3 +1,4 @@
+#if MESHYY
 import MeshyyKit
 import XCTest
 @testable import aPlusTerminal
@@ -45,3 +46,4 @@ final class MeshyyFrameTelemetryTests: XCTestCase {
         XCTAssertEqual(exited.cleanExitStatus, 0)
     }
 }
+#endif

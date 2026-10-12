@@ -1,3 +1,4 @@
+#if MESHYY
 import Crypto
 import MeshyyCore
 import XCTest
@@ -1056,3 +1057,4 @@ final class MeshyySurvivorFlowTests: XCTestCase {
         return (session, entry)
     }
 }
+#endif

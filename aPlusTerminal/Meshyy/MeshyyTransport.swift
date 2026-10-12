@@ -1,3 +1,4 @@
+#if MESHYY
 import Foundation
 import MeshyyCore
 import MeshyyKit
@@ -670,3 +671,4 @@ final class MeshyyTransport {
         outputContinuation.finish()
     }
 }
+#endif

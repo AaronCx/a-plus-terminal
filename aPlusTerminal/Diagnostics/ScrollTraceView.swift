@@ -1,3 +1,4 @@
+#if MESHYY
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -199,3 +200,4 @@ enum DiagnosticUploadRace {
         }
     }
 }
+#endif

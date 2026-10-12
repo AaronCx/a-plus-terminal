@@ -1,3 +1,4 @@
+#if MESHYY
 import MeshyyCore
 import XCTest
 @testable import aPlusTerminal
@@ -191,3 +192,4 @@ final class MeshyyResizeAtConnectTests: XCTestCase {
         return pem
     }
 }
+#endif

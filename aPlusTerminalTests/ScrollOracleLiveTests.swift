@@ -1,3 +1,4 @@
+#if MESHYY
 import Crypto
 import MeshyyCore
 import XCTest
@@ -1330,3 +1331,4 @@ final class ScrollOracleLiveTests: XCTestCase {
 private extension String {
     var nonEmptyInt: Int? { isEmpty ? nil : Int(self) }
 }
+#endif

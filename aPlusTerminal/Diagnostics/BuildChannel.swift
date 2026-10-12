@@ -1,3 +1,6 @@
+// Beta-only (`MESHYY`): its one consumer is the scroll trace default, and the
+// trace exists to debug meshyy, so App Store candidates compile all of it out.
+#if MESHYY
 import Foundation
 import StoreKit
 
@@ -65,3 +68,4 @@ enum BuildChannel: String, Codable, Sendable {
         #endif
     }
 }
+#endif

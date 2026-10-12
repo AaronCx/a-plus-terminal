@@ -66,28 +66,23 @@ struct TerminalScreen: View {
                         sessionManager.close(session)
                         dismiss()
                     }
-                } else if session.usesMeshyy {
-                    // meshyy resumes itself (see appWillEnterForeground), so this
-                    // is the moment between foregrounding and the reattach
-                    // landing. Showing the paused card here would offer a choice
-                    // that is already being made — and its "Fresh Shell" button
-                    // would throw away the very session meshyy exists to keep.
-                    statusCard {
-                        ProgressView("Resuming your session…")
-                    }
                 } else {
-                    // Cleanly paused (backgrounded long enough that iOS froze
-                    // us). Reconnect queries the *live* sessions, then attaches
-                    // or shows the picker — so the choices are never stale.
-                    SessionPausedView(
-                        reattachEnabled: session.reattachEnabled,
-                        onReconnect: { Task { await session.reconnectChoosingSession() } },
-                        onFreshShell: { Task { await session.reconnect(attachTo: nil) } },
-                        onClose: {
-                            sessionManager.close(session)
-                            dismiss()
+                    #if MESHYY
+                    if session.usesMeshyy {
+                        // meshyy resumes itself (see appWillEnterForeground), so this
+                        // is the moment between foregrounding and the reattach
+                        // landing. Showing the paused card here would offer a choice
+                        // that is already being made — and its "Fresh Shell" button
+                        // would throw away the very session meshyy exists to keep.
+                        statusCard {
+                            ProgressView("Resuming your session…")
                         }
-                    )
+                    } else {
+                        pausedCard
+                    }
+                    #else
+                    pausedCard
+                    #endif
                 }
             case .connected, .closed:
                 EmptyView()
@@ -102,6 +97,7 @@ struct TerminalScreen: View {
                 )
             }
 
+            #if MESHYY
             // The daemon holds detached meshyy sessions for this server — the user
             // decides whether this tab resumes one or starts fresh. Never guessed:
             // guessing is exactly what used to drop new tabs into old shells.
@@ -112,6 +108,7 @@ struct TerminalScreen: View {
                     onNew: { session.chooseMeshyySession(.new) }
                 )
             }
+            #endif
         }
         .navigationTitle(session.server.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -126,6 +123,7 @@ struct TerminalScreen: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if session.state == .connected {
+                #if MESHYY
                 // The agent is waiting and the daemon has one-tap answers for
                 // it. Above the accessory bar — thumb height, where the
                 // answer keys would otherwise have to be hunted on the
@@ -151,6 +149,7 @@ struct TerminalScreen: View {
                         }
                     )
                 }
+                #endif
                 KeyAccessoryBar(
                     bridge: session.bridge,
                     onMic: { showDictation = true },
@@ -311,6 +310,21 @@ struct TerminalScreen: View {
         .accessibilityLabel("Uploading attachment")
     }
 
+    /// Cleanly paused (backgrounded long enough that iOS froze us). Reconnect
+    /// queries the *live* sessions, then attaches or shows the picker — so the
+    /// choices are never stale.
+    private var pausedCard: some View {
+        SessionPausedView(
+            reattachEnabled: session.reattachEnabled,
+            onReconnect: { Task { await session.reconnectChoosingSession() } },
+            onFreshShell: { Task { await session.reconnect(attachTo: nil) } },
+            onClose: {
+                sessionManager.close(session)
+                dismiss()
+            }
+        )
+    }
+
     private func statusCard(@ViewBuilder content: () -> some View) -> some View {
         content()
             .padding(20)
@@ -398,8 +412,7 @@ struct SessionPausedView: View {
     }
 }
 
-/// Live session picker shown over the reconnected shell when several sessions
-/// exist. `sessions` is a fresh query (no stale/closed entries).
+#if MESHYY
 /// Detached meshyy sessions found on the server at connect time. The card the
 /// connect parks behind: each survivor is a shell still running exactly as it was
 /// left, and only a tap — never a guess — puts this tab into one.
@@ -462,7 +475,10 @@ struct MeshyySurvivorPickerView: View {
         return parts.isEmpty ? "\(survivor.cols)×\(survivor.rows)" : parts.joined(separator: " · ")
     }
 }
+#endif
 
+/// Live session picker shown over the reconnected shell when several sessions
+/// exist. `sessions` is a fresh query (no stale/closed entries).
 struct ReattachPickerView: View {
     let sessions: [String]
     var onPick: (String) -> Void

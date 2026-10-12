@@ -110,20 +110,24 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
     /// the "you probably want `set -g mouse on`" moment (§4.3).
     var onModeBTriggered: (() -> Void)?
 
+    #if MESHYY
     /// Scroll trace (observation only). nil, or a tracer whose store is
     /// disabled, leaves every byte and every routing decision exactly as
-    /// without it.
+    /// without it. Beta-only: App Store candidates compile the trace out.
     var tracer: ScrollGestureTracer?
     /// Used instead of `sendData` for bytes that belong to a trace record, so
     /// the transport's send outcome can be reported against that record. Must
     /// deliver the bytes exactly as `sendData` would.
     var sendTraced: ((Data, UUID) -> Void)?
+    #endif
 
     private var core = ScrollBridgeCore()
     private var activeMode: ScrollBridgeCore.Mode = .native
     private var momentumTask: Task<Void, Never>?
+    #if MESHYY
     /// The open trace record for the current gesture, if tracing.
     private var traceID: UUID?
+    #endif
     /// Build 14 — while a long-press (text selection) is held, the scroll pan
     /// stands down so SwiftTerm's selection isn't hijacked into a scroll.
     private var isSuspended = false
@@ -171,19 +175,25 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard let view = terminalView else {
+            #if MESHYY
             if gestureRecognizer is UIPanGestureRecognizer { traceDecline(.noView) }
+            #endif
             return false
         }
         // Non-pan recognizers we own (the selection long-press) always begin.
         guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
         // Hold in progress → let the selection / native gestures have the touch.
         if isSuspended {
+            #if MESHYY
             traceDecline(.selectionHold)
+            #endif
             return false
         }
         let velocity = pan.velocity(in: view)
         guard abs(velocity.y) > abs(velocity.x) else {
+            #if MESHYY
             traceDecline(.horizontal)
+            #endif
             return false
         }
         guard let decision = beginSwipe() else { return false }
@@ -200,7 +210,9 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
     @discardableResult
     func beginSwipe() -> SwipeDecision? {
         guard let view = terminalView else {
+            #if MESHYY
             traceDecline(.noView)
+            #endif
             return nil
         }
         let terminal = view.getTerminal()
@@ -222,7 +234,9 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
         if activeMode == .arrowKeys && terminal.mouseMode == .off {
             onModeBTriggered?()
         }
+        #if MESHYY
         traceID = tracer?.begin(decision, view: view)
+        #endif
         return decision
     }
 
@@ -234,7 +248,11 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
     func injectSwipe(ticks: Int, up: Bool, at point: CGPoint) -> Data {
         core.reset()
         let travel = CGFloat(ticks) * ScrollBridgeCore.pointsPerTick
+        #if MESHYY
         return emit(deltaY: up ? travel : -travel, location: point, traceID: traceID)
+        #else
+        return emit(deltaY: up ? travel : -travel, location: point)
+        #endif
     }
 
     /// Test/oracle seam: releases the finger at `velocityY` (points/s, UIKit
@@ -244,6 +262,7 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
         startMomentum(velocityY: velocityY, location: point)
     }
 
+    #if MESHYY
     /// Closes the current gesture's trace record (the pan path does this when
     /// momentum ends or the pan cancels).
     func endSwipe() {
@@ -260,6 +279,7 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
         guard let tracer, tracer.isRecording else { return }
         tracer.decline(reason, wheelBridgeEnabled: wheelBridgeEnabled(), view: terminalView)
     }
+    #endif
 
     /// Let our selection long-press coexist with SwiftTerm's own gestures (its
     /// long-press, taps) without disturbing the scroll-pan/mouse-pan exclusivity.
@@ -282,12 +302,14 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
 
     @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
         guard let view = terminalView else {
+            #if MESHYY
             // The view went away mid-gesture: still close its record, or the
             // trace shows a swipe that never finished.
             switch pan.state {
             case .ended, .cancelled, .failed: endSwipe()
             default: break
             }
+            #endif
             return
         }
         switch pan.state {
@@ -297,12 +319,18 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
         case .changed:
             let deltaY = pan.translation(in: view).y
             pan.setTranslation(.zero, in: view)
+            #if MESHYY
             emit(deltaY: deltaY, location: pan.location(in: view), traceID: traceID)
+            #else
+            emit(deltaY: deltaY, location: pan.location(in: view))
+            #endif
         case .ended:
             startMomentum(velocityY: pan.velocity(in: view).y, location: pan.location(in: view))
         case .cancelled, .failed:
             core.reset()
+            #if MESHYY
             endSwipe()
+            #endif
         default:
             break
         }
@@ -310,47 +338,66 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
 
     /// The single producer of scroll bytes: pan, momentum and `injectSwipe`
     /// all come through here. Returns what it sent.
+    #if MESHYY
     @discardableResult
     private func emit(deltaY: CGFloat, location: CGPoint, momentum: Bool = false, traceID: UUID?) -> Data {
-        guard let view = terminalView else { return Data() }
+        guard let out = scrollBytes(deltaY: deltaY, location: location) else { return Data() }
+        if let traceID, let tracer, let sendTraced {
+            tracer.emitted(
+                recordID: traceID, ticks: abs(out.ticks), up: out.ticks > 0, momentum: momentum,
+                col: out.cell?.col, row: out.cell?.row, bytes: out.bytes
+            )
+            sendTraced(out.bytes, traceID)
+        } else {
+            sendData(out.bytes)
+        }
+        return out.bytes
+    }
+    #else
+    @discardableResult
+    private func emit(deltaY: CGFloat, location: CGPoint) -> Data {
+        guard let bytes = scrollBytes(deltaY: deltaY, location: location)?.bytes else { return Data() }
+        sendData(bytes)
+        return bytes
+    }
+    #endif
+
+    /// The bytes one pan delta produces on the current route, with the signed
+    /// tick count and (wheel route) the target cell. nil when nothing is sent:
+    /// no view, under one tick of travel, or the native route.
+    private func scrollBytes(
+        deltaY: CGFloat, location: CGPoint
+    ) -> (bytes: Data, ticks: Int, cell: (col: Int, row: Int)?)? {
+        guard let view = terminalView else { return nil }
         let ticks = core.ticks(forDeltaY: deltaY)
-        guard ticks != 0 else { return Data() }
+        guard ticks != 0 else { return nil }
         let up = ticks > 0
 
-        let bytes: Data
-        var cell: (col: Int, row: Int)?
         switch activeMode {
         case .sgrWheel:
             let terminal = view.getTerminal()
             let target = cellCoordinate(for: location, in: view, cols: terminal.cols, rows: terminal.rows)
-            cell = target
-            bytes = ScrollBridgeCore.wheelEvents(up: up, count: abs(ticks), col: target.col, row: target.row)
+            let bytes = ScrollBridgeCore.wheelEvents(up: up, count: abs(ticks), col: target.col, row: target.row)
+            return (bytes, ticks, target)
         case .arrowKeys:
             let applicationCursor = view.getTerminal().applicationCursor
-            bytes = ScrollBridgeCore.arrowEvents(up: up, ticks: abs(ticks), applicationCursor: applicationCursor)
+            let bytes = ScrollBridgeCore.arrowEvents(up: up, ticks: abs(ticks), applicationCursor: applicationCursor)
+            return (bytes, ticks, nil)
         case .native:
-            return Data()
+            return nil
         }
-
-        if let traceID, let tracer, let sendTraced {
-            tracer.emitted(
-                recordID: traceID, ticks: abs(ticks), up: up, momentum: momentum,
-                col: cell?.col, row: cell?.row, bytes: bytes
-            )
-            sendTraced(bytes, traceID)
-        } else {
-            sendData(bytes)
-        }
-        return bytes
     }
 
     /// Momentum decay: keep emitting from the release velocity until it dies
     /// out, so a flick keeps the transcript moving like native scrolling.
     private func startMomentum(velocityY: CGFloat, location: CGPoint) {
         guard activeMode != .native, abs(velocityY) > 80 else {
+            #if MESHYY
             endSwipe()
+            #endif
             return
         }
+        #if MESHYY
         let gestureTrace = traceID
         // Held strongly: if the bridge is deallocated mid-flick (tab closed),
         // deinit cancels this task and `self` is gone, but the gesture's
@@ -369,6 +416,16 @@ final class ScrollBridge: NSObject, UIGestureRecognizerDelegate {
                 tracer?.end(gestureTrace)
             }
         }
+        #else
+        momentumTask = Task { @MainActor [weak self] in
+            var velocity = velocityY
+            while !Task.isCancelled, abs(velocity) > 40 {
+                self?.emit(deltaY: velocity * 0.016, location: location)
+                velocity *= 0.92
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+        }
+        #endif
     }
 
     /// Approximate 1-based cell under `point`, assuming the grid fills the

@@ -17,6 +17,7 @@ final class AppSettings {
         didSet { defaults.set(autoReattachMultiplexer, forKey: Keys.autoReattachMultiplexer) }
     }
 
+    #if MESHYY
     /// Carry the pty byte stream over meshyy when the host runs `meshyyd`.
     ///
     /// OFF by default, and the toggle is the ONLY fallback: there is no runtime
@@ -26,6 +27,7 @@ final class AppSettings {
     var meshyyTransport: Bool {
         didSet { defaults.set(meshyyTransport, forKey: Keys.meshyyTransport) }
     }
+    #endif
 
     /// §4.3 — translate pan gestures into SGR mouse wheel events when the
     /// remote app requested mouse reporting.
@@ -83,6 +85,7 @@ final class AppSettings {
         didSet { defaults.set(previewConsoleCapture, forKey: Keys.previewConsoleCapture) }
     }
 
+    #if MESHYY
     /// Scroll trace (Settings → Diagnostics): the user's explicit choice, nil
     /// when they never touched the toggle. nil follows the build channel —
     /// ON for DEBUG and TestFlight builds, OFF for the App Store — so a
@@ -119,6 +122,7 @@ final class AppSettings {
             scrollTraceChannelDefault = value
         }
     }
+    #endif
 
     private let defaults: UserDefaults
 
@@ -130,7 +134,9 @@ final class AppSettings {
             ?? defaults.object(forKey: Keys.legacyAutoReattachTmux) as? Bool
             ?? true
         self.scrollWheelBridge = defaults.object(forKey: Keys.scrollWheelBridge) as? Bool ?? true
+        #if MESHYY
         self.meshyyTransport = defaults.bool(forKey: Keys.meshyyTransport)
+        #endif
         self.multiplexerHintShown = defaults.object(forKey: Keys.multiplexerHintShown) as? Bool
             ?? defaults.bool(forKey: Keys.legacyTmuxMouseHintShown)
         self.autoSendDictation = defaults.bool(forKey: Keys.autoSendDictation)
@@ -147,6 +153,7 @@ final class AppSettings {
         self.autoPopOutOnAppSwitch = defaults.bool(forKey: Keys.autoPopOutOnAppSwitch)
         // OFF by default — JS injection into the user's page is opt-in.
         self.previewConsoleCapture = defaults.bool(forKey: Keys.previewConsoleCapture)
+        #if MESHYY
         self.scrollTraceOverride = defaults.object(forKey: Keys.scrollTraceOverride) as? Bool
         #if DEBUG
         self.scrollTraceChannelDefault = true
@@ -157,6 +164,7 @@ final class AppSettings {
         self.scrollTraceChannelDefault = BuildChannel.synchronousHint.scrollTraceDefault
             ?? defaults.object(forKey: Keys.scrollTraceChannelDefault) as? Bool
             ?? false
+        #endif
         #endif
     }
 
@@ -172,9 +180,11 @@ final class AppSettings {
         static let popOutSessions = "popOutSessions"
         static let autoPopOutOnAppSwitch = "autoPopOutOnAppSwitch"
         static let previewConsoleCapture = "previewConsoleCapture"
+        #if MESHYY
         static let meshyyTransport = "meshyyTransport"
         static let scrollTraceOverride = "scrollTraceEnabled"
         static let scrollTraceChannelDefault = "scrollTraceChannelDefault"
+        #endif
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"

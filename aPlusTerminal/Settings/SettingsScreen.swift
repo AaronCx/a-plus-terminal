@@ -115,13 +115,16 @@ struct SettingsScreen: View {
                     Text("Shows the previewed page's console.log messages in a pane inside the preview, since a phone has no developer tools. This works by injecting a small script into your own page — it's the only part of Preview that does, which is why it's a choice. Off = nothing is injected and no messages are captured. Nothing leaves your device either way.")
                 }
 
+                #if MESHYY
                 Section {
                     Toggle("Use meshyy when available (beta)", isOn: $settings.meshyyTransport)
+                        .accessibilityIdentifier("settings.meshyyTransport")
                 } header: {
                     Text("Connection")
                 } footer: {
                     Text("Keeps your session alive on the server, so it survives the app being suspended or the network dropping, and replays what you missed. Needs meshyyd on the host; without it nothing changes. Turn this off to get the normal SSH behaviour back.")
                 }
+                #endif
 
                 Section {
                     NavigationLink("Customize key bar") {
@@ -139,14 +142,17 @@ struct SettingsScreen: View {
                     }
                 }
 
+                #if MESHYY
                 // On-device diagnostics. Nothing here leaves the phone unless
-                // the user shares it from inside the screen.
+                // the user shares it from inside the screen. Beta-only: the
+                // scroll trace exists to debug meshyy.
                 Section("Diagnostics") {
                     NavigationLink("Scroll trace") {
                         ScrollTraceView()
                     }
                     .accessibilityIdentifier("settings.scrollTrace")
                 }
+                #endif
 
                 Section {
                     Link(destination: supportURL) {
