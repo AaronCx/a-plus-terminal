@@ -1,9 +1,10 @@
 import XCTest
 
 /// Mirror of `AppStoreBuildSettingsUITests` against the BETA app (MESHYY set):
-/// the same form walk must find the meshyy toggle here. This is what makes the
-/// App Store test's "found nothing" mean something — a walk that cannot see
-/// the row would pass there for the wrong reason.
+/// the same form walk must find the meshyy toggle (and the Scroll trace row)
+/// here. This is what makes the App Store test's "found nothing" mean
+/// something — a walk that cannot see the row would pass there for the wrong
+/// reason.
 ///
 /// Needs no SSH and no environment, so it is not LIVE_QA-gated: CI runs it.
 final class BetaBuildSettingsUITests: XCTestCase {
@@ -40,6 +41,14 @@ final class BetaBuildSettingsUITests: XCTestCase {
         // check, matched the same (case-insensitive) way.
         XCTAssertTrue(texts.contains { $0.caseInsensitiveCompare("Connection") == .orderedSame },
                       "walk never saw the meshyy \"Connection\" section header")
+        // Positive control for the App Store test's scroll-trace checks: the
+        // beta build compiles the trace in, and the same walk must see the
+        // Diagnostics header and its Scroll trace row.
+        XCTAssertTrue(texts.contains { $0.caseInsensitiveCompare("Diagnostics") == .orderedSame },
+                      "walk never saw the \"Diagnostics\" section header")
+        XCTAssertTrue(texts.contains { $0.localizedCaseInsensitiveContains("scroll trace") },
+                      "walk never saw the Scroll trace row")
+        XCTAssertTrue(texts.contains("settings.scrollTrace"), "Scroll trace row identifier not found by the walk")
         // Same coverage landmarks as the App Store test.
         for landmark in ["Capture console output", "Customize key bar", "Third-Party Notices"] {
             XCTAssertTrue(texts.contains(landmark), "walk never reached \"\(landmark)\"")

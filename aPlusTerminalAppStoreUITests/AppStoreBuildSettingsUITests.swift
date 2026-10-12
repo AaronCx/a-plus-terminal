@@ -1,6 +1,7 @@
 import XCTest
 
-/// The App Store candidate's Settings has no meshyy anywhere (brief 1.0.4 §1).
+/// The App Store candidate's Settings has no meshyy anywhere, and no Scroll
+/// trace diagnostics either (brief 1.0.4 §1).
 ///
 /// Runs against `aPlusTerminalAppStore` — the target built WITHOUT the MESHYY
 /// condition — so this is the shipped Settings screen, not a runtime switch.
@@ -47,6 +48,16 @@ final class AppStoreBuildSettingsUITests: XCTestCase {
         XCTAssertTrue(connection.isEmpty, "the meshyy \"Connection\" section is present")
         XCTAssertFalse(app.descendants(matching: .any)["settings.meshyyTransport"].exists,
                        "the meshyy toggle is present")
+
+        // The scroll trace exists to debug meshyy and is compiled out with it:
+        // no Diagnostics section, no Scroll trace row (the beta mirror proves
+        // the walk sees both when they are compiled in).
+        let texts = pages.flatMap(\.texts)
+        let traceHits = texts.filter { $0.localizedCaseInsensitiveContains("scroll trace") }
+        XCTAssertTrue(traceHits.isEmpty, "Scroll trace in the App Store build's Settings: \(traceHits)")
+        let diagnostics = texts.filter { $0.caseInsensitiveCompare("Diagnostics") == .orderedSame }
+        XCTAssertTrue(diagnostics.isEmpty, "the scroll-trace \"Diagnostics\" section is present")
+        XCTAssertFalse(texts.contains("settings.scrollTrace"), "the Scroll trace row is present")
 
         // Proof the walk covered the form: the rows either side of where the
         // meshyy section sits in the beta build, and the last row of all.
