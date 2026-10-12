@@ -332,6 +332,30 @@ final class CustomAgentsTests: XCTestCase {
         XCTAssertEqual(ids.count, 200)
     }
 
+    // MARK: - Legal
+
+    func testBundledLegalDocumentsRenderAsWritten() throws {
+        // Settings › Legal parses these as inline-only Markdown that keeps
+        // whitespace: a "# Heading" shows its hashes, and a line wrapped in
+        // the source breaks mid-sentence on screen.
+        for name in ["PrivacyPolicy", "LicenseAgreement", "ThirdPartyNotices"] {
+            let url = try XCTUnwrap(Bundle.main.url(forResource: name, withExtension: "md"),
+                                    "\(name).md is not bundled")
+            let text = try String(contentsOf: url, encoding: .utf8)
+            for line in text.split(separator: "\n") {
+                XCTAssertFalse(line.hasPrefix("#"), "\(name).md shows a literal heading: \(line)")
+            }
+        }
+        // The notices are prose: one source line per paragraph.
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "ThirdPartyNotices", withExtension: "md"))
+        let notices = try String(contentsOf: url, encoding: .utf8)
+        for paragraph in notices.components(separatedBy: "\n\n") {
+            XCTAssertFalse(paragraph.trimmingCharacters(in: .whitespacesAndNewlines).contains("\n"),
+                           "a hard-wrapped paragraph breaks mid-sentence: \(paragraph)")
+        }
+        XCTAssertTrue(notices.contains("not affiliated with"), "the not-affiliated notice must stay")
+    }
+
     // MARK: - Icons
 
     func testIconIsCenterCroppedTo360Square() throws {
