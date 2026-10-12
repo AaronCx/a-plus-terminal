@@ -5,8 +5,11 @@ import XCTest
 /// `make test`, CI included.
 ///
 /// Each test starts from a clean slate (`APLUSTERMINAL_TEST_RESET_AGENTS=1`
-/// wipes the user profiles file and user icons before the store loads), and
-/// relaunches WITHOUT the reset to prove what was saved is what comes back.
+/// wipes the user profiles file and user icons before the store loads),
+/// proven by `launchProvingAgentSeed` rather than assumed, and relaunches
+/// WITHOUT the reset to prove what was saved is what comes back. The form is
+/// driven once (create); edit and delete start from agents seeded through
+/// the profiles file, which keeps each test to the one thing it checks.
 final class CustomAgentsUITests: XCTestCase {
     private var app: XCUIApplication!
 
@@ -44,12 +47,48 @@ final class CustomAgentsUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Agents"].waitForExistence(timeout: 5), "Agents screen", file: file, line: line)
     }
 
+    /// Launch on a proven clean (or seeded) slate.
+    private func launchSeeded(agents: [(id: String, name: String, marker: String)] = [],
+                              file: StaticString = #filePath, line: UInt = #line) {
+        if !agents.isEmpty {
+            let entries = agents.map {
+                #"{"id":"\#($0.id)","displayName":"\#($0.name)","detectionMarkers":["\#($0.marker)"]}"#
+            }
+            app.launchEnvironment["APLUSTERMINAL_TEST_AGENT_PROFILES"] =
+                #"{"agents":["# + entries.joined(separator: ",") + "]}"
+        }
+        XCTAssertNotNil(app.launchProvingAgentSeed(),
+                        "the app never proved it applied this test's agents reset/seed", file: file, line: line)
+    }
+
     /// Terminates and launches again on the SAME data: no reset this time.
     private func relaunchKeepingData() {
-        app.terminate()
-        app.launchEnvironment.removeValue(forKey: "APLUSTERMINAL_TEST_RESET_AGENTS")
-        app.launchEnvironment.removeValue(forKey: "APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON")
-        app.launch()
+        app.relaunchWithoutAgentSeed()
+    }
+
+    private var anyCustomRow: XCUIElement {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'agents.row.'")).firstMatch
+    }
+
+    /// The DEBUG import row sits at the bottom of the list; tapping it scrolls
+    /// the Custom section away, and a List row off screen doesn't exist for
+    /// XCUITest. Scroll back up before asserting on custom rows, or "nothing
+    /// imported" would pass for the wrong reason.
+    private func scrollToCustomSection() {
+        let add = app.buttons["agents.add"]
+        var swipes = 0
+        while !(add.exists && add.isHittable) && swipes < 4 {
+            app.swipeDown()
+            swipes += 1
+        }
+        XCTAssertTrue(add.isHittable, "back at the Custom section")
+    }
+
+    /// Fails fast and clearly if the reset didn't take, instead of letting a
+    /// leftover agent from an earlier run decide the outcome.
+    private func assertStartsWithNoCustomAgents(file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(app.buttons["agents.add"].waitForExistence(timeout: 5), "Add Agent button", file: file, line: line)
+        XCTAssertFalse(anyCustomRow.exists, "precondition: the reset left no custom agents", file: file, line: line)
     }
 
     private func agentRow(named name: String) -> XCUIElement {
@@ -81,8 +120,9 @@ final class CustomAgentsUITests: XCTestCase {
     // MARK: - Tests
 
     func testCreatedAgentAppearsInList() {
-        app.launch()
+        launchSeeded()
         openAgents()
+        assertStartsWithNoCustomAgents()
         shot("agents-01-empty")
         createAgent(name: "Test Bot", marker: "TestBot v1 Ready", screenshot: true)
         let row = agentRow(named: "Test Bot")
@@ -92,9 +132,8 @@ final class CustomAgentsUITests: XCTestCase {
     }
 
     func testEditedNamePersistsAcrossRelaunch() {
-        app.launch()
+        launchSeeded(agents: [("custom-edit-me-ui0001", "Edit Me", "editme")])
         openAgents()
-        createAgent(name: "Edit Me", marker: "editme")
         let row = agentRow(named: "Edit Me")
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
@@ -115,18 +154,13 @@ final class CustomAgentsUITests: XCTestCase {
     }
 
     func testDeletePersistsAcrossRelaunch() {
-        app.launch()
-        openAgents()
-        createAgent(name: "Doomed Bot", marker: "doomedbot")
-        createAgent(name: "Keeper Bot", marker: "keeperbot")
-        let doomed = agentRow(named: "Doomed Bot")
-        XCTAssertTrue(doomed.waitForExistence(timeout: 5))
-
-        // Created rows must survive a relaunch before we delete one, or the
-        // delete assertion below could pass for the wrong reason.
-        relaunchKeepingData()
+        // Seeded through the profiles file, so both rows are on disk before
+        // the delete: its relaunch check can't pass for the wrong reason.
+        launchSeeded(agents: [("custom-doomed-bot-ui0002", "Doomed Bot", "doomedbot"),
+                              ("custom-keeper-bot-ui0003", "Keeper Bot", "keeperbot")])
         openAgents()
         XCTAssertTrue(agentRow(named: "Doomed Bot").waitForExistence(timeout: 5))
+        XCTAssertTrue(agentRow(named: "Keeper Bot").exists)
 
         agentRow(named: "Doomed Bot").swipeLeft()
         let swipeDelete = app.buttons["Delete"]
@@ -150,8 +184,9 @@ final class CustomAgentsUITests: XCTestCase {
     /// alert, no crash, nothing imported.
     func testMalformedImportShowsErrorNotCrash() {
         app.launchEnvironment["APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON"] = #"{"agents": [ {"id": "#
-        app.launch()
+        launchSeeded()
         openAgents()
+        assertStartsWithNoCustomAgents()
         let hook = app.buttons["agents.debugImport"]
         var swipes = 0
         while !(hook.exists && hook.isHittable) && swipes < 6 {
@@ -168,15 +203,16 @@ final class CustomAgentsUITests: XCTestCase {
         alert.buttons["OK"].tap()
         XCTAssertEqual(app.state, .runningForeground, "still running")
         XCTAssertTrue(app.navigationBars["Agents"].exists)
-        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'agents.row.'")).firstMatch.exists,
-                       "nothing imported")
+        scrollToCustomSection()
+        XCTAssertFalse(anyCustomRow.exists, "nothing imported")
     }
 
     func testValidImportAddsAgent() {
         app.launchEnvironment["APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON"] =
             #"{"agents":[{"id":"custom-imported-bot","displayName":"Imported Bot","detectionMarkers":["importedbot"]}]}"#
-        app.launch()
+        launchSeeded()
         openAgents()
+        assertStartsWithNoCustomAgents()
         let hook = app.buttons["agents.debugImport"]
         var swipes = 0
         while !(hook.exists && hook.isHittable) && swipes < 6 {
@@ -187,6 +223,7 @@ final class CustomAgentsUITests: XCTestCase {
         let alert = app.alerts["Imported 1 Agent"]
         XCTAssertTrue(alert.waitForExistence(timeout: 5))
         alert.buttons["OK"].tap()
+        scrollToCustomSection()
         XCTAssertTrue(app.buttons["agents.row.custom-imported-bot"].waitForExistence(timeout: 5))
 
         relaunchKeepingData()

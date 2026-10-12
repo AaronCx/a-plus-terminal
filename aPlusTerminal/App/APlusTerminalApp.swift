@@ -189,6 +189,9 @@ struct RootTabView: View {
         .onChange(of: router.selectedTab) { old, new in
             deepLinkLog.debug("tabview: selection \(String(describing: old), privacy: .public) -> \(String(describing: new), privacy: .public)")
         }
+        #if DEBUG
+        .overlay(alignment: .topLeading) { TestSeedMarker() }
+        #endif
     }
 }
 

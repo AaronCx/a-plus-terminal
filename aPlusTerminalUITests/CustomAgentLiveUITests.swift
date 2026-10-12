@@ -21,7 +21,9 @@ import XCTest
 ///     APLUSTERMINAL_TEST_SERVER='{"name":"LiveQA","host":"127.0.0.1","port":22,"username":"<user>"}' \
 ///     APLUSTERMINAL_TEST_PRIVATE_KEY='<base64 OpenSSH pem>'
 final class CustomAgentLiveUITests: XCTestCase {
-    private let agentID = "custom-fake-agent-live01"
+    /// Unique per run: a launch that skipped its seed can't pass on an agent
+    /// (and icon) an earlier run left behind.
+    private let agentID = "custom-fake-agent-" + UUID().uuidString.prefix(8).lowercased()
     private var app: XCUIApplication!
 
     override func setUpWithError() throws {
@@ -43,7 +45,8 @@ final class CustomAgentLiveUITests: XCTestCase {
             """
         app.launchEnvironment["APLUSTERMINAL_TEST_AGENT_ICON_ID"] = agentID
         app.launchEnvironment["APLUSTERMINAL_TEST_AGENT_ICON_BASE64"] = Self.iconPNG().base64EncodedString()
-        app.launch()
+        XCTAssertNotNil(app.launchProvingAgentSeed(),
+                        "the app never proved it applied the Fake Agent seed (profiles file + icon)")
     }
 
     override func tearDownWithError() throws {
