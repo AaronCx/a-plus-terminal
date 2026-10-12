@@ -634,6 +634,34 @@ final class SessionManagerTests: XCTestCase {
         manager.appWillEnterForeground()  // release the background task
     }
 
+    /// The row half of a status-less latch, through the wiring that ships:
+    /// `SessionManager.open` hooks the monitor's `onDetectedChange` to the
+    /// session's presentation revision, which the row's icon and label read.
+    /// Without it a custom agent named by a short banner kept the row's old
+    /// (blank) icon until something unrelated redrew it. No ActivityKit
+    /// needed, so this runs wherever the in-process SSH tests run.
+    func testCustomAgentLatchBumpsRowRevision() async throws {
+        let custom = AgentProfile(
+            id: "custom-echo-bot-r4t5y6", displayName: "Echo Bot",
+            detectionMarkers: ["echobot v1 ready"], attachTemplate: "{path} ", builtIn: false)
+        profiles = ProfileStore(agents: profiles.agents + [custom], multiplexers: profiles.multiplexers)
+        manager = SessionManager(
+            keyStore: keyStore, serverStore: serverStore,
+            passwords: PasswordStore(secrets: InMemorySecretStore()),
+            settings: settings, profiles: profiles)
+
+        let session = manager.open(server: makeServer())
+        try await waitFor("session to connect") { session.state == .connected }
+        let before = session.agentPresentationRevision
+        session.sendInput(Data("EchoBot v1 ready\n".utf8))
+        try await waitFor("custom marker to latch") { session.agentMonitor.detected?.id == custom.id }
+        XCTAssertEqual(session.agentMonitor.status, .none, "latched without any status transition")
+        XCTAssertGreaterThan(session.agentPresentationRevision, before,
+                             "the manager's wiring invalidated the row on the latch alone")
+        XCTAssertEqual(session.effectiveAgentIconName, "agent-\(custom.id)")
+        manager.closeAll()
+    }
+
     /// Custom agents reach the Live Activity: a custom profile's marker in
     /// the session's OUTPUT latches it — with no status transition, the
     /// banner is far below the burst threshold — and the running Activity's

@@ -403,14 +403,13 @@ final class CustomAgentsTests: XCTestCase {
             settings: settings,
             profiles: store)
         XCTAssertNil(session.effectiveAgentIconName)
-        let before = session.agentPresentationRevision
-        session.agentMonitor.onDetectedChange = { session.agentPresentationDidChange() }
+        // The row-refresh wiring (onDetectedChange → revision) is
+        // SessionManager's and is tested through `SessionManager.open` in
+        // SessionManagerTests.testCustomAgentLatchBumpsRowRevision.
         session.agentMonitor.observe(Array("FakeAgent v1 ready\n".utf8))
         XCTAssertEqual(session.agentMonitor.detected?.id, "custom-fake-agent-abc123")
         XCTAssertEqual(session.effectiveAgentIconName, "agent-custom-fake-agent-abc123")
         XCTAssertEqual(session.effectiveAgentName, "Fake Agent")
-        XCTAssertGreaterThan(session.agentPresentationRevision, before,
-                             "a latch with no status change still invalidates the row")
     }
 
     func testDeleteClearsDefaultAndServerReferences() throws {

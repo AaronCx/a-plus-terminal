@@ -182,14 +182,32 @@ final class AgentActivityMonitorTests: XCTestCase {
     }
 
     func testBuiltInMarkerStillWinsAndStillNeedsItsOwnText() {
-        // Stripping escapes must not let a built-in match where it didn't
-        // before, nor change which profile wins on a plain banner.
+        // A colored banner whose marker is contiguous in the raw bytes names
+        // the built-in exactly as before (the raw match decides it)…
         let monitor = autoWithCustom()
         monitor.observe(bytes("\u{1B}[1mClaude Code\u{1B}[0m v2\n"))
         XCTAssertEqual(monitor.detected?.id, "claude-code")
+        // …and colored output that never SHOWS a marker names nothing.
         let quiet = autoWithCustom()
         quiet.observe(bytes("\u{1B}[31merror:\u{1B}[0m nothing here\n"))
         XCTAssertNil(quiet.detected)
+    }
+
+    func testBuiltInMarkerSplitByAnEscapeMatchesWhatIsOnScreen() {
+        // Deliberate: the stripped match applies to every profile, built-ins
+        // included. The screen reads "claude code" even though a style reset
+        // sits between the words, and recognition follows what the user sees
+        // rather than holding built-ins to a stricter, byte-level rule.
+        let raw = "\u{1B}[1mclaude\u{1B}[0m code\n"
+        XCTAssertFalse(raw.lowercased().contains("claude code"), "precondition: no raw match")
+        let monitor = autoWithCustom()
+        monitor.observe(bytes(raw))
+        XCTAssertEqual(monitor.detected?.id, "claude-code")
+        // Stripping removes escapes and adds nothing: a cursor jump between
+        // the words leaves "claudecode", which is not the marker.
+        let apart = autoWithCustom()
+        apart.observe(bytes("claude\u{1B}[5Ccode\n"))
+        XCTAssertNil(apart.detected)
     }
 
     func testEmptyCandidatesDisablesDetection() {
