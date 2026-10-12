@@ -8,8 +8,8 @@ unreleased work accumulates at the top.
 - **Scroll trace (diagnostics):** Settings → Diagnostics → Scroll trace
   records, on this iPhone only, how each recent swipe was routed and what it
   sent, so a scroll that goes dead can be shared (share sheet or your
-  server's inbox) and diagnosed. On by default in TestFlight builds, off in
-  the App Store.
+  server's inbox) and diagnosed. TestFlight (beta) builds only, on by
+  default there; compiled out of App Store builds along with meshyy.
 - **meshyy transport (opt-in, beta):** a session can run over meshyy, a
   clean-room resumable terminal transport — a dropped connection resumes
   where it left off instead of reconnecting into a fresh shell. Typing
