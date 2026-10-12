@@ -52,11 +52,12 @@ What the user sees depends on whether the old path comes back:
 | **Healing hole**: a 4 s blackout that ends (Wi-Fi hiccup, elevator, a dead zone crossed) | 2 of 3 (this suite's runs 0, 3, 4) | **delivered late**, 5.4–5.6 s after the hole opened |
 | | 1 of 3 | **lost** |
 | | earlier, 2026-10-11, six runs (test-file record) | delivered late at 5.29–5.48 s three times, **lost** three times |
+| | later, 2026-10-12, four runs (mutation controls and post-review) | delivered late twice, **lost** twice |
 | The swipe after the redial | 3 of 3 | correct |
 
 - **Replica disagreement:** the meshyy replica suite delivered the healing-hole
   swipe late in every run: 10 of 10 at 4.0–4.8 s, and 4.4–5.7 s when it also
-  redialled the way the app does. The real app lost it 4 times in 9.
+  redialled the way the app does. The real app lost it 6 times in 13.
   The real app abandons the connection at heartbeat death and builds a new one, so
   whether the old connection's queued bytes leave before teardown is a race.
 - **Mouse off:** the swipe is not sent at all (route `native`, see §2), so its
@@ -87,7 +88,7 @@ Both match Aaron's original wording ("works inconsistently").
   switch opens one 3–4 s window. Network framework does not do QUIC connection
   migration, so every one is a full redial (`meshyy/docs/qa/known-debt.md`).
 - **At a desk on stable Wi-Fi:** rare. Mostly brief hiccups, where the swipe is
-  delivered late about half the time and lost the rest (4 of 9 lost).
+  delivered late about half the time and lost the rest (6 of 13 lost).
 - **Moving around:** several windows an hour. A swipe lands in one only if the
   user scrolls in those 3–4 s, which is likely right after unlocking the phone or
   walking into Wi-Fi range, the exact moments people pick a session back up.
