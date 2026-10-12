@@ -46,7 +46,7 @@ extension AgentProfile {
         id = try c.decode(String.self, forKey: .id)
         displayName = try c.decodeIfPresent(String.self, forKey: .displayName) ?? id
         detectionMarkers = try c.decodeIfPresent([String].self, forKey: .detectionMarkers) ?? []
-        attachTemplate = try c.decodeIfPresent(String.self, forKey: .attachTemplate) ?? "{path} "
+        attachTemplate = try c.decodeIfPresent(String.self, forKey: .attachTemplate) ?? Self.defaultAttachTemplate
         quietInterval = try c.decodeIfPresent(Double.self, forKey: .quietInterval)
         burstThreshold = try c.decodeIfPresent(Int.self, forKey: .burstThreshold)
         busyMarkers = try c.decodeIfPresent([String].self, forKey: .busyMarkers) ?? []
@@ -69,6 +69,11 @@ extension AgentProfile {
     /// never collide with a bundled asset name (`agent-<id>`).
     static let customIDPrefix = "custom-"
 
+    /// What the attach action types when a profile doesn't say otherwise.
+    static let defaultAttachTemplate = "{path} "
+    /// Longest attach text a custom agent may carry.
+    static let attachTemplateMaxLength = 200
+
     /// `^[a-z0-9-]{1,64}$`. The id keys the icon FILE NAME in the App Group
     /// (`AgentIcons/<id>.png`) and `Server.agentProfileID`, so anything
     /// path-like ("../x", "a/b") must never get in through an import.
@@ -76,6 +81,32 @@ extension AgentProfile {
         guard (1...64).contains(id.utf8.count) else { return false }
         return id.utf8.allSatisfy { byte in
             (0x61...0x7A).contains(byte) || (0x30...0x39).contains(byte) || byte == 0x2D
+        }
+    }
+
+    /// A valid id that also carries `customIDPrefix`. Required of every
+    /// custom agent, imported ones included: without the prefix an imported
+    /// "cursor" would turn into an override the day a release bundles a
+    /// built-in with that id, and "auto"/"none" would collide with the
+    /// agent pickers' mode tags (`SessionManager.resolveAgentCandidates`).
+    static func isValidCustomID(_ id: String) -> Bool {
+        isValidID(id) && id.hasPrefix(customIDPrefix) && id.count > customIDPrefix.count
+    }
+
+    /// A custom agent's attach text is TYPED into the terminal after an
+    /// upload, so it must not be able to run anything by itself: it has to
+    /// contain `{path}`, stay short, and carry no control characters at all
+    /// (no newline or carriage return to press Return, no ESC sequences, no
+    /// ^C). The user reads it on the prompt and presses Return themselves.
+    /// Built-in templates aren't held to this; they ship with the app (aider's
+    /// `/add {path}\n` submits on purpose).
+    static func isSafeCustomAttachTemplate(_ template: String) -> Bool {
+        guard template.contains("{path}"), template.count <= attachTemplateMaxLength else { return false }
+        return template.unicodeScalars.allSatisfy { scalar in
+            switch scalar.properties.generalCategory {
+            case .control, .lineSeparator, .paragraphSeparator: return false
+            default: return true
+            }
         }
     }
 

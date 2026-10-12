@@ -28,6 +28,9 @@ struct AgentEditorView: View {
     @State private var newBusyMarker = ""
     @State private var quietInterval: Double
     @State private var burstThreshold: Int
+    /// Shown, never hidden: it is typed into the terminal after an upload,
+    /// so whatever an imported file put here must be visible and editable.
+    @State private var attachTemplate: String
     @State private var showAdvanced: Bool
     @State private var icon: IconEdit = .unchanged
     @State private var showPhotos = false
@@ -48,9 +51,12 @@ struct AgentEditorView: View {
         _busyMarkers = State(initialValue: original?.busyMarkers ?? [])
         _quietInterval = State(initialValue: original?.quietInterval ?? AgentProfile.defaultQuietInterval)
         _burstThreshold = State(initialValue: original?.burstThreshold ?? AgentProfile.defaultBurstThreshold)
+        let template = original?.attachTemplate ?? AgentProfile.defaultAttachTemplate
+        _attachTemplate = State(initialValue: template)
         // Open Advanced when there is something non-default in it.
         _showAdvanced = State(initialValue: !(original?.busyMarkers.isEmpty ?? true)
-            || original?.quietInterval != nil || original?.burstThreshold != nil)
+            || original?.quietInterval != nil || original?.burstThreshold != nil
+            || template != AgentProfile.defaultAttachTemplate)
     }
 
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -243,12 +249,26 @@ struct AgentEditorView: View {
                     LabeledContent("Output that means working", value: "\(burstThreshold) bytes")
                 }
                 .accessibilityIdentifier("agentForm.burstThreshold")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Attach text")
+                        .font(.subheadline.weight(.medium))
+                    TextField("{path}", text: $attachTemplate)
+                        .font(.body.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("agentForm.attachTemplate")
+                    Text("Typed at the prompt when you attach a file; {path} becomes the uploaded file's path. a+Terminal never presses Return for you.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Button("Reset to Defaults") {
                     quietInterval = AgentProfile.defaultQuietInterval
                     burstThreshold = AgentProfile.defaultBurstThreshold
+                    attachTemplate = AgentProfile.defaultAttachTemplate
                 }
                 .disabled(quietInterval == AgentProfile.defaultQuietInterval
-                          && burstThreshold == AgentProfile.defaultBurstThreshold)
+                          && burstThreshold == AgentProfile.defaultBurstThreshold
+                          && attachTemplate == AgentProfile.defaultAttachTemplate)
                 .accessibilityIdentifier("agentForm.resetTiming")
             }
             .accessibilityIdentifier("agentForm.advanced")
@@ -314,12 +334,13 @@ struct AgentEditorView: View {
         // file and every server that picks this agent.
         var profile = original ?? createdID.flatMap { profiles.agent(id: $0) } ?? AgentProfile(
             id: AgentProfile.makeCustomID(displayName: trimmedName, avoiding: Set(profiles.agents.map(\.id))),
-            displayName: "", detectionMarkers: [], attachTemplate: "{path} ", builtIn: false)
+            displayName: "", detectionMarkers: [], attachTemplate: AgentProfile.defaultAttachTemplate, builtIn: false)
         profile.displayName = trimmedName
         profile.detectionMarkers = finalMarkers
         profile.busyMarkers = AgentProfile.normalizedMarkers(busyMarkers + [newBusyMarker])
         profile.quietInterval = quietInterval == AgentProfile.defaultQuietInterval ? nil : quietInterval
         profile.burstThreshold = burstThreshold == AgentProfile.defaultBurstThreshold ? nil : burstThreshold
+        profile.attachTemplate = attachTemplate.isEmpty ? AgentProfile.defaultAttachTemplate : attachTemplate
         do {
             try profiles.upsert(profile)
             if original == nil { createdID = profile.id }

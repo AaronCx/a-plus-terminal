@@ -52,6 +52,7 @@ final class ProfileStore {
         case duplicateID(String)
         case emptyName(String)
         case noDetectionMarkers(String)
+        case unsafeAttachTemplate(String)
         case userFileUnavailable
         case saveFailed(String)
 
@@ -62,7 +63,7 @@ final class ProfileStore {
             case .noAgents:
                 return "That file doesn't contain any agents."
             case .invalidID(let id):
-                return "The agent id \"\(id)\" isn't allowed. Ids use only lowercase letters, digits and hyphens, at most 64 characters."
+                return "The agent id \"\(id)\" isn't allowed. Custom agent ids start with \"custom-\" and use only lowercase letters, digits and hyphens, at most 64 characters."
             case .reservedID(let id):
                 return "\"\(id)\" is a built-in agent. Import only adds or updates custom agents."
             case .duplicateID(let id):
@@ -71,6 +72,8 @@ final class ProfileStore {
                 return "The agent \"\(id)\" has no name."
             case .noDetectionMarkers(let name):
                 return "\"\(name)\" has nothing to recognize it by. Add at least one command name or startup phrase."
+            case .unsafeAttachTemplate(let name):
+                return "\"\(name)\" has attach text that isn't allowed. It must include {path}, stay under \(AgentProfile.attachTemplateMaxLength) characters, and can't contain line breaks or control characters: a+Terminal types it at the prompt and never presses Return for you."
             case .userFileUnavailable:
                 return "Your saved agents couldn't be read right now, so nothing was changed. Try again after unlocking the device."
             case .saveFailed(let detail):
@@ -172,9 +175,13 @@ final class ProfileStore {
     /// Imports agents from a bundle file (`{"agents":[...]}`). Every agent is
     /// validated before anything is written: on error the store is exactly
     /// as it was. Id policy: an id that matches a BUILT-IN is refused (an
-    /// import cannot silently re-skin one); an id that matches an existing
-    /// custom agent REPLACES it, keeping its icon (re-importing an updated
-    /// export is the point); any other id is added.
+    /// import cannot silently re-skin one); every other id must carry the
+    /// "custom-" prefix (so no future built-in can collide with it, and the
+    /// pickers' "auto"/"none" tags can't be shadowed); an id that matches an
+    /// existing custom agent REPLACES it, keeping its icon (re-importing an
+    /// updated export is the point); any other id is added. Attach text is
+    /// held to `AgentProfile.isSafeCustomAttachTemplate`: a shared file must
+    /// never carry a command that runs on the user's server.
     @discardableResult
     func importBundle(_ data: Data) throws -> [AgentProfile] {
         let bundle: ProfileBundle
@@ -191,6 +198,7 @@ final class ProfileStore {
         for agent in bundle.agents {
             guard AgentProfile.isValidID(agent.id) else { throw ProfileError.invalidID(agent.id) }
             guard !bundledAgentIDs.contains(agent.id) else { throw ProfileError.reservedID(agent.id) }
+            guard AgentProfile.isValidCustomID(agent.id) else { throw ProfileError.invalidID(agent.id) }
             guard seen.insert(agent.id).inserted else { throw ProfileError.duplicateID(agent.id) }
             imported.append(try validated(agent))
         }
@@ -240,7 +248,7 @@ final class ProfileStore {
     // MARK: - Internals
 
     private func validated(_ agent: AgentProfile) throws -> AgentProfile {
-        guard AgentProfile.isValidID(agent.id) else { throw ProfileError.invalidID(agent.id) }
+        guard AgentProfile.isValidCustomID(agent.id) else { throw ProfileError.invalidID(agent.id) }
         var clean = agent.normalized()
         clean.builtIn = false
         guard !clean.displayName.isEmpty else { throw ProfileError.emptyName(agent.id) }
@@ -249,6 +257,9 @@ final class ProfileStore {
         // explicit-agent mode for whoever picks it.
         guard !clean.detectionMarkers.isEmpty else {
             throw ProfileError.noDetectionMarkers(clean.displayName)
+        }
+        guard AgentProfile.isSafeCustomAttachTemplate(clean.attachTemplate) else {
+            throw ProfileError.unsafeAttachTemplate(clean.displayName)
         }
         return clean
     }
@@ -275,7 +286,18 @@ final class ProfileStore {
     }
 
     private func applyMerge(bundled: ProfileBundle) {
-        let userAgents = userBundle.agents.map { var a = $0.normalized(); a.builtIn = false; return a }
+        let bundledIDs = Set(bundled.agents.map(\.id))
+        let userAgents = userBundle.agents.map { agent -> AgentProfile in
+            var a = agent.normalized()
+            a.builtIn = false
+            // Belt and braces for files that never went through `validated`
+            // (written by an older build, or by hand): a custom agent never
+            // gets attach text that could submit a command.
+            if !bundledIDs.contains(a.id), !AgentProfile.isSafeCustomAttachTemplate(a.attachTemplate) {
+                a.attachTemplate = AgentProfile.defaultAttachTemplate
+            }
+            return a
+        }
         let userMultiplexers = userBundle.multiplexers.map { var m = $0; m.builtIn = false; return m }
         agents = Self.merge(builtIn: bundled.agents, user: userAgents, id: \.id)
         multiplexers = Self.merge(builtIn: bundled.multiplexers, user: userMultiplexers, id: \.id)
