@@ -141,6 +141,75 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(skipped.detected?.id, "claude-code", "a cursor-forward over a space is still a space")
     }
 
+    // MARK: - Custom agents
+
+    private let fakeAgent = AgentProfile(
+        id: "custom-fake-agent-abc123", displayName: "Fake Agent",
+        detectionMarkers: ["fakeagent v1 ready", "fakeagent"], attachTemplate: "{path} ", builtIn: false)
+
+    private func autoWithCustom() -> AgentActivityMonitor {
+        AgentActivityMonitor(candidates: [claudeCode, hermes, generic, fakeAgent])
+    }
+
+    func testCustomMarkerLatchesCustomProfile() {
+        let monitor = autoWithCustom()
+        var changes = 0
+        monitor.onDetectedChange = { changes += 1 }
+        monitor.observe(bytes("FakeAgent v1 ready\n"))
+        XCTAssertEqual(monitor.detected?.id, "custom-fake-agent-abc123")
+        XCTAssertEqual(monitor.detected?.displayName, "Fake Agent")
+        XCTAssertEqual(changes, 1, "the latch is reported even though status never changed")
+        XCTAssertEqual(monitor.status, .none, "a short banner is not a working burst")
+    }
+
+    func testCommandNameMarkerMatchesThroughColorizedEcho() {
+        // zsh syntax highlighting re-draws the typed command with color codes
+        // spliced in; the raw bytes never contain "fakeagent" contiguously.
+        let monitor = autoWithCustom()
+        monitor.observe(bytes("\u{1B}[1m\u{1B}[32mfake\u{1B}[39m\u{1B}[0m\u{1B}[32magent\u{1B}[39m --serve"))
+        XCTAssertEqual(monitor.detected?.id, "custom-fake-agent-abc123")
+    }
+
+    func testColorizedMarkerSplitAcrossChunksStillLatches() {
+        var bannerOnly = fakeAgent
+        bannerOnly.detectionMarkers = ["fakeagent v1 ready"]
+        let monitor = AgentActivityMonitor(candidates: [claudeCode, generic, bannerOnly])
+        monitor.observe(bytes("\u{1B}[38;5;208mFake"))
+        monitor.observe(bytes("\u{1B}[0mAgent v1 re"))
+        XCTAssertNil(monitor.detected, "not yet: the banner is incomplete")
+        monitor.observe(bytes("ady\u{1B}[K\r\n"))
+        XCTAssertEqual(monitor.detected?.id, "custom-fake-agent-abc123")
+    }
+
+    func testBuiltInMarkerStillWinsAndStillNeedsItsOwnText() {
+        // A colored banner whose marker is contiguous in the raw bytes names
+        // the built-in exactly as before (the raw match decides it)…
+        let monitor = autoWithCustom()
+        monitor.observe(bytes("\u{1B}[1mClaude Code\u{1B}[0m v2\n"))
+        XCTAssertEqual(monitor.detected?.id, "claude-code")
+        // …and colored output that never SHOWS a marker names nothing.
+        let quiet = autoWithCustom()
+        quiet.observe(bytes("\u{1B}[31merror:\u{1B}[0m nothing here\n"))
+        XCTAssertNil(quiet.detected)
+    }
+
+    func testBuiltInMarkerSplitByAnEscapeMatchesWhatIsOnScreen() {
+        // Deliberate: the stripped match applies to every profile, built-ins
+        // included. The screen reads "claude code" even though a style reset
+        // sits between the words, and recognition follows what the user sees
+        // rather than holding built-ins to a stricter, byte-level rule.
+        let raw = "\u{1B}[1mclaude\u{1B}[0m code\n"
+        XCTAssertFalse(raw.lowercased().contains("claude code"), "precondition: no raw match")
+        let monitor = autoWithCustom()
+        monitor.observe(bytes(raw))
+        XCTAssertEqual(monitor.detected?.id, "claude-code")
+        // Stripping removes escapes and adds nothing: a cursor jump between
+        // the words leaves "claudecode", which is not the marker.
+        let apart = autoWithCustom()
+        apart.observe(bytes("claude\u{1B}[5Ccode\n"))
+        XCTAssertNil(apart.detected)
+    }
+
     func testEmptyCandidatesDisablesDetection() {
         let monitor = AgentActivityMonitor(candidates: [])
         monitor.observe(bytes("Claude Code\n"))
@@ -180,6 +249,26 @@ final class AgentActivityMonitorTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(monitor.status, .none)
         XCTAssertEqual(monitor.detected?.id, "claude-code", "explicit pick keeps its name")
+    }
+
+    func testACustomAgentsCommandNameInATypedArgumentUnlatches() async {
+        // The editor recommends the command name as a marker, so `man
+        // mytool` — echoed in zsh's syntax colors — latches the custom
+        // agent. Back at the prompt, with no burst in between, it must let go.
+        let mytool = AgentProfile(id: "custom-mytool-abc123", displayName: "mytool",
+                                  detectionMarkers: ["mytool"], attachTemplate: "{path} ", builtIn: false)
+        let monitor = AgentActivityMonitor(candidates: [claudeCode, mytool, generic], quietInterval: 0.1)
+        var detectedChanges = 0
+        monitor.onDetectedChange = { detectedChanges += 1 }
+        monitor.observe(bytes("\u{1B}[32mman\u{1B}[39m my\u{1B}[4mtool\u{1B}[24m\r\nNo manual entry for mytool\r\n"))
+        XCTAssertEqual(monitor.detected?.id, "custom-mytool-abc123")
+        XCTAssertEqual(monitor.status, .none)
+
+        monitor.observe(bytes("aaron@mini ~ % "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(monitor.detected, "a command name typed as an argument kept the custom agent latched")
+        XCTAssertFalse(monitor.hasRunningAgentEvidence, "its bell gate stayed open at a bare prompt")
+        XCTAssertEqual(detectedChanges, 2, "latch and un-latch must both reach the row icon and Live Activity")
     }
 
     func testAnEchoedCommandNameUnlatchesAtThePrompt() async {

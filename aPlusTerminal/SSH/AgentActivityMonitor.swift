@@ -26,9 +26,19 @@ final class AgentActivityMonitor {
     private(set) var status: Status = .none
     /// The profile whose marker last matched; nil under the generic heuristic.
     /// Drives the Live Activity label.
-    private(set) var detected: AgentProfile?
+    private(set) var detected: AgentProfile? {
+        didSet {
+            if oldValue?.id != detected?.id { onDetectedChange?() }
+        }
+    }
     /// Fired on every status transition (main actor).
     var onChange: (() -> Void)?
+    /// Fired when the latched agent changes (a marker names one, or an idle
+    /// prompt un-latches it). A name can latch with no status transition —
+    /// a quiet CLI prints its banner and waits — and the row icon and Live
+    /// Activity must still pick it up.
+    var onDetectedChange: (() -> Void)?
+
     /// Fired whenever the quiet timer finds the session sitting at a bare
     /// shell prompt — whatever was running there has exited. The session
     /// uses it to drop latches the monitor does not own (OSC 7501).
@@ -141,19 +151,27 @@ final class AgentActivityMonitor {
     }
 
     private func scanForMarker(_ bytes: [UInt8]) {
-        // Markers are matched against what the user SEES, not the raw bytes:
-        // tmux redraws only the cells that changed, so "Claude Code" arrives
-        // as `Claude C`, an attribute reset, `ode` — or with a cursor-forward
-        // where a space already sat. Raw matching left Claude Code inside
-        // tmux unnamed for its whole life.
-        let text = Self.stripANSI(String(decoding: carryBytes + bytes, as: UTF8.self)).lowercased()
+        // Markers are matched against what the user SEES as well as the raw
+        // bytes. tmux redraws only the cells that changed, so "Claude Code"
+        // arrives as `Claude C`, an attribute reset, `ode` — or with a
+        // cursor-forward where a space already sat — and a shell that
+        // colorizes input (zsh syntax highlighting) splices escape codes into
+        // the echo of a typed command, so a custom agent's command-name
+        // marker never appears contiguously in the raw bytes either. The raw
+        // text still counts: an escape whose end has not arrived yet (an OSC
+        // cut off by the read) makes the stripped text drop everything after
+        // it. Stripping only runs when the chunk has an escape.
+        let raw = String(decoding: carryBytes + bytes, as: UTF8.self)
+        let text = raw.lowercased()
+        let visible = raw.contains("\u{1B}") ? Self.stripANSI(raw).lowercased() : nil
         // Prefer the most specific (longest) matching marker. When one chunk
         // carries markers for two agents, this names the one whose marker
         // matched most specifically rather than whichever profile happens to
         // be first in file order.
         var best: (candidate: AgentProfile, length: Int)?
         for candidate in markerCandidates {
-            for marker in candidate.detectionMarkers where text.contains(marker) {
+            for marker in candidate.detectionMarkers
+            where text.contains(marker) || visible?.contains(marker) == true {
                 if best == nil || marker.count > best!.length {
                     best = (candidate, marker.count)
                 }
@@ -277,7 +295,7 @@ final class AgentActivityMonitor {
     }
 
     private func transition(to newStatus: Status) {
-        agentAlertLog.notice("monitor \(self.status.rawValue, privacy: .public)->\(newStatus.rawValue, privacy: .public) burst=\(self.burstBytes, privacy: .public) agent=\(self.detected?.id ?? "nil", privacy: .public)")
+        agentAlertLog.notice("monitor \(self.status.rawValue, privacy: .public)->\(newStatus.rawValue, privacy: .public) burst=\(self.burstBytes, privacy: .public) agent=\(self.detected.map { AgentProfile.logName(forID: $0.id) } ?? "nil", privacy: .public)")
         status = newStatus
         onChange?()
     }

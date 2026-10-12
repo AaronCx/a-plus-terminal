@@ -71,13 +71,14 @@ struct SettingsScreen: View {
                         }
                     }
                     Toggle("Agent icons", isOn: $settings.agentMascotIcons)
-                    NavigationLink("Custom agent icons") {
-                        CustomAgentIconsView()
+                    NavigationLink("Agents") {
+                        AgentsView()
                     }
+                    .accessibilityIdentifier("settings.agents")
                 } header: {
                     Text("Agent & Multiplexer")
                 } footer: {
-                    Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server. Agent icons: sessions and the Live Activity show the detected agent's icon instead of the terminal glyph. Agent names, icons and mascots are trademarks or artwork of their respective owners; a+Terminal is independent and not affiliated with, sponsored by, or endorsed by any of them.")
+                    Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server. Agents: add your own CLI tool with its own icon, or change a built-in agent's icon. Agent icons: sessions and the Live Activity show the detected agent's icon instead of the terminal glyph. Agent names, icons and mascots are trademarks or artwork of their respective owners; a+Terminal is independent and not affiliated with, sponsored by, or endorsed by any of them.")
                 }
 
                 NotificationSettingsSection()

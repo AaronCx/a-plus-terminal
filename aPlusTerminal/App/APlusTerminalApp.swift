@@ -30,7 +30,14 @@ struct APlusTerminalApp: App {
         let servers = ServerStore()
         let keys = KeyStore()
         let settings = AppSettings()
+        #if DEBUG
+        // Before the store loads, so seeded agents read like a normal launch.
+        TestSeed.prepareAgentsIfRequested()
+        #endif
         let profiles = ProfileStore()
+        // User icons never leave the device, including icons saved before
+        // every write excluded them from backup.
+        CustomAgentIconStore.excludeStoredIconsFromBackup()
         _theme = State(initialValue: theme)
         _servers = State(initialValue: servers)
         _keys = State(initialValue: keys)
@@ -185,6 +192,9 @@ struct RootTabView: View {
         .onChange(of: router.selectedTab) { old, new in
             deepLinkLog.debug("tabview: selection \(String(describing: old), privacy: .public) -> \(String(describing: new), privacy: .public)")
         }
+        #if DEBUG
+        .overlay(alignment: .topLeading) { TestSeedMarker() }
+        #endif
     }
 }
 

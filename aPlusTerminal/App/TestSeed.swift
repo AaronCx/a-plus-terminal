@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import SwiftUI
 
 /// DEBUG-only launch seeding for live UI tests: lets the test harness inject
 /// a server entry and SSH key via launch environment, so XCUITests can drive
@@ -83,6 +84,100 @@ enum TestSeed {
         return contents.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: - Custom agents
+
+    /// Agents UI tests: reset and/or seed the user profiles file and an icon.
+    /// Runs in `APlusTerminalApp.init` BEFORE `ProfileStore()` loads, so the
+    /// store reads the seeded state like any normal launch would.
+    ///
+    /// - `APLUSTERMINAL_TEST_RESET_AGENTS=1`: delete the user profiles file
+    ///   and every user icon (built-in overrides included).
+    /// - `APLUSTERMINAL_TEST_AGENT_PROFILES`: bundle JSON written verbatim as
+    ///   the user profiles file.
+    /// - `APLUSTERMINAL_TEST_AGENT_ICON_ID` plus either
+    ///   `APLUSTERMINAL_TEST_AGENT_ICON_FILE` (a bare file name in this app's
+    ///   Documents, placed with `simctl get_app_container`, like the VNC
+    ///   password) or `APLUSTERMINAL_TEST_AGENT_ICON_BASE64`: stored through
+    ///   `CustomAgentIconStore.save`, the same crop path a picked image takes.
+    ///
+    /// Empty values count as unset: the scheme forwards these as
+    /// `$(SETTING)`, which expands to "" when the runner didn't pass one.
+    ///
+    /// `APLUSTERMINAL_TEST_SEED_NONCE`: echoed back through `TestSeedMarker`
+    /// once every requested step above succeeded, so a UI test can PROVE this
+    /// launch applied its seed. Without that proof a launch that arrived
+    /// without its environment (seen on the simulator: the app came up with
+    /// none of the test's variables) ran on whatever an earlier run left on
+    /// disk, and a test could pass or fail for the wrong reason.
+    static func prepareAgentsIfRequested() {
+        let env = ProcessInfo.processInfo.environment
+        let fileURL = ProfileStore.defaultUserFileURL()
+        var succeeded = true
+        defer {
+            if let nonce = env["APLUSTERMINAL_TEST_SEED_NONCE"], !nonce.isEmpty {
+                agentSeedProof = succeeded ? nonce : "failed-\(nonce)"
+            }
+        }
+        if env["APLUSTERMINAL_TEST_RESET_AGENTS"] == "1" {
+            try? FileManager.default.removeItem(at: fileURL)
+            CustomAgentIconStore.removeAllForTesting()
+            print("TESTSEED: agents reset")
+        }
+        if let json = env["APLUSTERMINAL_TEST_AGENT_PROFILES"], !json.isEmpty {
+            do {
+                try FileManager.default.createDirectory(
+                    at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data(json.utf8).write(to: fileURL, options: .atomic)
+                print("TESTSEED: agent profiles seeded")
+            } catch {
+                succeeded = false
+                print("TESTSEED: agent profiles seed failed \(error)")
+            }
+        }
+        if let id = env["APLUSTERMINAL_TEST_AGENT_ICON_ID"], !id.isEmpty {
+            let data = fileFromContainer(named: env["APLUSTERMINAL_TEST_AGENT_ICON_FILE"])
+                ?? env["APLUSTERMINAL_TEST_AGENT_ICON_BASE64"].flatMap { Data(base64Encoded: $0) }
+            if let data, CustomAgentIconStore.save(data, for: id) {
+                print("TESTSEED: agent icon seeded for \(id)")
+            } else {
+                succeeded = false
+                print("TESTSEED: agent icon seed failed for \(id)")
+            }
+        }
+    }
+
+    /// The nonce `prepareAgentsIfRequested` applied this launch ("failed-"
+    /// prefixed when a step failed); nil when none was requested.
+    private(set) static var agentSeedProof: String?
+
+    /// True when the Agents screen should offer its "Import Test File" row.
+    static var agentImportTestFileRequested: Bool {
+        !(ProcessInfo.processInfo.environment["APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON"] ?? "").isEmpty
+    }
+
+    /// Writes `APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON` to a file and hands back
+    /// its URL, shaped like a fileImporter result — so a UI test drives the
+    /// exact import completion path (malformed JSON included) without the
+    /// system document picker, which XCUITest can't reliably drive.
+    static func agentImportTestFile() -> Result<URL, Error> {
+        let json = ProcessInfo.processInfo.environment["APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON"] ?? ""
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("agents-import-test.json")
+        do {
+            try Data(json.utf8).write(to: url, options: .atomic)
+            return .success(url)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// A bare file name in this app's Documents directory, read as data.
+    private static func fileFromContainer(named name: String?) -> Data? {
+        guard let name, !name.isEmpty, !name.contains("/"),
+              let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        else { return nil }
+        return try? Data(contentsOf: documents.appendingPathComponent(name))
+    }
+
     @MainActor
     static func applyIfRequested(servers: ServerStore, keys: KeyStore, router: DeepLinkRouter, settings: AppSettings? = nil) {
         let env = ProcessInfo.processInfo.environment
@@ -143,6 +238,22 @@ enum TestSeed {
                 print("TESTSEED: firing connect request for \(seeded.name)")
                 router.requestConnect(toServer: seeded.id)
             }
+        }
+    }
+}
+
+/// Invisible, untappable proof for UI tests that this launch applied its
+/// agents seed: a 1pt, nearly transparent label carrying the nonce, present
+/// only when a test asked for one. Overlaid on the root view, so it is in the
+/// accessibility tree whatever screen the app opens on.
+struct TestSeedMarker: View {
+    var body: some View {
+        if let proof = TestSeed.agentSeedProof {
+            Text(proof)
+                .font(.system(size: 1))
+                .opacity(0.02)
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("testSeed.agents")
         }
     }
 }

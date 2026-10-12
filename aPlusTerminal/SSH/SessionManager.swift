@@ -138,26 +138,44 @@ final class TerminalSession: Identifiable, Hashable {
 
     /// Log-safe agent name: a profile id this app knows. Under meshyy the
     /// id comes from the remote daemon, so one that matches no local
-    /// profile logs as "other" — never the remote's string.
+    /// profile logs as "other" — never the remote's string. A custom agent
+    /// logs as "custom" (its id carries the name the user typed).
     var agentLogName: String {
         guard let id = namedAgentID else { return speaksProgramStatus ? "osc7501" : "nil" }
-        return profiles.agent(id: id) != nil ? id : "other"
+        return profiles.agent(id: id) != nil ? AgentProfile.logName(forID: id) : "other"
+    }
+
+    /// Bumped whenever the monitor's status or latched agent changes. The
+    /// monitor is not observable, so without this a row that read the agent
+    /// icon/label kept whatever it last drew until something unrelated
+    /// redrew it. Read by the `effectiveAgent*` accessors to register the
+    /// dependency.
+    private(set) var agentPresentationRevision = 0
+
+    func agentPresentationDidChange() {
+        agentPresentationRevision &+= 1
     }
 
     /// Asset name for the detected agent's mascot mark, when one is detected.
+    /// A custom agent's name ("agent-custom-…") has no bundled asset; every
+    /// renderer resolves it through `CustomAgentIconStore.source`, which
+    /// falls back to the user's PNG, then the generic doodle.
     var effectiveAgentIconName: String? {
-        namedAgentID.map { "agent-\($0)" }
+        _ = agentPresentationRevision
+        return namedAgentID.map { "agent-\($0)" }
     }
 
     /// What the surfaces show: the daemon's read when there is one, the
     /// heuristic otherwise (the SSH path's fallback, per the brief).
     var effectiveAgentStatus: AgentActivityMonitor.Status {
+        _ = agentPresentationRevision
         #if MESHYY
         if usesMeshyy, let daemonAgentStatus { return daemonAgentStatus }
         #endif
         return agentMonitor.status
     }
     var effectiveAgentName: String? {
+        _ = agentPresentationRevision
         #if MESHYY
         if usesMeshyy, let daemonAgentName { return daemonAgentName }
         #endif
@@ -2188,8 +2206,15 @@ final class SessionManager {
             session?.pipInvalidate?()
         }
         session.agentMonitor.onChange = { [weak self, weak session] in
+            session?.agentPresentationDidChange()
             self?.refreshActivity()
             session?.pipInvalidate?()
+        }
+        // A marker can name the agent without any status transition; the
+        // row icon and the Live Activity's icon must follow it anyway.
+        session.agentMonitor.onDetectedChange = { [weak self, weak session] in
+            session?.agentPresentationDidChange()
+            self?.refreshActivity()
         }
         session.onShellExit = { [weak self, weak session] in
             guard let self, let session else { return }

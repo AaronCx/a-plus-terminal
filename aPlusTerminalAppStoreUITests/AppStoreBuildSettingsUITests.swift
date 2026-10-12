@@ -1,7 +1,7 @@
 import XCTest
 
 /// The App Store candidate's Settings has no meshyy anywhere, and no Scroll
-/// trace diagnostics either (brief 1.0.4 §1).
+/// trace diagnostics either (brief 1.0.4 §1) — but it does have Agents.
 ///
 /// Runs against `aPlusTerminalAppStore` — the target built WITHOUT the MESHYY
 /// condition — so this is the shipped Settings screen, not a runtime switch.
@@ -65,5 +65,23 @@ final class AppStoreBuildSettingsUITests: XCTestCase {
         for landmark in ["Capture console output", "Customize key bar", "Third-Party Notices"] {
             XCTAssertTrue(seen.contains(landmark), "walk never reached \"\(landmark)\"")
         }
+    }
+
+    /// Custom agents are not a meshyy feature: Settings → Agents ships in the
+    /// App Store build too, and opens onto a list that can add one.
+    func testSettingsHasTheAgentsScreen() throws {
+        let settingsTab = app.tabBars.buttons["Settings"]
+        XCTAssertTrue(settingsTab.waitForExistence(timeout: 10), "Settings tab present at launch")
+        settingsTab.tap()
+        let link = app.buttons["settings.agents"]
+        var swipes = 0
+        while !(link.exists && link.isHittable) && swipes < 6 {
+            app.swipeUp()
+            swipes += 1
+        }
+        XCTAssertTrue(link.waitForExistence(timeout: 5), "no Agents row in the App Store build's Settings")
+        link.tap()
+        XCTAssertTrue(app.navigationBars["Agents"].waitForExistence(timeout: 5), "the Agents screen did not open")
+        XCTAssertTrue(app.buttons["agents.add"].waitForExistence(timeout: 5), "the Agents screen has no Add Agent row")
     }
 }
