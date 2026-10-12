@@ -14,9 +14,15 @@ import XCTest
 /// filesystem in the simulator). The per-session floor is lowered to 0
 /// (`APLUSTERMINAL_TEST_ALERT_FLOOR`) so a repeat is counted, never masked.
 ///
-/// The terminal's text is not in the accessibility tree, so the shell mirrors
-/// its tmux pane into `~/.aplus-notifqa/pane.txt` on the host every half
-/// second; the simulator runner reads that file through the host filesystem.
+/// The terminal's text is not in the accessibility tree, so a relay script in
+/// the tmux session mirrors the pane into `~/.aplus-notifqa/pane.txt` every
+/// half second, and types what the runner drops into `keys.txt` with `tmux
+/// send-keys`. Only the two commands that start tmux and the relay go
+/// through the app's Paste button: the simulator's pasteboard is synced with
+/// the Mac's, so with other simulators running a paste can carry someone
+/// else's text (it did — mid-prompt), and the longer the app takes to go idle
+/// the wider that window. Claude Code keeps the app from idling, so every
+/// keystroke to it goes through the relay.
 ///
 /// Skipped unless `APLUSTERMINAL_LIVE_QA=1` — CI never runs it. Settings are
 /// UNPREFIXED; the scheme forwards them (see PreviewPortPickerUITests for why):
@@ -62,11 +68,14 @@ final class AgentNotificationLiveUITests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        guard let app, app.state == .runningForeground, app.buttons["Paste"].exists else { return }
-        // Quit Claude Code and remove only this suite's tmux session.
-        type("\u{03}", settle: 1)
-        type("\u{03}", settle: 1)
-        type("tmux kill-session -t \(Self.tmuxSession) 2>/dev/null\r", settle: 2)
+        guard app != nil else { return }
+        // Quit Claude Code and remove only this suite's tmux session; the
+        // relay exits with it.
+        if FileManager.default.fileExists(atPath: "\(qaPath)/pane.txt") {
+            send(key: "C-c")
+            send(key: "C-c")
+            send(key: "KILL")
+        }
     }
 
     // MARK: - Tests
@@ -100,6 +109,37 @@ final class AgentNotificationLiveUITests: XCTestCase {
                        "backgrounding an idle agent posted \(end.posts - start.posts) notification(s):\n\(timeline.joined(separator: "\n"))")
     }
 
+    /// A permission prompt that sits unanswered while the user is away is
+    /// the one thing Claude Code rings for inside a short background window
+    /// (~6 s after the prompt appears with no typing). Exactly one post.
+    func testAPermissionPromptWhileAwayNotifiesOnce() throws {
+        try? FileManager.default.removeItem(atPath: "\(qaPath)/marker")
+        try startIdleClaudeCode()
+        let start = try probe()
+        // Paste the request, then Enter on its own so the TUI sees a key.
+        send(text: "Run this exact shell command and nothing else: touch ~/\(Self.qaDir)/marker")
+        send(key: "Enter")
+        let asked = waitForPane(timeout: 90) { $0.contains("Do you want") }
+        XCTAssertTrue(asked, "Claude Code never asked for permission:\n\(paneText() ?? "")")
+        attach(text: paneText() ?? "", name: "permission-prompt")
+        // Leave right away: the bell comes ~6 s after the prompt appeared.
+        XCUIDevice.shared.press(.home)
+        sleep(20)
+        app.activate()
+        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 15), "never came back to the live session")
+        XCTAssertFalse(app.staticTexts["Session Paused"].exists,
+                       "the session was suspended before the bell could arrive")
+        let end = try probe()
+        attach(text: "start: \(start.summary)\nend: \(end.summary)", name: "probe")
+        shot("after-permission-away")
+        XCTAssertEqual(end.posts - start.posts, 1,
+                       "an unanswered permission prompt while away must notify exactly once (start \(start.summary), end \(end.summary))")
+        // Deny: Escape cancels the prompt; nothing was run.
+        send(key: "Escape")
+        sleep(2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: "\(qaPath)/marker"), "the denied command ran")
+    }
+
     // MARK: - Claude Code
 
     /// Opens the seeded server, starts tmux in the QA directory with a pane
@@ -109,17 +149,22 @@ final class AgentNotificationLiveUITests: XCTestCase {
         openSession()
         XCTAssertEqual(app.keyboards.count, 1,
                        "no software keyboard — backgrounding would not resize the pty, so this proves nothing")
-        let pane = "~/\(Self.qaDir)/pane.txt"
-        type("tmux kill-session -t \(Self.tmuxSession) 2>/dev/null; mkdir -p ~/\(Self.qaDir) && cd ~/\(Self.qaDir) && rm -f pane.txt && tmux new -s \(Self.tmuxSession)\r", settle: 4)
-        // The mirror ends itself when the tmux session goes away.
-        type("(while tmux has-session -t \(Self.tmuxSession) 2>/dev/null; do tmux capture-pane -p -t \(Self.tmuxSession) > \(pane).tmp 2>/dev/null && mv \(pane).tmp \(pane); sleep 0.5; done) >/dev/null 2>&1 &\r", settle: 2)
-        type("clear\r", settle: 1)
+        try writeRelayScript()
+        try? FileManager.default.removeItem(atPath: "\(qaPath)/pane.txt")
+        try? FileManager.default.removeItem(atPath: "\(qaPath)/keys.txt")
+        type("tmux kill-session -t \(Self.tmuxSession) 2>/dev/null; cd ~/\(Self.qaDir) && tmux new -s \(Self.tmuxSession)\r", settle: 4)
+        type("sh ~/\(Self.qaDir)/relay.sh >/dev/null 2>&1 &\r", settle: 2)
+        XCTAssertTrue(waitForPane(timeout: 15) { _ in true },
+                      "the tmux relay never started — a paste may have carried another simulator's pasteboard")
+        send(text: "clear")
+        send(key: "Enter")
         // Push notifications to a phone and Remote Control are account-level
         // features of the host's Claude Code; a test must never reach a
         // person's real devices, so they are off for this run only. `manual`
         // permission mode: the host may default to auto mode, which approves
         // commands without the prompt the permission test needs.
-        type("claude --model haiku --permission-mode manual --settings '{\"preferredNotifChannel\":\"terminal_bell\",\"agentPushNotifEnabled\":false,\"remoteControlAtStartup\":false}'\r", settle: 4)
+        send(text: "claude --model haiku --permission-mode manual --settings '{\"preferredNotifChannel\":\"terminal_bell\",\"agentPushNotifEnabled\":false,\"remoteControlAtStartup\":false}'")
+        send(key: "Enter")
 
         // Folder trust: a fresh directory asks once. Enter accepts the
         // highlighted "Yes, proceed".
@@ -129,12 +174,16 @@ final class AgentNotificationLiveUITests: XCTestCase {
         XCTAssertTrue(ready, "Claude Code never drew anything:\n\(paneText() ?? "<no pane mirror>")")
         if paneText()?.localizedCaseInsensitiveContains("trust") == true {
             attach(text: paneText() ?? "", name: "trust-dialog")
-            type("\r", settle: 4)
+            send(key: "Enter")
         }
         // Claude Code's idle footer: the TUI is up and sitting at its prompt.
         XCTAssertTrue(waitForPane(timeout: 60) { $0.contains("❯") && $0.contains("for agents") },
                       "Claude Code never reached its idle prompt:\n\(paneText() ?? "<no pane mirror>")")
         acceptNotificationPermissionIfAsked()
+        // The app must have NAMED the agent: a bell only notifies from a
+        // named agent, so zero posts from an unnamed one would prove nothing.
+        XCTAssertTrue(waitForProbe(timeout: 30) { $0.agent == "claude-code" },
+                      "the app never named Claude Code; probe=\((try? probe())?.summary ?? "?")")
         // Let the startup redraws and the first status-line tick settle.
         sleep(5)
         acceptNotificationPermissionIfAsked()
@@ -187,7 +236,55 @@ final class AgentNotificationLiveUITests: XCTestCase {
         return false
     }
 
-    // MARK: - Host pane mirror
+    // MARK: - Host relay (pane mirror + keystrokes)
+
+    /// The relay runs inside the tmux session's shell and ends with it.
+    /// `keys.txt` lines: `TEXT:<literal>` or `KEY:<tmux key name>`, or `KEY:KILL`
+    /// to end the session.
+    private func writeRelayScript() throws {
+        let session = Self.tmuxSession
+        let script = """
+        cd ~/\(Self.qaDir) || exit 1
+        while tmux has-session -t \(session) 2>/dev/null; do
+          tmux capture-pane -p -t \(session) > pane.tmp 2>/dev/null && mv pane.tmp pane.txt
+          if [ -f keys.txt ]; then
+            # Consume first: KILL ends this loop along with the session.
+            mv keys.txt keys.run
+            while IFS= read -r line; do
+              case "$line" in
+                KEY:KILL) tmux kill-session -t \(session) ;;
+                KEY:*) tmux send-keys -t \(session) "${line#KEY:}" ;;
+                TEXT:*) tmux send-keys -t \(session) -l "${line#TEXT:}" ;;
+              esac
+            done < keys.run
+            rm -f keys.run
+          fi
+          sleep 0.3
+        done
+
+        """
+        try script.write(toFile: "\(qaPath)/relay.sh", atomically: true, encoding: .utf8)
+    }
+
+    private func send(text: String) { relay("TEXT:\(text)") }
+    private func send(key: String) { relay("KEY:\(key)") }
+
+    /// Hands one line to the relay and waits until it has been typed.
+    private func relay(_ line: String) {
+        let keys = "\(qaPath)/keys.txt"
+        let deadline = Date().addingTimeInterval(10)
+        while FileManager.default.fileExists(atPath: keys), Date() < deadline {
+            usleep(100_000)
+        }
+        let staging = "\(qaPath)/keys.tmp"
+        try? (line + "\n").write(toFile: staging, atomically: true, encoding: .utf8)
+        _ = rename(staging, keys)
+        while FileManager.default.fileExists(atPath: keys), Date() < deadline {
+            usleep(100_000)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: keys), "the relay never typed: \(line)")
+        usleep(500_000)
+    }
 
     /// The host home directory, seen from inside the simulator.
     private var hostHome: String {
