@@ -113,7 +113,11 @@ final class CustomAgentsTests: XCTestCase {
         let damaged = Data("{\"agents\":[{\"id\":\"custom-x\",".utf8)
         try damaged.write(to: userURL)
         let store = ProfileStore(userFileURL: userURL)
-        XCTAssertNotNil(store.loadError, "a damaged file is reported, not silently dropped")
+        let message = try XCTUnwrap(store.loadError, "a damaged file is reported, not silently dropped")
+        // Application Support isn't browsable (no file sharing): the message
+        // must not send the user looking for the file in Files.
+        XCTAssertTrue(message.contains("kept on this device"), message)
+        XCTAssertFalse(message.contains("unreadable-"), "no internal file name: \(message)")
 
         let aside = try FileManager.default.contentsOfDirectory(atPath: dir.path)
             .filter { $0.hasPrefix("profiles.unreadable-") }

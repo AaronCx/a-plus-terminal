@@ -394,7 +394,9 @@ final class ProfileStore {
                 // Couldn't preserve it: refuse writes rather than overwrite.
                 return UserLoad(unreadable: true, error: "Your saved agents file is damaged and couldn't be set aside, so changes are disabled.")
             }
-            return UserLoad(error: "Your saved agents file was damaged and couldn't be loaded. It was kept as \(aside.lastPathComponent) in the app's files; agents you add now are saved fresh.")
+            // The copy sits in Application Support, which the user can't
+            // browse (no file sharing), so say it was kept, not where to look.
+            return UserLoad(error: "Your saved custom agents couldn't be loaded because the file was damaged. A copy of it was kept on this device, and agents you add now are saved fresh.")
         }
     }
 
