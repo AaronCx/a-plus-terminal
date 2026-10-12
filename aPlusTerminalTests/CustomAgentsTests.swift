@@ -269,6 +269,26 @@ final class CustomAgentsTests: XCTestCase {
         XCTAssertEqual(store.agent(id: "aider")?.attachTemplate, "/add {path}\n")
     }
 
+    /// The no-disk seam keeps the profiles it was given across writes; it
+    /// used to re-merge against the real bundle and list built-ins such as
+    /// codex as "custom".
+    func testInMemoryStoreKeepsInjectedProfilesAcrossWrites() throws {
+        let claude = AgentProfile(id: "claude-code", displayName: "Claude Code",
+                                  detectionMarkers: ["claude code"], attachTemplate: "{path} ")
+        let generic = AgentProfile(id: "generic", displayName: "Agent", detectionMarkers: [], attachTemplate: "{path} ")
+        let none = MultiplexerProfile(id: "none", displayName: "None (raw shell)")
+        let store = ProfileStore(agents: [generic, claude], multiplexers: [none])
+        try store.upsert(fakeAgent())
+        XCTAssertEqual(store.agents.map(\.id), ["generic", "claude-code", "custom-fake-agent-abc123"])
+        XCTAssertEqual(store.multiplexers.map(\.id), ["none"])
+        XCTAssertEqual(store.customAgents.map(\.id), ["custom-fake-agent-abc123"])
+        try store.importBundle(Data(#"{"agents":[{"id":"custom-two","displayName":"Two","detectionMarkers":["two"]}]}"#.utf8))
+        try store.deleteAgent(id: "custom-fake-agent-abc123")
+        store.reload()
+        XCTAssertEqual(store.agents.map(\.id), ["generic", "claude-code", "custom-two"])
+        XCTAssertNil(store.agent(id: "codex"), "the real bundle never leaks in")
+    }
+
     func testExportRoundTripsWithoutIcons() throws {
         let store = ProfileStore(userFileURL: userURL)
         var agent = fakeAgent()

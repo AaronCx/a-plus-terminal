@@ -94,21 +94,28 @@ final class ProfileStore {
     private var userFileUnreadable = false
     /// Nil for the in-memory test seam: nothing is read or written.
     private let userFileURL: URL?
+    /// The in-memory seam's built-ins, standing in for the app bundle so a
+    /// write (which re-merges) keeps the injected profiles. Nil normally.
+    private let bundledOverride: ProfileBundle?
 
     init(userFileURL: URL? = nil) {
         self.userFileURL = userFileURL ?? Self.defaultUserFileURL()
+        self.bundledOverride = nil
         reload()
     }
 
     /// Deterministic init with explicit profiles — used by tests and as a
     /// no-disk seeding path. Does not read the bundle or user file, and never
-    /// writes one.
+    /// writes one. Writes still work in memory, merged against THESE
+    /// built-ins rather than the bundled file.
     init(agents: [AgentProfile], multiplexers: [MultiplexerProfile]) {
         self.userFileURL = nil
+        let bundled = ProfileBundle(agents: agents.filter(\.builtIn), multiplexers: multiplexers)
+        self.bundledOverride = bundled
         self.agents = agents
         self.multiplexers = multiplexers
         self.userBundle = ProfileBundle(agents: agents.filter { !$0.builtIn })
-        self.bundledAgentIDs = Set(agents.filter(\.builtIn).map(\.id))
+        self.bundledAgentIDs = Set(bundled.agents.map(\.id))
     }
 
     func agent(id: String) -> AgentProfile? { agents.first { $0.id == id } }
@@ -129,7 +136,7 @@ final class ProfileStore {
 
     /// Built-ins from the bundle, overlaid with user entries (override by id).
     func reload() {
-        let bundled = Self.loadBundled()
+        let bundled = bundledProfiles()
         bundledAgentIDs = Set(bundled.agents.map(\.id))
         if let userFileURL {
             let loaded = Self.loadUser(from: userFileURL)
@@ -268,7 +275,7 @@ final class ProfileStore {
     private func commit(_ next: ProfileBundle) throws {
         try write(next)
         userBundle = next
-        applyMerge(bundled: Self.loadBundled())
+        applyMerge(bundled: bundledProfiles())
     }
 
     private func write(_ bundle: ProfileBundle) throws {
@@ -283,6 +290,10 @@ final class ProfileStore {
         } catch {
             throw ProfileError.saveFailed(error.localizedDescription)
         }
+    }
+
+    private func bundledProfiles() -> ProfileBundle {
+        bundledOverride ?? Self.loadBundled()
     }
 
     private func applyMerge(bundled: ProfileBundle) {
