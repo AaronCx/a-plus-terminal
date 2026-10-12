@@ -303,6 +303,15 @@ final class MeshyyTransport {
 
     // MARK: - Opening
 
+    /// Test seam for the SSH-as-oracle harness (ScrollOracleLiveTests): applied to
+    /// every bootstrap this type dials, right after validation — in `open` AND in
+    /// `reattach`, because a redial after a dead path re-bootstraps over SSH. It
+    /// lets a live test point the QUIC dial at a host-side UDP relay (meshyy-chaos)
+    /// in front of the real daemon, so a path drop can be applied to a real
+    /// TerminalSession. The relay forwards datagrams opaquely, so the cert pin is
+    /// untouched. Always nil in the app.
+    static var bootstrapRewriteForTesting: (@Sendable (inout BootstrapResponse) -> Void)?
+
     /// Opens a NEW session, named by the daemon: the lowest free slot in this server's
     /// group, allocated atomically where the sessions actually live. The one thing this
     /// can never do is land in a session that already belonged to someone — which is
@@ -357,13 +366,14 @@ final class MeshyyTransport {
             return .failure(.daemonAbsent)   // non-zero exit: no daemon here
         }
 
-        let response: BootstrapResponse
+        var response: BootstrapResponse
         do {
             response = try BootstrapResponse.parse(json)
             try response.validate()
         } catch {
             return .failure(.malformedBootstrap(error.localizedDescription))
         }
+        bootstrapRewriteForTesting?(&response)
 
         // Frames are additive (§5.3), so a NEWER daemon is fine; an older one may not
         // know a frame this client relies on.
@@ -440,13 +450,14 @@ final class MeshyyTransport {
         } catch {
             return .failure(.daemonAbsent)
         }
-        let response: BootstrapResponse
+        var response: BootstrapResponse
         do {
             response = try BootstrapResponse.parse(json)
             try response.validate()
         } catch {
             return .failure(.malformedBootstrap(error.localizedDescription))
         }
+        Self.bootstrapRewriteForTesting?(&response)
         guard response.protocol >= Meshyy.protocolVersion else {
             return .failure(.protocolTooOld(daemon: response.protocol, client: Meshyy.protocolVersion))
         }
