@@ -462,12 +462,22 @@ final class ScrollOracleLiveTests: XCTestCase {
         MeshyyTransport.bootstrapRewriteForTesting = { $0.port = firstPort }
 
         // Put the live session behind the relay: a reattach re-bootstraps, and
-        // the rewrite points its QUIC dial at the relay.
+        // the rewrite points its QUIC dial at the relay. Proven on the host, by
+        // the relay's own byte count: a rewrite that stopped applying would
+        // leave the session on the daemon's port and every leg below green for
+        // nothing.
+        let viaFirstBefore = try await relayBytesIn(first, control: control)
         await session.suspend()
         await session.reconnect(maxAttempts: 1)
         try require(session.state == .connected && session.meshyy != nil,
                     "could not reattach through the relay: \(session.lastError ?? "\(session.state)")")
         await settle(session, bench)
+        let viaFirstAfter = try await relayBytesIn(first, control: control)
+        // A QUIC Initial alone is 1200 bytes.
+        try require(viaFirstAfter - viaFirstBefore >= 1200, """
+            the reattach never dialled the relay (it forwarded \(viaFirstAfter - viaFirstBefore) bytes): \
+            bootstrapRewriteForTesting is not reaching the reattach bootstrap
+            """)
 
         // The healing hole's swipe fate is MEASURED, not asserted: on current code
         // it is a race, not a result. The app abandons the stalled connection when
@@ -479,11 +489,13 @@ final class ScrollOracleLiveTests: XCTestCase {
         // deterministic (the bytes left, the session recovers, the next swipe
         // scrolls) and the loss itself is asserted by path-change below, where
         // the old path never returns and the swipe is lost every time.
-        try await dropLeg("path-drop", session, bench, oracle: oracle, judgeSwipe: false, control: control) {
+        try await dropLeg("path-drop", session, bench, oracle: oracle, judgeSwipe: false,
+                          recoversVia: first, control: control) {
             _ = try await self.exec("kill -USR1 \(first.pid)", over: control)
         }
         let secondPort = second.port
-        try await dropLeg("path-change", session, bench, oracle: oracle, control: control) {
+        try await dropLeg("path-change", session, bench, oracle: oracle, recoversVia: second,
+                          control: control) {
             _ = try await self.exec("kill -STOP \(first.pid)", over: control)
             MeshyyTransport.bootstrapRewriteForTesting = { $0.port = secondPort }
         }
@@ -491,7 +503,8 @@ final class ScrollOracleLiveTests: XCTestCase {
 
     private func dropLeg(
         _ step: String, _ session: TerminalSession, _ bench: Bench, oracle: Swipe?,
-        judgeSwipe: Bool = true, control: SSHConnection, impair: () async throws -> Void
+        judgeSwipe: Bool = true, recoversVia relay: Relay, control: SSHConnection,
+        impair: () async throws -> Void
     ) async throws {
         let variant = bench.mouse ? "mouse-on" : "mouse-off"
         let transcript = try await preparePane(bench, program: .plain, control: control)
@@ -548,12 +561,27 @@ final class ScrollOracleLiveTests: XCTestCase {
             throw Failure("\(recovery) — state=\(session.state) meshyy=\(session.meshyy?.sessionName ?? "nil") "
                           + "unavailable=\(session.meshyyUnavailable ?? "nil") error=\(session.lastError ?? "nil")")
         }
-        // Proof the hole hit THIS connection: with heartbeats every second, a
-        // healthy session is never this quiet.
-        XCTAssertGreaterThanOrEqual(record?.msSinceLastInboundFrame ?? 0, 300, """
-            \(step): the impairment never reached the session's connection (inbound frames \
-            kept arriving) — the relay is not in the path, so this step tested nothing
+        let viaRelayRecovered = try await relayBytesIn(relay, control: control)
+        // Proof the hole hit THIS connection, three ways — any one alone can pass
+        // by luck (a healthy idle session with 1 s heartbeats is often 300+ ms
+        // quiet):
+        //  1. nothing came in from the moment the hole opened to the swipe (50 ms
+        //     of slack for a datagram already past the relay when it was told);
+        let reconnects = session.reconnectAttempts - reconnectsBefore
+        let holeAgeMs = record.map { Int($0.startedAt.timeIntervalSince(hole) * 1000) } ?? 0
+        XCTAssertGreaterThanOrEqual(holeAgeMs, 500, "\(step): the swipe went out before the hole was 0.5 s old")
+        XCTAssertGreaterThanOrEqual(record?.msSinceLastInboundFrame ?? 0, holeAgeMs - 50, """
+            \(step): an inbound frame arrived after the hole opened (\(holeAgeMs) ms before the \
+            swipe) — the impairment never reached the session's connection, so this step \
+            tested nothing
             """)
+        //  2. the tab noticed the path die and redialled;
+        XCTAssertGreaterThanOrEqual(reconnects, 1, """
+            \(step): the tab never redialled (timeline \(timeline.entries)) — the impairment \
+            never reached the session's connection
+            """)
+        XCTAssertTrue(timeline.entries.contains { $0.hasPrefix("reconnecting@") },
+                      "\(step): the tab never went through reconnecting: \(timeline.entries)")
         if judgeSwipe {
             judge(step, oracle, dropped, bench)
         } else if let oracle {
@@ -569,6 +597,15 @@ final class ScrollOracleLiveTests: XCTestCase {
         await settle(session, bench)
         judge("\(step)-after", oracle,
               try await swipe(session, "\(step)-after", bench, control: control), bench)
+        //  3. and the recovered session rides the relay this leg recovers
+        //     through: traffic since the recovery (heartbeats, the swipe above)
+        //     went through it. For path-change nothing else ever dials the second
+        //     relay, so this is proof the rewrite reached the redial's bootstrap.
+        let viaRelayAfter = try await relayBytesIn(relay, control: control)
+        XCTAssertGreaterThan(viaRelayAfter - viaRelayRecovered, 0, """
+            \(step): the recovered session is not riding the relay on port \(relay.port) \
+            (nothing through it since the recovery) — the redial bypassed it
+            """)
     }
 
     /// The tab's state changes through a path drop, timed from the hole.
@@ -627,6 +664,17 @@ final class ScrollOracleLiveTests: XCTestCase {
             return port != nil && pid != nil
         }
         return Relay(port: port!, pid: pid!, pidfile: pidfile, outfile: outfile)
+    }
+
+    /// Bytes the relay process has received, both directions, from the host's
+    /// per-process network accounting. Grows only while traffic rides it.
+    private func relayBytesIn(_ relay: Relay, control: SSHConnection) async throws -> Int {
+        let out = try await exec("nettop -P -L 1 -x -p \(relay.pid) -J bytes_in", over: control)
+        // ",bytes_in,\nmeshyy-chaos.<pid>,<n>,"
+        guard let row = out.split(separator: "\n").first(where: { $0.hasPrefix("meshyy-chaos.") }),
+              let bytes = row.split(separator: ",").dropFirst().first.flatMap({ Int($0) })
+        else { throw Failure("unreadable relay byte count: \(out.debugDescription)") }
+        return bytes
     }
 
     // MARK: - Judging
