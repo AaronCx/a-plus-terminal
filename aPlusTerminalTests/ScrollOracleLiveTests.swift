@@ -104,7 +104,6 @@ final class ScrollOracleLiveTests: XCTestCase {
         let liveSwipe = try await x10Swipe(first, log: meshyyLog)
 
         let second = try await relaunchMeshyy(first, server: server, control: control)
-        addTeardownBlock { await second.close() }
         await settle(second, armed: { $0.terminalView.getTerminal().mouseMode != .off })
         let meshyySwipe = try await x10Swipe(second, log: meshyyLog, after: liveSwipe.transcript)
 
@@ -440,15 +439,9 @@ final class ScrollOracleLiveTests: XCTestCase {
     private func pathDrop(
         _ session: TerminalSession, _ bench: Bench, oracle: Swipe?, control: SSHConnection
     ) async throws {
+        addTeardownBlock { @MainActor in MeshyyTransport.bootstrapRewriteForTesting = nil }
         let first = try await startRelay(bench, tag: "chaos-a", control: control)
         let second = try await startRelay(bench, tag: "chaos-b", control: control)
-        addTeardownBlock { @MainActor in
-            MeshyyTransport.bootstrapRewriteForTesting = nil
-            for relay in [first, second] {
-                _ = try? await self.exec("kill -9 \(relay.pid) 2>/dev/null; rm -f \(relay.pidfile) \(relay.outfile)",
-                                         over: control)
-            }
-        }
         // Stays installed (and the relay stays up) for the rest of the scenario:
         // the session's connection runs THROUGH the relay from here on, and
         // tearing it down mid-scenario would be an unplanned path drop.
@@ -596,6 +589,17 @@ final class ScrollOracleLiveTests: XCTestCase {
 
         let pidfile = "/tmp/\(bench.label)-\(tag).pid"
         let outfile = "/tmp/\(bench.label)-\(tag).out"
+        // Teardown BEFORE the launch: a launch whose exec errors after the fork,
+        // a port wait that times out, or a later step that throws must never
+        // leave a relay running. SIGKILL skips the relay's own pidfile cleanup,
+        // and the pkill catches one whose pidfile was never written (`[m]` so
+        // the pattern cannot match this teardown's own shell).
+        addTeardownBlock {
+            _ = try? await self.exec("kill -9 $(cat \(pidfile) 2>/dev/null) 2>/dev/null; "
+                                         + "pkill -9 -f '[m]eshyy-chaos udp .*--pidfile \(pidfile) '; "
+                                         + "rm -f \(pidfile) \(outfile)",
+                                     over: control)
+        }
         _ = try await exec("""
             nohup meshyy-chaos udp --target 127.0.0.1:\(daemonPort) --rtt 0 --listen 0 \
             --pidfile \(pidfile) --blackhole-on-usr1 4 > \(outfile) 2>&1 < /dev/null &
@@ -916,6 +920,10 @@ final class ScrollOracleLiveTests: XCTestCase {
         // An unlaid-out terminal is a 2x1 grid: lay it out like a phone screen.
         session.terminalView.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
         session.terminalView.layoutIfNeeded()
+        // Closed at teardown whatever path the test took — a failure mid-step
+        // must not leak a live Citadel connection or a meshyy heartbeat. close()
+        // is idempotent, so the explicit closes on the success path stay.
+        addTeardownBlock { await session.close() }
         return (session, entry)
     }
 
@@ -966,6 +974,14 @@ final class ScrollOracleLiveTests: XCTestCase {
             meshyy=\(fresh.meshyy?.sessionName ?? "nil") unavailable=\(fresh.meshyyUnavailable ?? "nil") \
             error=\(fresh.lastError ?? "nil")
             """)
+        // The predecessor is dead to the app (a killed process): release what it
+        // still holds. Safe for the daemon session `fresh` now rides — the old
+        // transport detached on suspend, so its shutdown has no connection to
+        // send on — and checked, because a close that ended it would make every
+        // later step test a dead tab.
+        await session.close()
+        try require(fresh.state == .connected && fresh.meshyy?.sessionName == name,
+                    "closing the suspended predecessor disturbed the resumed session \(name)")
         return fresh
     }
 
