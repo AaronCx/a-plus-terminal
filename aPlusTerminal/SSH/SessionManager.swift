@@ -231,7 +231,11 @@ final class TerminalSession: Identifiable, Hashable {
     /// Claude Code users the one setting that makes it ring.
     private func noteNamedAgent(_ agent: String) {
         requestAlertAuthorization()
-        if agent == "claude-code", !settings.notificationSetupCardShown {
+        // Runs per output chunk: write only on the edge, since an
+        // @Observable setter notifies observers even when the value is
+        // unchanged and would re-render the terminal screen every chunk.
+        if agent == "claude-code", !settings.notificationSetupCardShown,
+           !showNotificationSetupCard {
             showNotificationSetupCard = true
         }
     }
