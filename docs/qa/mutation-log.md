@@ -83,9 +83,10 @@ ScrollOracleLiveTests.swift:129: XCTAssertEqual failed: ("") is not equal to ("^
 ```
 
 **The tmux steps were measured, not assumed.** Under the mutant, both tmux
-scenarios passed. Every mouse-on step matched ssh (`via sgrWheel sent=36B`,
-`inMode=1 scroll=10`), and mouse-off claude-fullscreen matched (3 SGR
-wheel-ups). They hit the same 14 strict expected failures as the unmutated
+scenarios passed. Every mouse-on step except path-change (an expected
+failure: `inMode=0 … landed=never`, lost) and path-drop (measured, not
+asserted) matched ssh (`via sgrWheel sent=36B`, `inMode=1 scroll=10`), and
+mouse-off claude-fullscreen matched (3 SGR wheel-ups). They hit the same 14 strict expected failures as the unmutated
 baseline (`app-oracle-run4.log`), on the same seven steps:
 
 - mouse-off relaunch, reconnect-mid-burst, path-drop-after, path-change, path-change-after and claude-inline;
