@@ -18,8 +18,12 @@ import XCTest
 /// settings unprefixed to xcodebuild (the scheme forwards them):
 ///   xcodebuild test ... -only-testing:aPlusTerminalUITests/CustomAgentLiveUITests \
 ///     APLUSTERMINAL_LIVE_QA=1 \
-///     APLUSTERMINAL_TEST_SERVER='{"name":"LiveQA","host":"127.0.0.1","port":22,"username":"<user>"}' \
-///     APLUSTERMINAL_TEST_PRIVATE_KEY='<base64 OpenSSH pem>'
+///     APLUSTERMINAL_TEST_SERVER='{"name":"LiveQA","host":"127.0.0.1","port":22,"username":"<user>"}'
+/// The SSH key is NOT passed on that command line: xcodebuild echoes every
+/// build setting into its log, so a key handed over that way lands in every
+/// test log and transcript. This runner reads `~/.ssh/aplus_probe` from the
+/// host itself (the simulator shares the host filesystem) and hands it to
+/// the app through launchEnvironment, which xcodebuild does not echo.
 final class CustomAgentLiveUITests: XCTestCase {
     /// Unique per run: a launch that skipped its seed can't pass on an agent
     /// (and icon) an earlier run left behind.
@@ -33,8 +37,7 @@ final class CustomAgentLiveUITests: XCTestCase {
         // Opted in: from here on, a missing input is a FAILURE, never a skip.
         let server = try XCTUnwrap(env["APLUSTERMINAL_TEST_SERVER"].flatMap { $0.isEmpty ? nil : $0 },
                                    "APLUSTERMINAL_TEST_SERVER not forwarded to the runner")
-        let key = try XCTUnwrap(env["APLUSTERMINAL_TEST_PRIVATE_KEY"].flatMap { $0.isEmpty ? nil : $0 },
-                                "APLUSTERMINAL_TEST_PRIVATE_KEY not forwarded to the runner")
+        let key = try Self.probeKeyBase64(env: env)
 
         app = XCUIApplication()
         app.launchEnvironment["APLUSTERMINAL_TEST_SERVER"] = server
@@ -51,6 +54,21 @@ final class CustomAgentLiveUITests: XCTestCase {
 
     override func tearDownWithError() throws {
         app?.terminate()
+    }
+
+    /// The probe key as TestSeed wants it (base64 of the OpenSSH file), read
+    /// straight from the host's `~/.ssh/aplus_probe`. A key given the old way,
+    /// as a build setting, still wins, but that way echoes it into the log.
+    private static func probeKeyBase64(env: [String: String]) throws -> String {
+        if let legacy = env["APLUSTERMINAL_TEST_PRIVATE_KEY"], !legacy.isEmpty { return legacy }
+        var home = env["SIMULATOR_HOST_HOME"] ?? NSHomeDirectory()
+        if env["SIMULATOR_HOST_HOME"] == nil, let range = home.range(of: "/Library/Developer/") {
+            home = String(home[..<range.lowerBound])
+        }
+        let path = "\(home)/.ssh/aplus_probe"
+        let data = try XCTUnwrap(FileManager.default.contents(atPath: path),
+                                 "no probe key at \(path) — live QA needs it to log in to this Mac")
+        return data.base64EncodedString()
     }
 
     /// Non-square on purpose (the store must crop it), and loud enough to
