@@ -8,7 +8,7 @@ DEST := platform=iOS Simulator,name=$(SIM_NAME)
 
 XCBUILD := xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal -destination '$(DEST)'
 
-.PHONY: generate build test test-meshyy-live clean
+.PHONY: generate build test test-meshyy-live test-scroll-oracle clean
 
 generate:
 	xcodegen generate
@@ -35,6 +35,20 @@ test-meshyy-live: generate
 	  -only-testing:aPlusTerminalTests/MeshyySessionPileUpTests \
 	  -only-testing:aPlusTerminalTests/MeshyyResizeAtConnectTests \
 	  -only-testing:aPlusTerminalTests/MeshyySurvivorFlowTests
+
+# SSH as the oracle for swipe-to-scroll (aPlusTerminalTests/ScrollOracleLiveTests):
+# real swipes through the real ScrollBridge over a real SSH pty AND over the real
+# launchd meshyyd, judged by what an isolated tmux actually did. Needs this Mac's
+# sshd, tmux, and the host UDP relay for the path-drop step:
+#   cd ../meshyy && swift build --product meshyy-chaos && cp .build/debug/meshyy-chaos ~/bin/
+# Same order as test-meshyy-live: build, then fixtures, then run. Skips on CI
+# (no /tmp/aplus-probe-* fixtures); FAILS on a dev Mac whose setup is broken.
+test-scroll-oracle: generate
+	@test -x $(HOME)/bin/meshyy-chaos || { echo "~/bin/meshyy-chaos missing (see the comment above this target)" >&2; exit 1; }
+	$(XCBUILD) build-for-testing
+	./scripts/meshyy-repro-setup.sh
+	$(XCBUILD) test-without-building \
+	  -only-testing:aPlusTerminalTests/ScrollOracleLiveTests
 
 clean:
 	rm -rf aPlusTerminal.xcodeproj build DerivedData
