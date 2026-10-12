@@ -102,10 +102,11 @@ final class AgentAlertCenter: NSObject {
         #endif
     }
 
-    /// Called the first time an agent is DETECTED in any session — the moment
-    /// notifications become meaningful, which is the sensible ask. Asking at
-    /// first launch would be a permission dialog about a feature the user has
-    /// not seen exist.
+    /// Called the first time an agent is DETECTED in any session — a profile
+    /// marker matched, or a program announced itself over OSC 7501 — the
+    /// moment notifications become meaningful, which is the sensible ask.
+    /// Asking at first launch would be a permission dialog about a feature
+    /// the user has not seen exist.
     func agentDetected() {
         guard !authorizationRequested else { return }
         authorizationRequested = true

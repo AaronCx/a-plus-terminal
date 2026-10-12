@@ -195,6 +195,11 @@ final class TerminalSession: Identifiable, Hashable {
     @ObservationIgnored var appIsActive: () -> Bool = {
         UIApplication.shared.applicationState == .active
     }
+    /// Asks for notification permission (once per process, in the shell).
+    /// A seam so tests can see WHEN it is asked without a system dialog.
+    @ObservationIgnored var requestAlertAuthorization: () -> Void = {
+        AgentAlertCenter.shared.agentDetected()
+    }
 
     /// Every observed agent-status change funnels here — from the SSH byte
     /// heuristic and from meshyy's daemon events alike. It NEVER posts a
@@ -219,7 +224,7 @@ final class TerminalSession: Identifiable, Hashable {
     /// meaningful, so ask for permission now (once per process), and show
     /// Claude Code users the one setting that makes it ring.
     private func noteNamedAgent(_ agent: String) {
-        AgentAlertCenter.shared.agentDetected()
+        requestAlertAuthorization()
         if agent == "claude-code", !settings.notificationSetupCardShown {
             settings.notificationSetupCardShown = true
             showNotificationSetupCard = true
@@ -659,7 +664,14 @@ final class TerminalSession: Identifiable, Hashable {
                 case .record(let record):
                     // A root `clear` is the program withdrawing all its
                     // records — it is leaving; a later shell bell is not its.
-                    self.speaksProgramStatus = !(record.state == .clear && record.id == nil)
+                    let speaks = !(record.state == .clear && record.id == nil)
+                    // It may post without ever matching a profile marker, so
+                    // the permission ask cannot wait for a named agent —
+                    // unasked, its first `blocked` would be dropped silently.
+                    if speaks, !self.speaksProgramStatus {
+                        self.requestAlertAuthorization()
+                    }
+                    self.speaksProgramStatus = speaks
                     self.noteAgentSignal(.programStatus(record))
                 case nil:
                     break

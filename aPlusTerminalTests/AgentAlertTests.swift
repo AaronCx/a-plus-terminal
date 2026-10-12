@@ -64,7 +64,7 @@ final class AgentTransitionTests: XCTestCase {
     private func bareSession(agents: [AgentProfile] = []) -> TerminalSession {
         let temporary = FileManager.default.temporaryDirectory
         let suffix = UUID().uuidString
-        return TerminalSession(
+        let session = TerminalSession(
             server: Server(name: "t", host: "127.0.0.1", username: "t"),
             keyStore: KeyStore(
                 secrets: InMemorySecretStore(),
@@ -80,6 +80,8 @@ final class AgentTransitionTests: XCTestCase {
                 multiplexers: [MultiplexerProfile(id: "none", displayName: "None (raw shell)")]
             )
         )
+        session.requestAlertAuthorization = {}
+        return session
     }
 
     /// A session where Claude Code's banner has been seen, recording posts.
@@ -298,13 +300,19 @@ final class AgentTransitionTests: XCTestCase {
         // No marker match needed: a program speaking 7501 announced itself.
         let session = bareSession(agents: [claudeCode, generic])
         var fired: [AgentAlertPolicy.Trigger] = []
+        var permissionAsks = 0
         session.postAgentAlert = { fired.append($0) }
+        session.requestAlertAuthorization = { permissionAsks += 1 }
         XCTAssertNil(session.namedAgentID)
 
         feed(session, "\u{1B}]7501;state=working:app=claude-code:progress=10\u{07}")
+        // It can post without ever being named, so permission is asked now —
+        // unasked, its first `blocked` would be dropped by iOS.
+        XCTAssertEqual(permissionAsks, 1, "a 7501 speaker never triggered the notification permission ask")
         feed(session, "\u{1B}]7501;state=idle:app=claude-code\u{07}")
         XCTAssertEqual(fired, [], "status updates are not requests")
         XCTAssertTrue(session.speaksProgramStatus)
+        XCTAssertEqual(permissionAsks, 1, "asked again on every record")
 
         feed(session, "\u{1B}]7501;state=blocked:app=claude-code:kind=permission\u{1B}\\")
         XCTAssertEqual(fired, [.blocked(kind: "permission")])
