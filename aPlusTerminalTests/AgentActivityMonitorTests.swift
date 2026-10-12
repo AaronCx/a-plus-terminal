@@ -127,6 +127,20 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.detected?.id, "claude-code", "markers split across reads still name the agent")
     }
 
+    func testMarkerSplicedByATmuxRedrawStillNamesAgent() {
+        // Captured from a+Terminal inside tmux: the redraw only rewrote the
+        // cells that changed, so the banner arrived with an attribute reset
+        // and a charset designation in the middle of the marker, and a
+        // cursor-forward where a space already sat.
+        let monitor = autoMonitor()
+        monitor.observe(bytes("\u{1B}[2;12H\u{1B}[1mClaude C\u{1B}(B\u{1B}[m\u{1B}[1mode\u{1B}[C\u{1B}(B\u{1B}[m"))
+        XCTAssertEqual(monitor.detected?.id, "claude-code")
+
+        let skipped = autoMonitor()
+        skipped.observe(bytes("\u{1B}[1mClaude\u{1B}[CCode\u{1B}[m v2"))
+        XCTAssertEqual(skipped.detected?.id, "claude-code", "a cursor-forward over a space is still a space")
+    }
+
     func testEmptyCandidatesDisablesDetection() {
         let monitor = AgentActivityMonitor(candidates: [])
         monitor.observe(bytes("Claude Code\n"))
@@ -168,6 +182,49 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.detected?.id, "claude-code", "explicit pick keeps its name")
     }
 
+    func testAnEchoedCommandNameUnlatchesAtThePrompt() async {
+        // A command-name marker matches the shell echoing a line that only
+        // mentions it. The echo is too short to leave `.none`, and the
+        // un-latch used to run only after a status change — so the name
+        // (and its icon, and the bell gate) stuck until a later burst.
+        let monitor = autoMonitor(quietInterval: 0.1)
+        var changes = 0
+        monitor.onChange = { changes += 1 }
+        monitor.observe(bytes("cd hermes-repo\r\n"))
+        XCTAssertEqual(monitor.detected?.id, "hermes", "the echo latches the marker")
+        XCTAssertEqual(monitor.status, .none, "a short echo never reads as working")
+        XCTAssertTrue(monitor.hasRunningAgentEvidence)
+
+        monitor.observe(bytes("aaron@mini hermes-repo % "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(monitor.detected, "an echo-latched name must un-latch at the idle prompt")
+        XCTAssertFalse(monitor.hasRunningAgentEvidence)
+        XCTAssertEqual(changes, 1, "the un-latch must tell the surfaces showing the icon")
+    }
+
+    func testExplicitPickIsEvidenceOnlyWhileActive() async {
+        let monitor = explicitMonitor(quietInterval: 0.1)
+        XCTAssertFalse(monitor.hasRunningAgentEvidence, "named up front is not running")
+        monitor.observe(bytes(String(repeating: "x", count: 300)))
+        XCTAssertTrue(monitor.hasRunningAgentEvidence)
+        monitor.observe(bytes("\r\nmini# "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(monitor.detected?.id, "claude-code")
+        XCTAssertFalse(monitor.hasRunningAgentEvidence, "back at a bare shell prompt")
+    }
+
+    func testDetectionOffStillReportsTheIdlePrompt() async {
+        // With no candidates the heuristic is off, but an OSC 7501 speaker
+        // can still latch the session; it needs to hear the shell is back.
+        let monitor = AgentActivityMonitor(candidates: [], quietInterval: 0.1)
+        var prompts = 0
+        monitor.onIdleShellPrompt = { prompts += 1 }
+        monitor.observe(bytes("\r\naaron@mini ~ % "))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(prompts, 1)
+        XCTAssertEqual(monitor.status, .none)
+    }
+
     func testWaitingClearsWhenAgentExitsToPrompt() async {
         let monitor = explicitMonitor(quietInterval: 0.1)
         monitor.observe(bytes(String(repeating: "agent output ", count: 50)))
@@ -202,6 +259,7 @@ final class AgentActivityMonitorTests: XCTestCase {
         XCTAssertEqual(
             AgentActivityMonitor.stripANSI("\u{1B}]0;title\u{07}hi \u{1B}[1;32mthere\u{1B}[0m"),
             "hi there")
+        XCTAssertEqual(AgentActivityMonitor.stripANSI("a\u{1B}[3Cb\u{1B}(Bc\u{1B})0d"), "a   bcd")
     }
 
     func testEndsAtShellPromptTerminators() {

@@ -30,6 +30,25 @@ final class TerminalEmulatorView: TerminalView {
         super.insertText(text)
     }
 
+    /// True while the emulator itself is writing to the pty. In SwiftTerm
+    /// 1.13.0 every such write — a reply to a query in the output (DA, DSR
+    /// and cursor position, mode reports, colors, window ops, kitty
+    /// keyboard flags and graphics), a mode-1004 focus report, or a mouse
+    /// report — goes through `Terminal.sendResponse` / `setTerminalFocus` to
+    /// this `send(source:data:)`. Typing (soft and hardware keyboard, kitty
+    /// encoding included), paste, dictation and the accessory keys go
+    /// through the view's `send(data:)` and never set it. Marked HERE, the
+    /// one funnel, rather than around the pumps' `feed` calls, so no output
+    /// path can forget to mark its replies. A SwiftTerm bump must re-check
+    /// that split.
+    private(set) var isEmulatorWriting = false
+
+    override func send(source: Terminal, data: ArraySlice<UInt8>) {
+        isEmulatorWriting = true
+        defer { isEmulatorWriting = false }
+        super.send(source: source, data: data)
+    }
+
     override func addGestureRecognizer(_ gestureRecognizer: UIGestureRecognizer) {
         super.addGestureRecognizer(gestureRecognizer)
         if let priorityPan, gestureRecognizer !== priorityPan,

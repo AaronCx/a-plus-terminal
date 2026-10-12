@@ -263,6 +263,10 @@ schemes:
         APLUSTERMINAL_SHOT_PORT: $(APLUSTERMINAL_SHOT_PORT)
         APLUSTERMINAL_TEST_VNC_SERVER: $(APLUSTERMINAL_TEST_VNC_SERVER)
         APLUSTERMINAL_TEST_VNC_PASSWORD: $(APLUSTERMINAL_TEST_VNC_PASSWORD)
+        # Agent-notification live tests: the DEBUG alert probe and a floor
+        # override (seconds) so repeated posts are counted, not rate-limited.
+        APLUSTERMINAL_TEST_ALERT_PROBE: $(APLUSTERMINAL_TEST_ALERT_PROBE)
+        APLUSTERMINAL_TEST_ALERT_FLOOR: $(APLUSTERMINAL_TEST_ALERT_FLOOR)
       targets:
         - aPlusTerminalTests
         - aPlusTerminalUITests

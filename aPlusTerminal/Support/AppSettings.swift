@@ -124,6 +124,12 @@ final class AppSettings {
     }
     #endif
 
+    /// The one-time "how to get notified" card has been shown (it raises the
+    /// first time Claude Code is detected; Settings keeps it reachable).
+    var notificationSetupCardShown: Bool {
+        didSet { defaults.set(notificationSetupCardShown, forKey: Keys.notificationSetupCardShown) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -166,6 +172,7 @@ final class AppSettings {
             ?? false
         #endif
         #endif
+        self.notificationSetupCardShown = defaults.bool(forKey: Keys.notificationSetupCardShown)
     }
 
     private enum Keys {
@@ -185,6 +192,7 @@ final class AppSettings {
         static let scrollTraceOverride = "scrollTraceEnabled"
         static let scrollTraceChannelDefault = "scrollTraceChannelDefault"
         #endif
+        static let notificationSetupCardShown = "notificationSetupCardShown"
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"

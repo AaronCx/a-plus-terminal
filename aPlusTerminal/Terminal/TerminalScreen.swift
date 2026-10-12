@@ -34,6 +34,16 @@ struct TerminalScreen: View {
                     }
                     Spacer()
                 }
+            } else if session.showNotificationSetupCard {
+                VStack {
+                    NotificationSetupCard {
+                        session.showNotificationSetupCard = false
+                    }
+                    .onAppear {
+                        sessionManager.notificationSetupCardAppeared(in: session)
+                    }
+                    Spacer()
+                }
             }
 
             switch session.state {
@@ -193,6 +203,20 @@ struct TerminalScreen: View {
             if phase == .active {
                 session.markViewed()
             }
+            #if DEBUG
+            // Live notification tests: on a device, leaving the app hides
+            // the keyboard — the pty grows and the agent repaints as the app
+            // goes. The simulator does not do that reliably, so the test
+            // asks for it: a real dismissal (and refocus on return), never a
+            // synthetic resize.
+            if AgentAlertProbe.shared.hidesKeyboardOnLeave {
+                switch phase {
+                case .inactive: session.bridge.dismissKeyboard()
+                case .active: session.bridge.focus()
+                default: break
+                }
+            }
+            #endif
         }
         .onChange(of: session.pendingPreviewPort) { _, port in
             // A loopback OSC 8 link was tapped in the terminal. Consume the

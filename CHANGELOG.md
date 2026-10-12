@@ -15,20 +15,31 @@ unreleased work accumulates at the top.
   where it left off instead of reconnecting into a fresh shell. Typing
   `exit` closes the tab like a real terminal, and a resumed terminal
   re-learns the running program's input modes, so tmux scrolling still
-  works after an auto-resume. Off by default. (#131, #137)
-- **Agent notifications:** the phone tells you when an agent is waiting on
-  an answer, and one tap answers it from a quick-actions palette. A wait
-  you have already seen stays quiet until you answer, and quiet output is
-  no longer mistaken for "waiting". Agent status is surfaced where you
-  are already looking. (#132, #138, #139, #140, #143, #149)
+  works after an auto-resume. While an agent waits, a one-tap palette
+  answers it, and tapping an agent notification no longer races a meshyy
+  connect into a crash. Off by default. (#131, #132, #137, #138, #142)
+- **Agent notifications:** the phone tells you when an agent asks for
+  you — only when the agent itself signals it (the terminal bell, or an
+  OSC 9 / OSC 777 / OSC 7501 notification sequence), never by guessing
+  from its output, so leaving the app no longer produces a notification.
+  Claude Code needs one setting on the server, which a one-time card
+  (also in Settings → Notifications) shows with a Copy button; Settings
+  also sends a test notification. A ring you have already seen stays
+  quiet until you answer. Notifications arrive only while a+Terminal is
+  still running: briefly after you leave it, or while a pop-out keeps it
+  running. A pop-out of a session's terminal mutes that session, since
+  you are already watching it. Claude Code's "finished" ring comes about
+  a minute after a turn, so it usually arrives only while a pop-out keeps
+  the app running. Agent status is surfaced where you are already
+  looking.
+  (#139, #140, #143, #149)
 - **Sessions widget:** a home-screen widget that lists live sessions and
   opens exactly the session it shows. (#135, #136)
 - **Agent icons:** agents get their real faces across the app, with a
   hand-drawn doodle set as the default and support for custom icons,
   sized to fit the Dynamic Island. (#143, #144, #145, #146, #148)
 - **Fixes:** returning from a preview refocuses the terminal program, and
-  the Sessions widget orders sessions correctly (#136); tapping an agent
-  notification no longer races connect into a crash (#142); scrolling is
+  the Sessions widget orders sessions correctly (#136); scrolling is
   consistent and alerts are honest about state (#145); the session picker
   keeps its payload and a swipe stays off the status line (#147).
 
