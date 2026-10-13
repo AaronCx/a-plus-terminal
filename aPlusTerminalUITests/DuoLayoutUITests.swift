@@ -1,19 +1,25 @@
 import XCTest
 
 /// iPhone Duo (the foldable): the app fills the inner display instead of
-/// running letterboxed, a live terminal re-sizes its grid to the display it is
-/// on, and folding and unfolding mid-session keeps the session and resizes
-/// the pty the server sees.
+/// running letterboxed, and a live terminal re-sizes the pty the server sees
+/// when the window changes shape mid-session.
 ///
 /// Runs on CI only, from `.github/workflows/duo.yml` on the iPhone Duo
 /// simulator built with the iOS 27.1 SDK. That job starts a throwaway
 /// loopback sshd (`scripts/duo-ci-sshd.sh`) whose login writes the pty size
-/// the SERVER sees to `~/.aplus-duo/grid.txt`, and a host-side pose driver
-/// (`scripts/duo-pose-driver.sh`) that folds and unfolds the simulator when
-/// this test asks through `~/.aplus-duo/pose-request` — XCUITest itself cannot
-/// fold a device. The simulator shares the host filesystem, so the seed, the
-/// key and the grid all come from files and nothing secret crosses a build
-/// setting.
+/// the SERVER sees to `~/.aplus-duo/grid.txt`, and a host-side capture helper
+/// (`scripts/duo-capture.sh`) that screenshots both Duo displays and
+/// reports their pixel sizes when this test asks through
+/// `~/.aplus-duo/pose-request`. The simulator shares the host filesystem, so
+/// the seed, the key and the grid all come from files and nothing secret
+/// crosses a build setting.
+///
+/// The fold itself is NOT driven: the only fold control the Xcode 27.1
+/// simulator exposes to a script is `simctl io screenConfig --display=N power`,
+/// and switching a Duo panel off wedged the CI runner every time it was tried
+/// (the job and its logs never came back). The grid test changes the window's
+/// shape by rotating the inner display instead — the same resize path a fold
+/// takes (the window changes size under a live session).
 ///
 /// Skipped unless the runner passes `APLUSTERMINAL_DUO=1`; the workflow then
 /// checks the result bundle, so a skip there fails the job instead of passing.
@@ -42,7 +48,7 @@ final class DuoLayoutUITests: XCTestCase {
             }
             return false
         }
-        try pose("unfolded")
+        XCUIDevice.shared.orientation = .portrait
         app.launch()
         // On Xcode 26 a launch has intermittently arrived without its
         // launchEnvironment (see AgentNotificationLiveUITests). The seeded
@@ -57,53 +63,68 @@ final class DuoLayoutUITests: XCTestCase {
 
     // MARK: - Tests
 
-    /// Unfolded, the app's window is the whole inner display: built with the
-    /// iOS 27.1 SDK it is not letterboxed into a phone-sized box.
+    /// The app's window is the whole inner display: built with the iOS 27.1
+    /// SDK it is not letterboxed into a phone-sized box.
     func testUnfoldedWindowFillsTheInnerDisplay() throws {
-        let display = try XCTUnwrap(litDisplay(), "the pose driver reported no lit display")
+        try capture("01-launch")
+        let displays = try XCTUnwrap(displaySizes(), "the capture helper reported no display sizes")
+        let inner = try XCTUnwrap(displays[3], "no inner display (3) among \(displays)")
         let window = app.windows.firstMatch.frame
         // The runner's own display scale (both Duo panels are @3x).
         let traitScale = UITraitCollection.current.displayScale
         let scale = traitScale > 0 ? traitScale : 3
-        record("unfolded display \(display) px, window \(window) pt @\(scale)x, app \(app.frame)")
-        XCTAssertEqual(display.id, 3, "unfolded, the lit display should be the inner one (3), got \(display)")
+        record("displays \(displays) px, window \(window) pt @\(scale)x, app \(app.frame)")
         // The window in pixels, in either orientation of the panel.
         let px = CGSize(width: window.width * scale, height: window.height * scale)
-        let fills = (abs(px.width - display.width) <= scale && abs(px.height - display.height) <= scale)
-            || (abs(px.width - display.height) <= scale && abs(px.height - display.width) <= scale)
-        XCTAssertTrue(fills, "letterboxed: window \(window) pt = \(px) px on a \(display.width)x\(display.height) px display")
+        let fills = (abs(px.width - inner.width) <= scale && abs(px.height - inner.height) <= scale)
+            || (abs(px.width - inner.height) <= scale && abs(px.height - inner.width) <= scale)
+        XCTAssertTrue(fills, "not filling the inner display: window \(window) pt = \(px) px on a \(inner.width)x\(inner.height) px panel")
         XCTAssertEqual(window.minX, 0, accuracy: 1, "window is inset from the display: \(window)")
         XCTAssertEqual(window.minY, 0, accuracy: 1, "window is inset from the display: \(window)")
     }
 
-    /// A live session through folded -> unfolded -> folded: the app stays in
-    /// the foreground, the session stays connected, and the pty the server
-    /// sees follows the display — more columns unfolded than folded.
-    func testFoldingMidSessionResizesTheGrid() throws {
+    /// A live session through portrait -> landscape -> portrait ->
+    /// landscape on the inner display: the app stays in the foreground, the
+    /// session stays connected, and the pty the server sees follows the
+    /// window — the wider window has more columns, and each return to a
+    /// shape restores that shape's grid.
+    func testReshapingMidSessionResizesTheGrid() throws {
         openSession()
-        let unfolded = try grid(after: nil)
-        record("unfolded grid \(unfolded.cols)x\(unfolded.rows), window \(app.windows.firstMatch.frame)")
+        let tall = try grid(after: nil)
+        let tallWidth = app.windows.firstMatch.frame.width
+        try capture("02-session-portrait")
+        record("portrait grid \(tall), window \(app.windows.firstMatch.frame)")
 
-        try pose("folded")
-        let folded = try grid(after: unfolded)
-        XCTAssertEqual(app.state, .runningForeground, "folding sent the app away")
-        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 10), "folding dropped the session screen")
-        record("folded grid \(folded.cols)x\(folded.rows), window \(app.windows.firstMatch.frame)")
-        XCTAssertLessThan(folded.cols, unfolded.cols, "the outer display fits fewer columns than the inner one")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let wide = try grid(after: tall)
+        let wideWidth = app.windows.firstMatch.frame.width
+        XCTAssertEqual(app.state, .runningForeground, "reshaping sent the app away")
+        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 10), "reshaping dropped the session screen")
+        try capture("03-session-landscape")
+        record("landscape grid \(wide), window \(app.windows.firstMatch.frame)")
+        XCTAssertNotEqual(tallWidth, wideWidth, "rotating the inner display did not change the window's shape")
+        if wideWidth > tallWidth {
+            XCTAssertGreaterThan(wide.cols, tall.cols, "a wider window must fit more columns")
+        } else {
+            XCTAssertLessThan(wide.cols, tall.cols, "a narrower window must fit fewer columns")
+        }
 
-        try pose("unfolded")
-        let reopened = try grid(after: folded)
+        XCUIDevice.shared.orientation = .portrait
+        let tallAgain = try grid(after: wide)
         XCTAssertEqual(app.state, .runningForeground)
-        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 10), "unfolding dropped the session screen")
-        record("unfolded-again grid \(reopened.cols)x\(reopened.rows), window \(app.windows.firstMatch.frame)")
-        XCTAssertEqual(reopened.cols, unfolded.cols, "unfolding again did not restore the inner display's columns")
+        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 10), "reshaping back dropped the session screen")
+        try capture("04-session-portrait-again")
+        record("portrait-again grid \(tallAgain)")
+        XCTAssertEqual(tallAgain.cols, tall.cols, "returning to portrait did not restore its columns")
 
-        try pose("folded")
-        let refolded = try grid(after: reopened)
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let wideAgain = try grid(after: tallAgain)
         XCTAssertEqual(app.state, .runningForeground)
-        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 10), "folding again dropped the session screen")
-        record("folded-again grid \(refolded.cols)x\(refolded.rows)")
-        XCTAssertEqual(refolded.cols, folded.cols, "folding again did not return to the outer display's columns")
+        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 10))
+        try capture("05-session-landscape-again")
+        record("landscape-again grid \(wideAgain)")
+        XCTAssertEqual(wideAgain.cols, wide.cols, "returning to landscape did not restore its columns")
+        XCUIDevice.shared.orientation = .portrait
     }
 
     // MARK: - Helpers
@@ -160,27 +181,23 @@ final class DuoLayoutUITests: XCTestCase {
         return Grid(rows: parts[0], cols: parts[1])
     }
 
-    /// Asks the host-side pose driver for a pose and waits for it to say the
-    /// simulator is in it.
-    private func pose(_ name: String, timeout: TimeInterval = 60) throws {
+    /// Asks the host-side helper to screenshot both Duo displays (named
+    /// `label`) and waits for it to say it has.
+    private func capture(_ label: String, timeout: TimeInterval = 90) throws {
         let request = "\(duoDir)/pose-request"
         let done = "\(duoDir)/pose-done"
-        let token = "\(name) \(UUID().uuidString)"
+        let token = "\(label) \(UUID().uuidString)"
         try? FileManager.default.removeItem(atPath: done)
         try Data((token + "\n").utf8).write(to: URL(fileURLWithPath: request), options: .atomic)
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let reply = try? String(contentsOfFile: done, encoding: .utf8) {
-                let line = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-                if line == token { return }
-                if line.hasPrefix("error \(token)") {
-                    XCTFail("the pose driver could not reach \"\(name)\": \(line)")
-                    return
-                }
+            if let reply = try? String(contentsOfFile: done, encoding: .utf8),
+               reply.trimmingCharacters(in: .whitespacesAndNewlines) == token {
+                return
             }
             usleep(250_000)
         }
-        XCTFail("the host pose driver never answered \"\(name)\" — is scripts/duo-pose-driver.sh running?")
+        XCTFail("the host capture helper never answered \"\(label)\" — is scripts/duo-capture.sh running?")
     }
 
     private func openSession() {
@@ -195,15 +212,18 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 30), "never reached a connected session")
     }
 
-    /// The display the host driver lit for the current pose, from its own
-    /// screenshot of it: "<display id> <width px> <height px>". XCUITest's
-    /// screenshots are not used — on the two-display Duo they can address
-    /// the dark panel.
-    private func litDisplay() -> (id: Int, width: CGFloat, height: CGFloat)? {
+    /// Pixel sizes of the Duo's displays from the helper's own screenshots,
+    /// by display id (1 outer, 3 inner): lines of "<id> <width> <height>".
+    /// XCUITest's screenshots are not used — on the two-display Duo they can
+    /// address the dark panel.
+    private func displaySizes() -> [Int: CGSize]? {
         guard let text = try? String(contentsOfFile: "\(duoDir)/display.txt", encoding: .utf8) else { return nil }
-        let parts = text.split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
-        guard parts.count == 3 else { return nil }
-        return (parts[0], CGFloat(parts[1]), CGFloat(parts[2]))
+        var sizes: [Int: CGSize] = [:]
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: " ").compactMap { Int($0) }
+            if parts.count == 3 { sizes[parts[0]] = CGSize(width: parts[1], height: parts[2]) }
+        }
+        return sizes.isEmpty ? nil : sizes
     }
 
     private func record(_ line: String) {
