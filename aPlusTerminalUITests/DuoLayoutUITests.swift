@@ -62,7 +62,9 @@ final class DuoLayoutUITests: XCTestCase {
     func testUnfoldedWindowFillsTheInnerDisplay() throws {
         let display = try XCTUnwrap(litDisplay(), "the pose driver reported no lit display")
         let window = app.windows.firstMatch.frame
-        let scale = XCUIScreen.main.scale
+        // The runner's own display scale (both Duo panels are @3x).
+        let traitScale = UITraitCollection.current.displayScale
+        let scale = traitScale > 0 ? traitScale : 3
         record("unfolded display \(display) px, window \(window) pt @\(scale)x, app \(app.frame)")
         XCTAssertEqual(display.id, 3, "unfolded, the lit display should be the inner one (3), got \(display)")
         // The window in pixels, in either orientation of the panel.
