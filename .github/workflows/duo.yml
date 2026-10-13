@@ -81,6 +81,12 @@ jobs:
     name: Duo layout UI test
     runs-on: xcode-27
     timeout-minutes: 50
+    # checks: write is for the live log below — the only record that
+    # survives when a preview VM freezes mid-step and takes the job's own
+    # logs with it.
+    permissions:
+      contents: read
+      checks: write
     env:
       OUT: ${{ github.workspace }}/duo-out
     steps:
@@ -125,8 +131,31 @@ jobs:
       # the app's recent log, so the job always reaches its later steps.
       - name: Duo layout UI test (fills the inner display; reshape mid-session)
         timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           t() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          # Live log: a check run on this commit whose summary is rewritten
+          # every 20 s with the tail of what this step has seen.
+          check=$(t 30 gh api "repos/$GITHUB_REPOSITORY/check-runs" -f name="Duo UI live log" \
+            -f head_sha="$GITHUB_SHA" -f status=in_progress --jq .id 2>/dev/null || true)
+          echo "live log check run: ${check:-none}"
+          live() {
+            [ -n "$check" ] || return 0
+            python3 -I - "$OUT" > "$OUT/live.json" <<'PY'
+          import json, os, sys
+          out = sys.argv[1]
+          def tail(name, n):
+              try:
+                  return "".join(open(os.path.join(out, name), errors="replace").readlines()[-n:])
+              except OSError:
+                  return "(none)\n"
+          text = ("## watchdog\n```\n" + tail("watchdog.log", 40) + "```\n## xcodebuild (tail)\n```\n"
+                  + tail("duo-ui.log", 120) + "```\n## capture helper\n```\n" + tail("duo-capture.log", 20) + "```\n")
+          print(json.dumps({"output": {"title": "Duo UI test progress", "summary": text[-60000:]}}))
+          PY
+            t 20 gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$check" --input "$OUT/live.json" >/dev/null 2>&1 || true
+          }
           xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
             -only-testing:aPlusTerminalUITests/DuoLayoutUITests -resultBundlePath "$OUT/duo-ui.xcresult" \
@@ -141,7 +170,8 @@ jobs:
             sed -n "$((seen + 1)),${lines}p" "$OUT/duo-ui.log" \
               | grep -E 'DUO:|error:|Test Case|Testing failed|hung|\*\* TEST' || true
             seen=$lines
-            echo "[watchdog $((SECONDS - start))s] log lines=$lines; disk $(df -h / | awk 'NR==2 {print $4}') free; $(memory_pressure | tail -1); capture: $(tail -1 "$OUT/duo-capture.log" 2>/dev/null)"
+            echo "[watchdog $((SECONDS - start))s] log lines=$lines; disk $(df -h / | awk 'NR==2 {print $4}') free; $(memory_pressure | tail -1); load $(sysctl -n vm.loadavg)" | tee -a "$OUT/watchdog.log"
+            live
             if [ $((SECONDS - start)) -gt 840 ]; then
               echo "[watchdog] stopping a stalled run"
               for d in 1 3; do t 20 xcrun simctl io "$UDID" screenshot --mask=ignored --display=$d "$OUT/shots/zz-stalled-display$d.png" >/dev/null 2>&1 || true; done
@@ -153,6 +183,10 @@ jobs:
             fi
           done
           wait "$pid"; rc=$?
+          echo "[watchdog] xcodebuild exited $rc" >> "$OUT/watchdog.log"
+          live
+          [ -z "$check" ] || t 20 gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$check" \
+            -f status=completed -f conclusion=neutral >/dev/null 2>&1 || true
           tail -5 "$OUT/duo-ui.log"
           exit $rc
 

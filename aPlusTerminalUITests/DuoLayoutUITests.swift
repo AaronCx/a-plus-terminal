@@ -48,8 +48,11 @@ final class DuoLayoutUITests: XCTestCase {
             }
             return false
         }
+        print("DUO: setUp orientation \(XCUIDevice.shared.orientation.rawValue) -> portrait")
         XCUIDevice.shared.orientation = .portrait
+        print("DUO: setUp launching")
         app.launch()
+        print("DUO: setUp launched, state \(app.state.rawValue)")
         // On Xcode 26 a launch has intermittently arrived without its
         // launchEnvironment (see AgentNotificationLiveUITests). The seeded
         // server row is the proof this launch got it; relaunch once if not.
@@ -201,6 +204,7 @@ final class DuoLayoutUITests: XCTestCase {
     }
 
     private func openSession() {
+        print("DUO: opening the session")
         let row = app.staticTexts["Duo"]
         XCTAssertTrue(row.waitForExistence(timeout: 15), "seeded server row missing")
         row.tap()
