@@ -13,6 +13,19 @@ settings:
     # identical versions or App Store Connect rejects the upload.
     CURRENT_PROJECT_VERSION: 76
     MARKETING_VERSION: "1.0.4"
+    # Agent notifications (posting for bells / OSC 9 / 777 / 7501, the
+    # permission ask, the Claude Code setup card, Settings → Notifications and
+    # its "Send test notification") are compiled OUT on this branch: every
+    # entry point is wrapped in `#if AGENT_NOTIFY`, and this switch is empty.
+    # Setting it to AGENT_NOTIFY turns the condition on in BOTH app targets
+    # and all three test targets at once, restoring develop's behaviour
+    # exactly; the notification work itself is preserved unchanged on branch
+    # test/agent-notifications. It is a plain build setting rather than a
+    # condition here because a project-level SWIFT_ACTIVE_COMPILATION_CONDITIONS
+    # would drop Debug's `DEBUG` (see the MESHYY note on the aPlusTerminal
+    # target). The agent-status heuristic (badge, Live Activity, Dynamic
+    # Island) and custom agents are NOT behind it.
+    AGENT_NOTIFY_CONDITION: ""
 packages:
   # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
   # floats to the latest matching tag, so CI and each developer could silently
@@ -124,10 +137,15 @@ targets:
       base:
         # Target level, not project level: here `$(inherited)` picks up the
         # project's Debug `DEBUG`, which a project-level base value would drop.
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY"
+        # AGENT_NOTIFY_CONDITION: empty on this branch (agent notifications
+        # compiled out); AGENT_NOTIFY restores them — see the project settings.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY $(AGENT_NOTIFY_CONDITION)"
   aPlusTerminalAppStore:
     templates: [aPlusTerminalApp]
     settings:
+      base:
+        # No MESHYY, ever. AGENT_NOTIFY follows the project-level switch.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(AGENT_NOTIFY_CONDITION)"
       configs:
         # Release (what Archive uses) is named exactly like the beta app, so
         # the archived .app, its binary and the Swift module are aPlusTerminal
@@ -187,7 +205,8 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         # Hosted by the beta app, so the meshyy suites compile and run here.
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY"
+        # The notification suites follow the app's AGENT_NOTIFY switch.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY $(AGENT_NOTIFY_CONDITION)"
     sources:
       - aPlusTerminalTests
     dependencies:
@@ -219,6 +238,8 @@ targets:
         APLUSTERMINAL_UITESTS_BUNDLE_ID: com.aaroncx.aPlusTerminalUITests
         PRODUCT_BUNDLE_IDENTIFIER: "$(APLUSTERMINAL_UITESTS_BUNDLE_ID)"
         PROVISIONING_PROFILE_SPECIFIER: "$(APLUSTERMINAL_PROFILE_UITESTS)"
+        # The notification UI suites follow the app's AGENT_NOTIFY switch.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(AGENT_NOTIFY_CONDITION)"
     sources:
       - aPlusTerminalUITests
       # The form walker shared with the App Store UI test (BetaBuildSettingsUITests
@@ -235,6 +256,8 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.aPlusTerminalAppStoreUITests
+        # Follows the app's AGENT_NOTIFY switch (the no-notifications check).
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(AGENT_NOTIFY_CONDITION)"
     sources:
       - aPlusTerminalAppStoreUITests
     dependencies:

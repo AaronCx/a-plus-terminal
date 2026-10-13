@@ -613,6 +613,7 @@ final class NotificationSetupCardTests: XCTestCase {
         return session
     }
 
+    #if AGENT_NOTIFY
     func testRaisedForClaudeCodeOnly() throws {
         let settings = AppSettings(defaults: UserDefaults(suiteName: "SetupCard-\(UUID().uuidString)")!)
 
@@ -656,6 +657,7 @@ final class NotificationSetupCardTests: XCTestCase {
         later.noteAgentStatus(.none)
         XCTAssertFalse(later.showNotificationSetupCard, "shown once, ever — Settings keeps it reachable")
     }
+    #endif
 
     func testASceneChangeQuietsEverySession() throws {
         let settings = AppSettings(defaults: UserDefaults(suiteName: "Scene-\(UUID().uuidString)")!)
@@ -675,6 +677,7 @@ final class NotificationSetupCardTests: XCTestCase {
         }
     }
 
+    #if AGENT_NOTIFY
     func testAPopOutMutesOnlyTheSessionItShows() throws {
         // Through the real wiring: session → SessionManager → AgentAlertCenter
         // → its policy, with only the final hand-off to iOS recorded.
@@ -698,6 +701,33 @@ final class NotificationSetupCardTests: XCTestCase {
                        .forwarded(.blocked(kind: "permission")))
         XCTAssertEqual(posted.last, "agent-\(watched.id.uuidString)-blocked")
     }
+    #else
+    /// Agent notifications compiled out (AGENT_NOTIFY unset): Claude Code
+    /// detected in a session the REAL SessionManager opened raises no setup
+    /// card, asks for no permission, and a signal that clears every gate
+    /// still never reaches AgentAlertCenter — the wiring is not compiled in.
+    func testCompiledOutNothingReachesTheAlertCenter() throws {
+        let settings = AppSettings(defaults: UserDefaults(suiteName: "NotifyOff-\(UUID().uuidString)")!)
+        let manager = self.manager(settings)
+        defer { manager.closeAll() }
+        var posted: [String] = []
+        manager.alertCenter = AgentAlertCenter(addRequest: { posted.append($0.identifier) })
+        let session = manager.open(server: Server(name: "a", host: "127.0.0.1", username: "t"))
+        // The DEFAULT permission seam, not a test stub: it must ask nothing.
+        session.appIsActive = { false }
+        session.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
+        session.noteAgentStatus(.none)
+        XCTAssertEqual(session.namedAgentID, "claude-code")
+        XCTAssertFalse(session.showNotificationSetupCard, "the setup card is compiled out")
+
+        XCTAssertEqual(session.noteAgentSignal(.bell), .forwarded(.bell),
+                       "the gates still run; only the post is compiled out")
+        XCTAssertEqual(session.noteAgentSignal(.programStatus(.init(state: .blocked, kind: "permission"))),
+                       .forwarded(.blocked(kind: "permission")))
+        XCTAssertEqual(posted, [], "a notification was posted with AGENT_NOTIFY unset")
+        XCTAssertFalse(settings.notificationSetupCardShown)
+    }
+    #endif
 
     func testNoPopOutShowsATerminalWhileNoneIsActive() {
         let pip = PiPCoordinator(settings: AppSettings(defaults: UserDefaults(suiteName: "PiP-\(UUID().uuidString)")!))

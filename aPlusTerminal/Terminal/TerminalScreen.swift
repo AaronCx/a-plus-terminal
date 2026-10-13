@@ -34,7 +34,10 @@ struct TerminalScreen: View {
                     }
                     Spacer()
                 }
-            } else if session.showNotificationSetupCard {
+            }
+            #if AGENT_NOTIFY
+            // Below the tmux hint in priority: one card over the terminal at a time.
+            if !session.showMultiplexerHint, session.showNotificationSetupCard {
                 VStack {
                     NotificationSetupCard {
                         session.showNotificationSetupCard = false
@@ -45,6 +48,7 @@ struct TerminalScreen: View {
                     Spacer()
                 }
             }
+            #endif
 
             switch session.state {
             case .connecting:
