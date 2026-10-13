@@ -7,12 +7,10 @@ import XCTest
 /// Runs on CI only, from `.github/workflows/duo.yml` on the iPhone Duo
 /// simulator built with the iOS 27.1 SDK. That job starts a throwaway
 /// loopback sshd (`scripts/duo-ci-sshd.sh`) whose login writes the pty size
-/// the SERVER sees to `~/.aplus-duo/grid.txt`, and a host-side capture helper
-/// (`scripts/duo-capture.sh`) that screenshots both Duo displays and
-/// reports their pixel sizes when this test asks through
-/// `~/.aplus-duo/pose-request`. The simulator shares the host filesystem, so
-/// the seed, the key and the grid all come from files and nothing secret
-/// crosses a build setting.
+/// the SERVER sees to `~/.aplus-duo/grid.txt`, and records the Duo's display
+/// sizes from its device profile in `~/.aplus-duo/display.txt`. The simulator
+/// shares the host filesystem, so the seed, the key and the grid all come
+/// from files and nothing secret crosses a build setting.
 ///
 /// The fold itself is NOT driven: the only fold control the Xcode 27.1
 /// simulator exposes to a script is `simctl io screenConfig --display=N power`,
@@ -70,7 +68,7 @@ final class DuoLayoutUITests: XCTestCase {
     /// SDK it is not letterboxed into a phone-sized box.
     func testUnfoldedWindowFillsTheInnerDisplay() throws {
         try capture("01-launch")
-        let displays = try XCTUnwrap(displaySizes(), "the capture helper reported no display sizes")
+        let displays = try XCTUnwrap(displaySizes(), "duo.yml wrote no display sizes")
         let inner = try XCTUnwrap(displays[3], "no inner display (3) among \(displays)")
         let window = app.windows.firstMatch.frame
         // The runner's own display scale (both Duo panels are @3x).
@@ -184,23 +182,14 @@ final class DuoLayoutUITests: XCTestCase {
         return Grid(rows: parts[0], cols: parts[1])
     }
 
-    /// Asks the host-side helper to screenshot both Duo displays (named
-    /// `label`) and waits for it to say it has.
-    private func capture(_ label: String, timeout: TimeInterval = 90) throws {
-        let request = "\(duoDir)/pose-request"
-        let done = "\(duoDir)/pose-done"
-        let token = "\(label) \(UUID().uuidString)"
-        try? FileManager.default.removeItem(atPath: done)
-        try Data((token + "\n").utf8).write(to: URL(fileURLWithPath: request), options: .atomic)
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let reply = try? String(contentsOfFile: done, encoding: .utf8),
-               reply.trimmingCharacters(in: .whitespacesAndNewlines) == token {
-                return
-            }
-            usleep(250_000)
-        }
-        XCTFail("the host capture helper never answered \"\(label)\" — is scripts/duo-capture.sh running?")
+    /// A screenshot of the app's window, kept in the result bundle (the
+    /// workflow exports it as an artifact), and a progress line.
+    private func capture(_ label: String) throws {
+        print("DUO: capture \(label)")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = label
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func openSession() {
@@ -216,10 +205,9 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 30), "never reached a connected session")
     }
 
-    /// Pixel sizes of the Duo's displays from the helper's own screenshots,
-    /// by display id (1 outer, 3 inner): lines of "<id> <width> <height>".
-    /// XCUITest's screenshots are not used — on the two-display Duo they can
-    /// address the dark panel.
+    /// Pixel sizes of the Duo's displays by screen id (1 outer, 3 inner):
+    /// lines of "<id> <width> <height>", which duo.yml copies from the iPhone
+    /// Duo simulator's device profile.
     private func displaySizes() -> [Int: CGSize]? {
         guard let text = try? String(contentsOfFile: "\(duoDir)/display.txt", encoding: .utf8) else { return nil }
         var sizes: [Int: CGSize] = [:]
