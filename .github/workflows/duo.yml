@@ -1,0 +1,182 @@
+name: Duo (iOS 27.1 SDK)
+
+# The iPhone Duo (foldable) needs the iOS 27.1 SDK and simulator, which only
+# GitHub's xcode-27 image carries; main CI (ci.yml) stays on macos-26 with
+# Xcode 26.x, so everything here must also compile there. This job builds both
+# schemes for the Duo simulator, runs the unit tests on it, and runs
+# DuoLayoutUITests against a real loopback SSH session while a host-side
+# driver folds and unfolds the simulator.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['test/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: duo-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  duo:
+    runs-on: xcode-27
+    timeout-minutes: 75
+    env:
+      OUT: ${{ github.workspace }}/duo-out
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode 27.1
+        run: |
+          app=/Applications/Xcode_27.1.app
+          [ -d "$app" ] || { echo "no $app on this image" >&2; ls /Applications | grep -i xcode >&2; exit 1; }
+          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
+          mkdir -p "$OUT/shots" "$OUT/attachments"
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          xcodebuild -showsdks | grep -E 'iphone(os|simulator)'
+
+      # The image ships the iOS 27.0 runtime only; the Duo device type needs
+      # 27.1. Xcode 27 no longer bundles the Metal toolchain either, and a
+      # dependency compiles .metal sources.
+      - name: iOS 27.1 runtime and Metal toolchain
+        run: |
+          have() { xcrun simctl list runtimes -j | python3 -I -c 'import json,sys; print(any(r["platform"]=="iOS" and r["isAvailable"] and [int(x) for x in r["version"].split(".")][:2]>=[27,1] for r in json.load(sys.stdin)["runtimes"]))'; }
+          if [ "$(have)" != True ]; then
+            xcodebuild -downloadPlatform iOS | grep -v 'Downloading iOS' || true
+          fi
+          [ "$(have)" = True ] || { echo "no iOS 27.1 runtime" >&2; exit 1; }
+          xcodebuild -downloadComponent MetalToolchain | tail -2
+          xcrun simctl list runtimes | grep iOS
+
+      - name: Create iPhone Duo simulator
+        run: |
+          rt=$(xcrun simctl list runtimes -j | python3 -I -c 'import json,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["platform"]=="iOS" and r["isAvailable"]]; rs.sort(key=lambda r: [int(x) for x in r["version"].split(".")]); print(rs[-1]["identifier"])')
+          udid=$(xcrun simctl create "Duo CI" com.apple.CoreSimulator.SimDeviceType.iPhone-Duo "$rt")
+          echo "UDID=$udid" >> "$GITHUB_ENV"
+          echo "created $udid on $rt"
+
+      - name: Generate project and resolve packages
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal -resolvePackageDependencies | tail -3
+
+      - name: Build App Store candidate for Duo
+        run: |
+          set -o pipefail
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminalAppStore \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD build 2>&1 \
+            | tee "$OUT/build-appstore.log" | grep -E 'error:|BUILD (SUCCEEDED|FAILED)'
+
+      # APLUSTERMINAL_DUO lands in the .xctestrun here (the scheme forwards
+      # it), which is what test-without-building runs with.
+      - name: Build beta app and tests for Duo
+        run: |
+          set -o pipefail
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
+            APLUSTERMINAL_DUO=1 build-for-testing 2>&1 \
+            | tee "$OUT/build-beta.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)|BUILD (SUCCEEDED|FAILED)'
+
+      - name: Unit tests on Duo
+        run: |
+          set -o pipefail
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
+            -only-testing:aPlusTerminalTests -resultBundlePath "$OUT/unit.xcresult" test-without-building 2>&1 \
+            | tee "$OUT/unit.log" | grep -E 'error:|Executed .* tests|\*\* TEST (SUCCEEDED|FAILED)' | tail -20
+
+      - name: Start loopback sshd and fold driver
+        run: |
+          scripts/duo-ci-sshd.sh start
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b | tail -1
+          nohup scripts/duo-pose-driver.sh "$UDID" "$OUT/shots" > "$OUT/pose-driver.log" 2>&1 &
+          echo "DRIVER_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Duo layout UI test (unfolded fills the display; fold mid-session)
+        run: |
+          set -o pipefail
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
+            -only-testing:aPlusTerminalUITests/DuoLayoutUITests -resultBundlePath "$OUT/duo-ui.xcresult" \
+            APLUSTERMINAL_DUO=1 test-without-building 2>&1 \
+            | tee "$OUT/duo-ui.log" | grep -E 'DUO:|error:|Test Case .*(passed|failed|skipped)|\*\* TEST (SUCCEEDED|FAILED)'
+
+      # A skipped test is not a pass: both Duo tests must have RUN and passed.
+      - name: Both Duo tests ran
+        run: |
+          xcrun xcresulttool get test-results tests --path "$OUT/duo-ui.xcresult" > "$OUT/duo-ui-tests.json"
+          python3 -I - "$OUT/duo-ui-tests.json" <<'PY'
+          import json, sys
+          tree = json.load(open(sys.argv[1]))
+          found = {}
+          def walk(node):
+              if node.get("nodeType") == "Test Case":
+                  found[node["name"]] = node.get("result")
+              for child in node.get("children", []):
+                  walk(child)
+          for root in tree["testNodes"]:
+              walk(root)
+          print(found)
+          want = {"testUnfoldedWindowFillsTheInnerDisplay()", "testFoldingMidSessionResizesTheGrid()"}
+          bad = {n: found.get(n) for n in want if found.get(n) != "Passed"}
+          if bad:
+              sys.exit(f"Duo tests did not pass: {bad}")
+          PY
+
+      - name: Export test screenshots
+        if: always()
+        run: |
+          for r in duo-ui unit; do
+            [ -d "$OUT/$r.xcresult" ] || continue
+            xcrun xcresulttool export attachments --path "$OUT/$r.xcresult" --output-path "$OUT/attachments/$r" || true
+          done
+          # Name the XCTest screenshots by their attachment names.
+          python3 -I - "$OUT/attachments/duo-ui" "$OUT/shots" <<'PY'
+          import json, os, shutil, sys
+          src, dst = sys.argv[1], sys.argv[2]
+          manifest = os.path.join(src, "manifest.json")
+          if not os.path.exists(manifest):
+              sys.exit(0)
+          for test in json.load(open(manifest)):
+              for a in test.get("attachments", []):
+                  name = a.get("suggestedHumanReadableName") or a["exportedFileName"]
+                  if a["exportedFileName"].lower().endswith(".png"):
+                      shutil.copy(os.path.join(src, a["exportedFileName"]), os.path.join(dst, "xctest-" + name.replace("/", "-")))
+          PY
+          ls -la "$OUT/shots"
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: duo-screenshots
+          path: ${{ env.OUT }}/shots
+          if-no-files-found: warn
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: duo-logs
+          path: |
+            ${{ env.OUT }}/*.log
+            ${{ env.OUT }}/*.json
+            ${{ env.OUT }}/attachments
+          if-no-files-found: ignore
+
+      - name: Clean up
+        if: always()
+        run: |
+          [ -z "${DRIVER_PID:-}" ] || kill "$DRIVER_PID" 2>/dev/null || true
+          cat "$HOME/.aplus-duo/sshd.log" 2>/dev/null | tail -20 || true
+          scripts/duo-ci-sshd.sh stop || true
+          [ -z "${UDID:-}" ] || xcrun simctl delete "$UDID" || true
