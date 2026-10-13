@@ -116,22 +116,50 @@ jobs:
             s=$SECONDS; t 20 xcrun simctl io "$UDID" screenshot --mask=ignored --display=$d "$OUT/shots/00-boot-display$d.png" >/dev/null 2>&1; echo "boot shot display $d rc=$? $((SECONDS-s))s"
           done
 
+      # xcodebuild runs under a watchdog inside the step: progress is printed
+      # as it happens (so a stall is visible in this step's log), and after
+      # 14 minutes the run is stopped with a screenshot of both displays and
+      # the app's recent log, so the job always reaches its later steps.
       - name: Duo layout UI test (fills the inner display; reshape mid-session)
         timeout-minutes: 20
         run: |
-          set -o pipefail
+          t() { perl -e 'alarm shift; exec @ARGV' "$@"; }
           xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
             -only-testing:aPlusTerminalUITests/DuoLayoutUITests -resultBundlePath "$OUT/duo-ui.xcresult" \
-            -test-timeouts-enabled YES -default-test-execution-time-allowance 420 \
-            APLUSTERMINAL_DUO=1 test-without-building 2>&1 \
-            | tee "$OUT/duo-ui.log" | grep -E 'DUO:|error:|Test Case .*(passed|failed|skipped)|\*\* TEST (SUCCEEDED|FAILED)'
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 300 \
+            APLUSTERMINAL_DUO=1 test-without-building > "$OUT/duo-ui.log" 2>&1 &
+          pid=$!
+          seen=0
+          start=$SECONDS
+          while kill -0 "$pid" 2>/dev/null; do
+            sleep 20
+            lines=$(wc -l < "$OUT/duo-ui.log")
+            sed -n "$((seen + 1)),${lines}p" "$OUT/duo-ui.log" \
+              | grep -E 'DUO:|error:|Test Case|Testing failed|hung|\*\* TEST' || true
+            seen=$lines
+            echo "[watchdog $((SECONDS - start))s] log lines=$lines; capture: $(tail -1 "$OUT/duo-capture.log" 2>/dev/null)"
+            if [ $((SECONDS - start)) -gt 840 ]; then
+              echo "[watchdog] stopping a stalled run"
+              for d in 1 3; do t 20 xcrun simctl io "$UDID" screenshot --mask=ignored --display=$d "$OUT/shots/zz-stalled-display$d.png" >/dev/null 2>&1 || true; done
+              t 60 xcrun simctl spawn "$UDID" log show --last 3m --style compact \
+                --predicate 'process == "aPlusTerminal" OR process CONTAINS "Runner" OR process == "testmanagerd"' \
+                > "$OUT/stalled-sim.log" 2>&1 || true
+              kill -INT "$pid" 2>/dev/null; sleep 20; kill -KILL "$pid" 2>/dev/null || true
+              break
+            fi
+          done
+          wait "$pid"; rc=$?
+          tail -5 "$OUT/duo-ui.log"
+          exit $rc
 
       # A skipped test is not a pass: both Duo tests must have RUN and passed.
       - name: Both Duo tests ran
         if: always()
+        timeout-minutes: 4
         run: |
-          xcrun xcresulttool get test-results tests --path "$OUT/duo-ui.xcresult" > "$OUT/duo-ui-tests.json"
+          [ -d "$OUT/duo-ui.xcresult" ] || { echo "no result bundle"; exit 1; }
+          perl -e 'alarm shift; exec @ARGV' 120 xcrun xcresulttool get test-results tests --path "$OUT/duo-ui.xcresult" > "$OUT/duo-ui-tests.json"
           python3 -I - "$OUT/duo-ui-tests.json" <<'PY'
           import json, sys
           tree = json.load(open(sys.argv[1]))
@@ -152,10 +180,11 @@ jobs:
 
       - name: Export test screenshots
         if: always()
+        timeout-minutes: 4
         run: |
           for r in duo-ui unit; do
             [ -d "$OUT/$r.xcresult" ] || continue
-            xcrun xcresulttool export attachments --path "$OUT/$r.xcresult" --output-path "$OUT/attachments/$r" || true
+            perl -e 'alarm shift; exec @ARGV' 120 xcrun xcresulttool export attachments --path "$OUT/$r.xcresult" --output-path "$OUT/attachments/$r" || true
           done
           # Name the XCTest screenshots by their attachment names.
           python3 -I - "$OUT/attachments/duo-ui" "$OUT/shots" <<'PY'
@@ -195,6 +224,7 @@ jobs:
 
       - name: Clean up
         if: always()
+        timeout-minutes: 4
         run: |
           echo "=== capture helper"; cat "$OUT/duo-capture.log" 2>/dev/null || true
           [ -z "${DRIVER_PID:-}" ] || kill "$DRIVER_PID" 2>/dev/null || true
