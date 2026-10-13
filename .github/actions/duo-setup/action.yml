@@ -1,0 +1,69 @@
+name: Duo setup
+description: >
+  Xcode 27.1, the iOS 27.1 simulator runtime and Metal toolchain it lacks on
+  the xcode-27 image, an iPhone Duo simulator (UDID in the environment), the
+  generated project and resolved packages. Frees disk first: the image ships
+  several Xcodes and runtimes, and the 27.1 runtime download is ~8 GB.
+runs:
+  using: composite
+  steps:
+    - name: Select Xcode 27.1
+      shell: bash
+      run: |
+        app=/Applications/Xcode_27.1.app
+        [ -d "$app" ] || { echo "no $app on this image" >&2; ls /Applications | grep -i xcode >&2; exit 1; }
+        echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
+        mkdir -p "$OUT/shots" "$OUT/attachments"
+        sw_vers; "$app/Contents/Developer/usr/bin/xcodebuild" -version
+        DEVELOPER_DIR="$app/Contents/Developer" xcrun swift --version
+
+    - name: Free disk
+      shell: bash
+      run: |
+        df -h / | tail -1
+        keep=$(cd /Applications/Xcode_27.1.app && pwd -P)
+        echo "keeping $keep"
+        for x in /Applications/Xcode*.app; do
+          [ -L "$x" ] && continue
+          real=$(cd "$x" && pwd -P)
+          [ "$real" = "$keep" ] && continue
+          echo "removing $x"; sudo rm -rf "$x" &
+        done
+        wait
+        # Every simulator runtime except iOS; the iOS 27.0 one goes once 27.1 is in.
+        runtimes() { xcrun simctl runtime list -j 2>/dev/null | python3 -I -c 'import json,sys
+        try: d=json.load(sys.stdin)
+        except Exception: d={}
+        for k,v in d.items():
+            if sys.argv[1] in (v.get("platformIdentifier","")+" "+v.get("version","")): print(k)' "$1" || true; }
+        for p in appletvsimulator watchsimulator xrsimulator; do
+          runtimes "$p" | while read -r id; do xcrun simctl runtime delete "$id" || true; done
+        done
+        df -h / | tail -1
+
+    - name: iOS 27.1 runtime and Metal toolchain
+      shell: bash
+      run: |
+        have() { xcrun simctl list runtimes -j | python3 -I -c 'import json,sys; print(any(r["platform"]=="iOS" and r["isAvailable"] and [int(x) for x in r["version"].split(".")][:2]>=[27,1] for r in json.load(sys.stdin)["runtimes"]))'; }
+        if [ "$(have)" != True ]; then
+          xcodebuild -downloadPlatform iOS | grep -v 'Downloading iOS' || true
+        fi
+        [ "$(have)" = True ] || { echo "no iOS 27.1 runtime" >&2; exit 1; }
+        xcodebuild -downloadComponent MetalToolchain | tail -2
+        xcrun simctl list runtimes | grep iOS
+        df -h / | tail -1
+
+    - name: Create iPhone Duo simulator
+      shell: bash
+      run: |
+        rt=$(xcrun simctl list runtimes -j | python3 -I -c 'import json,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["platform"]=="iOS" and r["isAvailable"]]; rs.sort(key=lambda r: [int(x) for x in r["version"].split(".")]); print(rs[-1]["identifier"])')
+        udid=$(xcrun simctl create "Duo CI" com.apple.CoreSimulator.SimDeviceType.iPhone-Duo "$rt")
+        echo "UDID=$udid" >> "$GITHUB_ENV"
+        echo "created $udid on $rt"
+
+    - name: Generate project and resolve packages
+      shell: bash
+      run: |
+        brew install xcodegen
+        xcodegen generate
+        xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal -resolvePackageDependencies | tail -3

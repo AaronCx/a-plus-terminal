@@ -2,10 +2,12 @@ name: Duo (iOS 27.1 SDK)
 
 # The iPhone Duo (foldable) needs the iOS 27.1 SDK and simulator, which only
 # GitHub's xcode-27 image carries; main CI (ci.yml) stays on macos-26 with
-# Xcode 26.x, so everything here must also compile there. This job builds both
-# schemes for the Duo simulator, runs the unit tests on it, and runs
+# Xcode 26.x, so everything here must also compile there. One job builds both
+# schemes for the Duo simulator and runs the unit tests on it; the other runs
 # DuoLayoutUITests against a real loopback SSH session, with a host-side
-# helper screenshotting both Duo displays at each step. Nothing here folds
+# helper screenshotting both Duo displays at each step. Two jobs on two fresh
+# VMs: the preview image's VMs have stalled mid-job, and a stall then takes
+# the job's logs with it, so each job is kept short. Nothing here folds
 # the simulator: `simctl io screenConfig ... power off` (its only scriptable
 # fold control) wedged the runner every time it ran.
 
@@ -22,81 +24,79 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  duo:
+  build-and-unit:
+    name: Build both schemes, unit tests on Duo
     runs-on: xcode-27
-    timeout-minutes: 75
+    timeout-minutes: 50
     env:
       OUT: ${{ github.workspace }}/duo-out
     steps:
       - uses: actions/checkout@v7
-
-      - name: Select Xcode 27.1
-        run: |
-          app=/Applications/Xcode_27.1.app
-          [ -d "$app" ] || { echo "no $app on this image" >&2; ls /Applications | grep -i xcode >&2; exit 1; }
-          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
-          mkdir -p "$OUT/shots" "$OUT/attachments"
-
-      - name: Toolchain
-        run: |
-          sw_vers
-          xcodebuild -version
-          swift --version
-          xcodebuild -showsdks | grep -E 'iphone(os|simulator)'
-
-      # The image ships the iOS 27.0 runtime only; the Duo device type needs
-      # 27.1. Xcode 27 no longer bundles the Metal toolchain either, and a
-      # dependency compiles .metal sources.
-      - name: iOS 27.1 runtime and Metal toolchain
-        run: |
-          have() { xcrun simctl list runtimes -j | python3 -I -c 'import json,sys; print(any(r["platform"]=="iOS" and r["isAvailable"] and [int(x) for x in r["version"].split(".")][:2]>=[27,1] for r in json.load(sys.stdin)["runtimes"]))'; }
-          if [ "$(have)" != True ]; then
-            xcodebuild -downloadPlatform iOS | grep -v 'Downloading iOS' || true
-          fi
-          [ "$(have)" = True ] || { echo "no iOS 27.1 runtime" >&2; exit 1; }
-          xcodebuild -downloadComponent MetalToolchain | tail -2
-          xcrun simctl list runtimes | grep iOS
-
-      - name: Create iPhone Duo simulator
-        run: |
-          rt=$(xcrun simctl list runtimes -j | python3 -I -c 'import json,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["platform"]=="iOS" and r["isAvailable"]]; rs.sort(key=lambda r: [int(x) for x in r["version"].split(".")]); print(rs[-1]["identifier"])')
-          udid=$(xcrun simctl create "Duo CI" com.apple.CoreSimulator.SimDeviceType.iPhone-Duo "$rt")
-          echo "UDID=$udid" >> "$GITHUB_ENV"
-          echo "created $udid on $rt"
-
-      - name: Generate project and resolve packages
-        run: |
-          brew install xcodegen
-          xcodegen generate
-          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal -resolvePackageDependencies | tail -3
+      - uses: ./.github/actions/duo-setup
 
       - name: Build App Store candidate for Duo
+        timeout-minutes: 15
         run: |
           set -o pipefail
           xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminalAppStore \
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD build 2>&1 \
             | tee "$OUT/build-appstore.log" | grep -E 'error:|BUILD (SUCCEEDED|FAILED)'
 
-      # APLUSTERMINAL_DUO lands in the .xctestrun here (the scheme forwards
-      # it), which is what test-without-building runs with.
       - name: Build beta app and tests for Duo
+        timeout-minutes: 15
         run: |
           set -o pipefail
           xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
-            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
-            APLUSTERMINAL_DUO=1 build-for-testing 2>&1 \
-            | tee "$OUT/build-beta.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)|BUILD (SUCCEEDED|FAILED)'
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD build-for-testing 2>&1 \
+            | tee "$OUT/build-beta.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)'
 
       - name: Unit tests on Duo
-        timeout-minutes: 25
+        timeout-minutes: 20
         run: |
           set -o pipefail
+          df -h / | tail -1
           xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
             -only-testing:aPlusTerminalTests -resultBundlePath "$OUT/unit.xcresult" test-without-building 2>&1 \
             | tee "$OUT/unit.log" | grep -E 'error:|Executed .* tests|\*\* TEST (SUCCEEDED|FAILED)' | tail -20
 
+      - name: Upload logs
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: duo-unit-logs
+          path: ${{ env.OUT }}/*.log
+          if-no-files-found: ignore
+
+      - name: Clean up
+        if: always()
+        timeout-minutes: 4
+        run: '[ -z "${UDID:-}" ] || xcrun simctl delete "$UDID" || true'
+
+  layout-ui:
+    name: Duo layout UI test
+    runs-on: xcode-27
+    timeout-minutes: 50
+    env:
+      OUT: ${{ github.workspace }}/duo-out
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/duo-setup
+
+      # APLUSTERMINAL_DUO lands in the .xctestrun here (the scheme forwards
+      # it), which is what test-without-building runs with.
+      - name: Build beta app and UI tests for Duo
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
+            APLUSTERMINAL_DUO=1 build-for-testing 2>&1 \
+            | tee "$OUT/build-ui.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)'
+
       - name: Start loopback sshd and capture helper
+        timeout-minutes: 6
         run: |
           scripts/duo-ci-sshd.sh start
           xcrun simctl boot "$UDID" || true
@@ -138,7 +138,7 @@ jobs:
             sed -n "$((seen + 1)),${lines}p" "$OUT/duo-ui.log" \
               | grep -E 'DUO:|error:|Test Case|Testing failed|hung|\*\* TEST' || true
             seen=$lines
-            echo "[watchdog $((SECONDS - start))s] log lines=$lines; capture: $(tail -1 "$OUT/duo-capture.log" 2>/dev/null)"
+            echo "[watchdog $((SECONDS - start))s] log lines=$lines; disk $(df -h / | awk 'NR==2 {print $4}') free; capture: $(tail -1 "$OUT/duo-capture.log" 2>/dev/null)"
             if [ $((SECONDS - start)) -gt 840 ]; then
               echo "[watchdog] stopping a stalled run"
               for d in 1 3; do t 20 xcrun simctl io "$UDID" screenshot --mask=ignored --display=$d "$OUT/shots/zz-stalled-display$d.png" >/dev/null 2>&1 || true; done
@@ -182,7 +182,7 @@ jobs:
         if: always()
         timeout-minutes: 4
         run: |
-          for r in duo-ui unit; do
+          for r in duo-ui; do
             [ -d "$OUT/$r.xcresult" ] || continue
             perl -e 'alarm shift; exec @ARGV' 120 xcrun xcresulttool export attachments --path "$OUT/$r.xcresult" --output-path "$OUT/attachments/$r" || true
           done
@@ -215,7 +215,7 @@ jobs:
         timeout-minutes: 5
         uses: actions/upload-artifact@v4
         with:
-          name: duo-logs
+          name: duo-ui-logs
           path: |
             ${{ env.OUT }}/*.log
             ${{ env.OUT }}/*.json
