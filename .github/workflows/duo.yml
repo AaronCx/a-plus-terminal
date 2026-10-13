@@ -86,6 +86,7 @@ jobs:
             | tee "$OUT/build-beta.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)|BUILD (SUCCEEDED|FAILED)'
 
       - name: Unit tests on Duo
+        timeout-minutes: 25
         run: |
           set -o pipefail
           xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
@@ -101,17 +102,32 @@ jobs:
           nohup scripts/duo-pose-driver.sh "$UDID" "$OUT/shots" > "$OUT/pose-driver.log" 2>&1 &
           echo "DRIVER_PID=$!" >> "$GITHUB_ENV"
 
+      # Facts first, bounded: what each display reports and how long every
+      # power switch and screenshot takes, before a test depends on them.
+      - name: Duo display inventory
+        timeout-minutes: 6
+        continue-on-error: true
+        run: |
+          t() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          t 30 xcrun simctl io "$UDID" enumerate 2>&1 | grep -iE 'screen|display|power|name|size|port' | head -60
+          for d in 1 3; do
+            s=$SECONDS; t 20 xcrun simctl io "$UDID" screenshot --mask=ignored --display=$d "$OUT/shots/00-boot-display$d.png" >/dev/null 2>&1; echo "boot shot display $d rc=$? $((SECONDS-s))s"
+          done
+
       - name: Duo layout UI test (unfolded fills the display; fold mid-session)
+        timeout-minutes: 20
         run: |
           set -o pipefail
           xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
             -only-testing:aPlusTerminalUITests/DuoLayoutUITests -resultBundlePath "$OUT/duo-ui.xcresult" \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 420 \
             APLUSTERMINAL_DUO=1 test-without-building 2>&1 \
             | tee "$OUT/duo-ui.log" | grep -E 'DUO:|error:|Test Case .*(passed|failed|skipped)|\*\* TEST (SUCCEEDED|FAILED)'
 
       # A skipped test is not a pass: both Duo tests must have RUN and passed.
       - name: Both Duo tests ran
+        if: always()
         run: |
           xcrun xcresulttool get test-results tests --path "$OUT/duo-ui.xcresult" > "$OUT/duo-ui-tests.json"
           python3 -I - "$OUT/duo-ui-tests.json" <<'PY'
@@ -156,6 +172,7 @@ jobs:
 
       - name: Upload screenshots
         if: always()
+        timeout-minutes: 5
         uses: actions/upload-artifact@v4
         with:
           name: duo-screenshots
@@ -164,6 +181,7 @@ jobs:
 
       - name: Upload logs
         if: always()
+        timeout-minutes: 5
         uses: actions/upload-artifact@v4
         with:
           name: duo-logs
@@ -176,6 +194,7 @@ jobs:
       - name: Clean up
         if: always()
         run: |
+          echo "=== pose driver"; cat "$OUT/pose-driver.log" 2>/dev/null || true
           [ -z "${DRIVER_PID:-}" ] || kill "$DRIVER_PID" 2>/dev/null || true
           cat "$HOME/.aplus-duo/sshd.log" 2>/dev/null | tail -20 || true
           scripts/duo-ci-sshd.sh stop || true

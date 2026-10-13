@@ -20,14 +20,31 @@ shots="$2"
 dir="$HOME/.aplus-duo"
 mkdir -p "$shots"
 
+exec 3>&1
 t() { perl -e 'alarm shift; exec @ARGV' "$@"; }
-power() { t 30 xcrun simctl io "$udid" screenConfig --display="$1" power "$2"; }
+log() { echo "$(date +%H:%M:%S) $*" >&3; }
+power() {
+  local start=$SECONDS rc=0
+  t 30 xcrun simctl io "$udid" screenConfig --display="$1" power "$2" || rc=$?
+  log "power display $1 $2: rc=$rc in $((SECONDS - start))s"
+  return $rc
+}
 
+# Screenshots the lit display only (a dark one has nothing to show and has
+# been seen to stall), then records its pixel size for the test.
 shoot() {
-  for d in 1 3; do
-    t 30 xcrun simctl io "$udid" screenshot --mask=ignored --display="$d" \
-      "$shots/$1-display$d.png" >/dev/null 2>&1 || rm -f "$shots/$1-display$d.png"
-  done
+  local d=$2 file="$shots/$1-display$2.png" start=$SECONDS
+  if t 30 xcrun simctl io "$udid" screenshot --mask=ignored --display="$d" "$file" >/dev/null 2>&1; then
+    local w h
+    w=$(sips -g pixelWidth "$file" | awk '/pixelWidth/ {print $2}')
+    h=$(sips -g pixelHeight "$file" | awk '/pixelHeight/ {print $2}')
+    printf '%s %s %s\n' "$d" "$w" "$h" > "$dir/display.txt"
+    log "shot $file ${w}x${h} in $((SECONDS - start))s"
+  else
+    rm -f "$file" "$dir/display.txt"
+    log "shot display $d failed after $((SECONDS - start))s"
+    return 1
+  fi
 }
 
 apply() {
@@ -47,14 +64,16 @@ while :; do
     set -- $request
     pose="$1"
     n=$((n + 1))
-    echo "pose $n: $pose"
+    log "pose $n: $pose requested"
     if out=$(apply "$pose" 2>&1); then
       # Let the system move the scene and the app re-lay out.
       sleep 4
-      shoot "$(printf %02d "$n")-$pose"
+      lit=3; [ "$pose" = folded ] && lit=1
+      shoot "$(printf %02d "$n")-$pose" "$lit" || true
       printf '%s\n' "$request" > "$dir/pose-done.tmp" && mv "$dir/pose-done.tmp" "$dir/pose-done"
+      log "pose $n: $pose done"
     else
-      echo "pose $pose failed: $out" >&2
+      log "pose $pose failed: $out"
       printf 'error %s %s\n' "$request" "$(echo "$out" | tr '\n' ' ')" > "$dir/pose-done.tmp" && mv "$dir/pose-done.tmp" "$dir/pose-done"
     fi
   fi

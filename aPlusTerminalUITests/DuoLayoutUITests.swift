@@ -60,18 +60,18 @@ final class DuoLayoutUITests: XCTestCase {
     /// Unfolded, the app's window is the whole inner display: built with the
     /// iOS 27.1 SDK it is not letterboxed into a phone-sized box.
     func testUnfoldedWindowFillsTheInnerDisplay() throws {
-        shot("unfolded-servers")
-        let screen = screenPoints()
+        let display = try XCTUnwrap(litDisplay(), "the pose driver reported no lit display")
         let window = app.windows.firstMatch.frame
-        record("unfolded screen \(screen) window \(window) app \(app.frame)")
-        XCTAssertGreaterThan(min(screen.width, screen.height), 600,
-                             "this is not the Duo's inner display (\(screen)) — the pose driver did not unfold it")
-        XCTAssertEqual(window.minX, 0, accuracy: 1, "window is inset from the display: \(window) on \(screen)")
-        XCTAssertEqual(window.minY, 0, accuracy: 1, "window is inset from the display: \(window) on \(screen)")
-        XCTAssertEqual(window.width, screen.width, accuracy: 1, "letterboxed: window \(window) on display \(screen)")
-        XCTAssertEqual(window.height, screen.height, accuracy: 1, "letterboxed: window \(window) on display \(screen)")
-        XCTAssertEqual(app.frame.size.width, screen.width, accuracy: 1)
-        XCTAssertEqual(app.frame.size.height, screen.height, accuracy: 1)
+        let scale = XCUIScreen.main.scale
+        record("unfolded display \(display) px, window \(window) pt @\(scale)x, app \(app.frame)")
+        XCTAssertEqual(display.id, 3, "unfolded, the lit display should be the inner one (3), got \(display)")
+        // The window in pixels, in either orientation of the panel.
+        let px = CGSize(width: window.width * scale, height: window.height * scale)
+        let fills = (abs(px.width - display.width) <= scale && abs(px.height - display.height) <= scale)
+            || (abs(px.width - display.height) <= scale && abs(px.height - display.width) <= scale)
+        XCTAssertTrue(fills, "letterboxed: window \(window) pt = \(px) px on a \(display.width)x\(display.height) px display")
+        XCTAssertEqual(window.minX, 0, accuracy: 1, "window is inset from the display: \(window)")
+        XCTAssertEqual(window.minY, 0, accuracy: 1, "window is inset from the display: \(window)")
     }
 
     /// A live session through folded -> unfolded -> folded: the app stays in
@@ -80,22 +80,19 @@ final class DuoLayoutUITests: XCTestCase {
     func testFoldingMidSessionResizesTheGrid() throws {
         openSession()
         let unfolded = try grid(after: nil)
-        shot("unfolded-terminal")
         record("unfolded grid \(unfolded.cols)x\(unfolded.rows), window \(app.windows.firstMatch.frame)")
 
         try pose("folded")
         let folded = try grid(after: unfolded)
         XCTAssertEqual(app.state, .runningForeground, "folding sent the app away")
         XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 10), "folding dropped the session screen")
-        shot("folded-terminal")
-        record("folded grid \(folded.cols)x\(folded.rows), window \(app.windows.firstMatch.frame), screen \(screenPoints())")
+        record("folded grid \(folded.cols)x\(folded.rows), window \(app.windows.firstMatch.frame)")
         XCTAssertLessThan(folded.cols, unfolded.cols, "the outer display fits fewer columns than the inner one")
 
         try pose("unfolded")
         let reopened = try grid(after: folded)
         XCTAssertEqual(app.state, .runningForeground)
         XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 10), "unfolding dropped the session screen")
-        shot("unfolded-again-terminal")
         record("unfolded-again grid \(reopened.cols)x\(reopened.rows), window \(app.windows.firstMatch.frame)")
         XCTAssertEqual(reopened.cols, unfolded.cols, "unfolding again did not restore the inner display's columns")
 
@@ -103,7 +100,6 @@ final class DuoLayoutUITests: XCTestCase {
         let refolded = try grid(after: reopened)
         XCTAssertEqual(app.state, .runningForeground)
         XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 10), "folding again dropped the session screen")
-        shot("folded-again-terminal")
         record("folded-again grid \(refolded.cols)x\(refolded.rows)")
         XCTAssertEqual(refolded.cols, folded.cols, "folding again did not return to the outer display's columns")
     }
@@ -197,23 +193,15 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 30), "never reached a connected session")
     }
 
-    /// The size in points of the display the app is on: the largest lit
-    /// screen XCUITest can see (a dark one screenshots as nothing useful).
-    /// Every screen is recorded, so a wrong pick shows in the log.
-    private func screenPoints() -> CGSize {
-        let sizes = XCUIScreen.screens.map { $0.screenshot().image.size }
-        record("screens \(sizes) main \(XCUIScreen.main.screenshot().image.size)")
-        return sizes.max { $0.width * $0.height < $1.width * $1.height } ?? .zero
-    }
-
-    /// One attachment per screen XCUITest can see (the Duo has two).
-    private func shot(_ name: String) {
-        for (index, screen) in XCUIScreen.screens.enumerated() {
-            let attachment = XCTAttachment(screenshot: screen.screenshot())
-            attachment.name = "\(name)-screen\(index)"
-            attachment.lifetime = .keepAlways
-            add(attachment)
-        }
+    /// The display the host driver lit for the current pose, from its own
+    /// screenshot of it: "<display id> <width px> <height px>". XCUITest's
+    /// screenshots are not used — on the two-display Duo they can address
+    /// the dark panel.
+    private func litDisplay() -> (id: Int, width: CGFloat, height: CGFloat)? {
+        guard let text = try? String(contentsOfFile: "\(duoDir)/display.txt", encoding: .utf8) else { return nil }
+        let parts = text.split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        return (parts[0], CGFloat(parts[1]), CGFloat(parts[2]))
     }
 
     private func record(_ line: String) {
