@@ -27,6 +27,10 @@ struct TerminalScreen: View {
         ZStack {
             TerminalHostView(session: session, fontSize: theme.terminalFontSize)
 
+            // With AGENT_NOTIFY this is develop's if/else exactly (one view
+            // slot, the tmux hint ahead of the setup card); without it, the
+            // hint alone.
+            #if AGENT_NOTIFY
             if session.showMultiplexerHint {
                 VStack {
                     TmuxMouseHintBanner {
@@ -34,16 +38,22 @@ struct TerminalScreen: View {
                     }
                     Spacer()
                 }
-            }
-            #if AGENT_NOTIFY
-            // Below the tmux hint in priority: one card over the terminal at a time.
-            if !session.showMultiplexerHint, session.showNotificationSetupCard {
+            } else if session.showNotificationSetupCard {
                 VStack {
                     NotificationSetupCard {
                         session.showNotificationSetupCard = false
                     }
                     .onAppear {
                         sessionManager.notificationSetupCardAppeared(in: session)
+                    }
+                    Spacer()
+                }
+            }
+            #else
+            if session.showMultiplexerHint {
+                VStack {
+                    TmuxMouseHintBanner {
+                        session.showMultiplexerHint = false
                     }
                     Spacer()
                 }
