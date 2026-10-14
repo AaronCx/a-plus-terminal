@@ -13,14 +13,18 @@ settings:
     # identical versions or App Store Connect rejects the upload.
     CURRENT_PROJECT_VERSION: 76
     MARKETING_VERSION: "1.0.4"
-    # Agent notifications (posting for bells / OSC 9 / 777 / 7501, the
-    # permission ask, the Claude Code setup card, Settings → Notifications and
-    # its "Send test notification") are compiled OUT on this branch: every
-    # entry point is wrapped in `#if AGENT_NOTIFY`, and this switch is empty.
+    # Agent notifications are compiled OUT on this branch: this switch is
+    # empty, and `#if AGENT_NOTIFY` removes every entry point (posting for
+    # bells / OSC 9 / 777 / 7501, the notification delegate) together with
+    # the permission ask (AgentAlertCenter.agentDetected and
+    # sendTestNotification, the only requestAuthorization calls) and the UI
+    # (the Claude Code setup card, Settings → Notifications). What stays
+    # compiled is unreachable: AgentAlertPolicy and AgentAlertCenter's
+    # posting shell, kept so the policy's unit tests still run.
     # Setting it to AGENT_NOTIFY turns the condition on in BOTH app targets
-    # and all three test targets at once, restoring develop's behaviour
-    # exactly; the notification work itself is preserved unchanged on branch
-    # test/agent-notifications. It is a plain build setting rather than a
+    # and all three test targets at once and restores develop's code (each
+    # gated hunk is develop's text); the notification work itself is
+    # preserved unchanged on branch test/agent-notifications. It is a plain build setting rather than a
     # condition here because a project-level SWIFT_ACTIVE_COMPILATION_CONDITIONS
     # would drop Debug's `DEBUG` (see the MESHYY note on the aPlusTerminal
     # target). The agent-status heuristic (badge, Live Activity, Dynamic

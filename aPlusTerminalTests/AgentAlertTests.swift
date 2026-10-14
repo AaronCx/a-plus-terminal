@@ -704,8 +704,14 @@ final class NotificationSetupCardTests: XCTestCase {
     #else
     /// Agent notifications compiled out (AGENT_NOTIFY unset): Claude Code
     /// detected in a session the REAL SessionManager opened raises no setup
-    /// card, asks for no permission, and a signal that clears every gate
-    /// still never reaches AgentAlertCenter — the wiring is not compiled in.
+    /// card, and a signal that clears every gate still never reaches
+    /// AgentAlertCenter — the wiring is not compiled in.
+    ///
+    /// The permission ask is not asserted here because nothing at runtime can
+    /// see it; the compiler holds it instead. Without AGENT_NOTIFY,
+    /// `AgentAlertCenter.agentDetected()` and `sendTestNotification()` (the
+    /// only two `requestAuthorization` calls) do not exist, so a default
+    /// `requestAlertAuthorization` seam that reached for them would not build.
     func testCompiledOutNothingReachesTheAlertCenter() throws {
         let settings = AppSettings(defaults: UserDefaults(suiteName: "NotifyOff-\(UUID().uuidString)")!)
         let manager = self.manager(settings)
@@ -713,7 +719,9 @@ final class NotificationSetupCardTests: XCTestCase {
         var posted: [String] = []
         manager.alertCenter = AgentAlertCenter(addRequest: { posted.append($0.identifier) })
         let session = manager.open(server: Server(name: "a", host: "127.0.0.1", username: "t"))
-        // The DEFAULT permission seam, not a test stub: it must ask nothing.
+        // The default permission seam is left in place (not stubbed), so the
+        // detection below runs the real seam; see the doc comment for why
+        // its silence is a compile-time guarantee rather than an assertion.
         session.appIsActive = { false }
         session.agentMonitor.observe(Array("Claude Code v2.1.296".utf8))
         session.noteAgentStatus(.none)

@@ -11,6 +11,10 @@ enum AgentNotificationSetup {
     static let settingsPath = "~/.claude/settings.json"
 }
 
+// The card and the Settings section are agent-notification UI: compiled
+// out with the rest of it when AGENT_NOTIFY is unset (see project.yml), so
+// neither the views nor their strings ship in such a build.
+#if AGENT_NOTIFY
 /// The one-time card shown over the terminal the first time Claude Code is
 /// detected. Settings → Notifications → "Set up Claude Code" shows the same
 /// content as a page.
@@ -160,3 +164,4 @@ struct NotificationSettingsSection: View {
         }
     }
 }
+#endif

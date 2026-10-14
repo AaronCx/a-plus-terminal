@@ -221,7 +221,9 @@ final class TerminalSession: Identifiable, Hashable {
     }
     /// Asks for notification permission (once per process, in the shell).
     /// A seam so tests can see WHEN it is asked without a system dialog.
-    /// Without AGENT_NOTIFY (agent notifications compiled out) it asks nothing.
+    /// Without AGENT_NOTIFY (agent notifications compiled out) it asks nothing:
+    /// `AgentAlertCenter.agentDetected()` is compiled out too, so a default
+    /// that still called it would not build.
     @ObservationIgnored var requestAlertAuthorization: () -> Void = {
         #if AGENT_NOTIFY
         AgentAlertCenter.shared.agentDetected()
