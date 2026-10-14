@@ -107,7 +107,9 @@ jobs:
   layout-ui:
     name: Duo layout UI test
     runs-on: xcode-27
-    timeout-minutes: 90
+    # Setup and build ~13, the test step up to 65, the export/upload/clean
+    # steps below up to 22.
+    timeout-minutes: 110
     # checks: write is for the live log below — the only record that
     # survives when a preview VM freezes mid-step and takes the job's own
     # logs with it.
@@ -154,9 +156,13 @@ jobs:
       # xcodebuild runs under a watchdog inside the step: progress is printed
       # as it happens (so a stall is visible in this step's log), and after
       # 20 minutes the run is stopped with the simulator's recent app/runner
-      # log, so the job always reaches its later steps.
+      # log, so the job always reaches its later steps. The step's limit has
+      # to cover boot (~1-5 min), the warm-up (20 min by its clock, ~25 on
+      # a VM that stalls), the watchdog's 20 minutes and its stop-and-log
+      # tail; at 50 minutes run 38514007678's step timed out right after the
+      # watchdog fired, before its cleanup could run.
       - name: Duo layout UI test (outer panel only; fills it, columns follow width, live pty resize)
-        timeout-minutes: 50
+        timeout-minutes: 65
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
