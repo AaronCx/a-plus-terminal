@@ -307,7 +307,7 @@ schemes:
         APLUSTERMINAL_TEST_AGENT_ICON_FILE: $(APLUSTERMINAL_TEST_AGENT_ICON_FILE)
         APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON: $(APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON)
         # iPhone Duo layout suite (DuoLayoutUITests): only duo.yml sets it,
-        # with its loopback sshd and fold driver running.
+        # with its loopback sshd running. Nothing folds the simulator.
         APLUSTERMINAL_DUO: $(APLUSTERMINAL_DUO)
       targets:
         - aPlusTerminalTests

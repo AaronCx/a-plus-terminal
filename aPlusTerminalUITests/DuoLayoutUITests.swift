@@ -1,26 +1,32 @@
 import XCTest
 
-/// iPhone Duo (the foldable), on the iOS 27.1 simulator: the app's window
-/// fills the panel it is on (not letterboxed into a phone-sized box), and a
-/// live terminal session resizes the pty the server sees when its window
-/// area changes mid-session.
+/// iPhone Duo (the foldable), on the iOS 27.1 simulator, OUTER panel only:
+/// the app's window fills that panel (not a letterboxed phone-sized box),
+/// the terminal's column count follows the terminal's width, and a live
+/// session resizes the pty the server sees when its window area changes.
 ///
 /// Runs on CI only, from `.github/workflows/duo.yml` on the iPhone Duo
 /// simulator built with the iOS 27.1 SDK. That job starts a throwaway
 /// loopback sshd (`scripts/duo-ci-sshd.sh`) whose login writes the pty size
 /// the SERVER sees to `~/.aplus-duo/grid.txt`, and records the Duo's panel
-/// sizes from its device profile in `~/.aplus-duo/display.txt`. The
-/// simulator shares the host filesystem, so the seed, the key and the grid
-/// all come from files and nothing secret crosses a build setting.
+/// sizes (`display.txt`) and model identifier (`model.txt`) from its device
+/// type in `~/.aplus-duo`. The simulator shares the host filesystem, so the
+/// seed, the key and the grid all come from files and nothing secret
+/// crosses a build setting. setUp fails unless the simulator it runs on IS
+/// that model with two panels, so a run on another iPhone proves nothing
+/// and cannot pass.
 ///
 /// What this cannot do: fold or unfold. The simulator boots folded (the app
 /// on the outer panel), and its only scriptable fold control, `simctl io
 /// screenConfig --display=N power off`, crashed SpringBoard in CI ("The
-/// system shell (SpringBoard) probably crashed", 2026-10-14) — so the inner
-/// panel and the fold transition are not exercised here. Rotation is no
-/// substitute either: on the outer panel it left the window unchanged.
-/// The mid-session resize below hides the keyboard instead, the same
-/// size-change path (window area -> SwiftTerm -> pty) a fold drives.
+/// system shell (SpringBoard) probably crashed", 2026-10-14). So the inner
+/// 7.6" panel — where an iOS 26-SDK build is letterboxed — and the fold
+/// transition are NOT exercised here: a build that letterboxes only on the
+/// inner panel passes this suite. Rotation is no substitute either: on the
+/// outer panel it left the window unchanged. The mid-session resize below
+/// hides the keyboard, which changes the terminal's height (rows) only;
+/// columns are checked against the terminal's measured width instead, at
+/// two font sizes.
 ///
 /// Skipped unless the runner passes `APLUSTERMINAL_DUO=1`; the workflow then
 /// checks the result bundle, so a skip there fails the job instead of passing.
@@ -35,10 +41,23 @@ final class DuoLayoutUITests: XCTestCase {
                                    "no \(duoDir)/server.json — scripts/duo-ci-sshd.sh start did not run")
         let key = try XCTUnwrap(FileManager.default.contents(atPath: "\(duoDir)/client_ed25519"),
                                 "no client key in \(duoDir)")
+        // On the Duo, or the results mean nothing: the simulator's model must
+        // be the iPhone Duo device type's, and that type has two panels.
+        let duoModel = try XCTUnwrap(
+            (try? String(contentsOfFile: "\(duoDir)/model.txt", encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "no \(duoDir)/model.txt — duo.yml records the iPhone Duo's model identifier there")
+        let model = env["SIMULATOR_MODEL_IDENTIFIER"]
+        print("DUO: simulator model \(model ?? "nil") (\(env["SIMULATOR_DEVICE_NAME"] ?? "?")), iPhone Duo is \(duoModel)")
+        XCTAssertEqual(model, duoModel, "not running on the iPhone Duo simulator")
+        XCTAssertEqual(displaySizes()?.count, 2, "the iPhone Duo has two panels; display.txt says \(String(describing: displaySizes()))")
         app = XCUIApplication()
         app.launchEnvironment["APLUSTERMINAL_TEST_SERVER"] = String(decoding: server, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         app.launchEnvironment["APLUSTERMINAL_TEST_PRIVATE_KEY"] = key.base64EncodedString()
+        // A known font size (a UserDefaults argument), so the column count
+        // can be predicted from the terminal's width.
+        app.launchArguments = ["-terminalFontSize", "\(Int(Self.fontSizes[0]))"]
         addUIInterruptionMonitor(withDescription: "system alert") { alert in
             for title in ["Allow", "Allow While Using App", "OK", "Continue", "Don't Allow"] {
                 let button = alert.buttons[title]
@@ -50,8 +69,17 @@ final class DuoLayoutUITests: XCTestCase {
             return false
         }
         print("DUO: setUp launching")
-        app.launch()
+        try launch()
         print("DUO: setUp launched, state \(app.state.rawValue)")
+    }
+
+    /// Launches with no grid on file, so the next one read is this launch's
+    /// session and never one left behind by an earlier test.
+    private func launch() throws {
+        let gridFile = "\(duoDir)/grid.txt"
+        try? FileManager.default.removeItem(atPath: gridFile)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: gridFile), "could not clear a stale \(gridFile)")
+        app.launch()
         // On Xcode 26 a launch has intermittently arrived without its
         // launchEnvironment (see AgentNotificationLiveUITests). The seeded
         // server row is the proof this launch got it; relaunch once if not.
@@ -63,34 +91,74 @@ final class DuoLayoutUITests: XCTestCase {
                       "the seeded Duo server never appeared — the launch got no seed")
     }
 
+    /// The terminal font sizes the column check runs at (13 is the default).
+    private static let fontSizes: [Double] = [13, 20]
+
     // MARK: - Tests
 
-    /// The app's window is the whole panel it is on — one of the Duo's two
-    /// panels, pixel for pixel — not a letterboxed phone-sized box.
-    func testWindowFillsTheDuoPanelItIsOn() throws {
+    /// The app's window is the whole OUTER panel (screen 1), pixel for
+    /// pixel — not a letterboxed phone-sized box. The simulator boots
+    /// folded, so the inner panel is never measured (see the file header).
+    func testWindowFillsTheOuterPanel() throws {
         try capture("01-launch")
         let displays = try XCTUnwrap(displaySizes(), "duo.yml wrote no display sizes")
+        let outer = try XCTUnwrap(displays[Self.outerPanel], "display.txt has no outer panel (screen \(Self.outerPanel)): \(displays)")
         let window = app.windows.firstMatch.frame
-        // The runner's own display scale (both Duo panels are @3x).
-        let traitScale = UITraitCollection.current.displayScale
-        let scale = traitScale > 0 ? traitScale : 3
+        let scale = displayScale
         let px = CGSize(width: window.width * scale, height: window.height * scale)
         record("displays \(displays) px, window \(window) pt @\(scale)x = \(px) px, app \(app.frame)")
-        // Either orientation of either panel.
-        let panel = displays.first { _, size in
-            (abs(px.width - size.width) <= scale && abs(px.height - size.height) <= scale)
-                || (abs(px.width - size.height) <= scale && abs(px.height - size.width) <= scale)
-        }
-        XCTAssertNotNil(panel, "letterboxed: window \(window) pt = \(px) px matches no Duo panel \(displays)")
-        record("window fills panel \(panel.map { "\($0.key) (\(Int($0.value.width))x\(Int($0.value.height)) px)" } ?? "none")")
+        // Either orientation of the outer panel.
+        let fills = (abs(px.width - outer.width) <= scale && abs(px.height - outer.height) <= scale)
+            || (abs(px.width - outer.height) <= scale && abs(px.height - outer.width) <= scale)
+        XCTAssertTrue(fills, "letterboxed: window \(window) pt = \(px) px is not the outer panel's \(outer) px")
+        record("window fills outer panel \(Self.outerPanel) (\(Int(outer.width))x\(Int(outer.height)) px)")
         XCTAssertEqual(window.minX, 0, accuracy: 1, "window is inset from the panel: \(window)")
         XCTAssertEqual(window.minY, 0, accuracy: 1, "window is inset from the panel: \(window)")
+    }
+
+    /// The column count the server sees is the terminal's measured width in
+    /// cells, at two font sizes: a fixed column count, or a terminal pinned
+    /// narrower than the space it is given, fails. (A cap wider than this
+    /// panel's terminal area would only show on the inner panel.)
+    func testColumnsFollowTheTerminalWidth() throws {
+        var previous: Grid?
+        for (index, size) in Self.fontSizes.enumerated() {
+            if index > 0 {
+                app.terminate()
+                app.launchArguments = ["-terminalFontSize", "\(Int(size))"]
+                try launch()
+            }
+            openSession()
+            let grid = try grid(after: nil)
+            let window = app.windows.firstMatch.frame
+            let terminal = app.descendants(matching: .any)["terminalView"].firstMatch
+            XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal view on screen")
+            let frame = terminal.frame
+            let cell = cellWidth(fontSize: size)
+            let expected = Int((frame.width / cell).rounded(.down))
+            try capture("05-columns-\(Int(size))pt")
+            record("\(Int(size))pt: grid \(grid), terminal \(frame) in window \(window) (space ends at x=\(trailingNeighbourEdge(of: frame, in: window))), cell \(cell) pt -> \(expected) cols expected")
+            XCTAssertEqual(frame.minX, window.minX, accuracy: 1, "the terminal does not start at the window's edge: \(frame) in \(window)")
+            // It reaches the window's trailing edge, or whatever sits beside
+            // it there (the iOS 27.1 layout puts the toolbar in a column to
+            // the right of the terminal on the Duo's outer panel).
+            let trailing = trailingNeighbourEdge(of: frame, in: window)
+            XCTAssertLessThanOrEqual(trailing - frame.maxX, 24,
+                                     "the terminal stops \(trailing - frame.maxX) pt short of \(trailing): pinned narrower than its space? \(frame) in \(window)")
+            XCTAssertLessThanOrEqual(abs(grid.cols - expected), 1,
+                                     "\(grid.cols) columns at \(Int(size))pt, but the terminal is \(frame.width) pt wide = \(expected) cells")
+            if let previous {
+                XCTAssertLessThan(grid.cols, previous.cols, "a larger font must give fewer columns: \(previous) -> \(grid)")
+            }
+            previous = grid
+        }
     }
 
     /// A live session's pty follows its window area mid-session: hiding the
     /// keyboard gives the terminal more rows and the server sees them;
     /// raising it again gives them back. The session stays connected and the
-    /// app in the foreground throughout.
+    /// app in the foreground throughout. This changes the height only; the
+    /// columns-to-width path is `testColumnsFollowTheTerminalWidth`.
     func testLiveSessionResizesThePtyMidSession() throws {
         openSession()
         let withKeyboard = try grid(after: nil)
@@ -125,6 +193,37 @@ final class DuoLayoutUITests: XCTestCase {
     }
 
     private var duoDir: String { "\(hostHome)/.aplus-duo" }
+
+    /// The Duo's outer panel's screen id in its device profile (3 is inner).
+    private static let outerPanel = 1
+
+    /// The runner's own display scale (both Duo panels are @3x).
+    private var displayScale: CGFloat {
+        let scale = UITraitCollection.current.displayScale
+        return scale > 0 ? scale : 3
+    }
+
+    /// The x where the space to the terminal's right ends: the nearest
+    /// button lying wholly to its right and level with it, else the window's
+    /// trailing edge.
+    private func trailingNeighbourEdge(of terminal: CGRect, in window: CGRect) -> CGFloat {
+        var edge = window.maxX
+        for button in app.buttons.allElementsBoundByIndex {
+            let f = button.frame
+            guard !f.isEmpty, f.minX >= terminal.maxX - 1, f.minX < edge,
+                  f.maxY > terminal.minY, f.minY < terminal.maxY else { continue }
+            edge = f.minX
+        }
+        return edge
+    }
+
+    /// One terminal cell's width, as SwiftTerm computes it: the advance of
+    /// "W" in the system monospaced font, rounded up to whole pixels.
+    private func cellWidth(fontSize: Double) -> CGFloat {
+        let font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let width = ("W" as NSString).size(withAttributes: [.font: font]).width
+        return ceil(width * displayScale) / displayScale
+    }
 
     private struct Grid: Equatable, CustomStringConvertible {
         var rows: Int

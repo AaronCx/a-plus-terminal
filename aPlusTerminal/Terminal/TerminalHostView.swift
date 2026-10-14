@@ -227,6 +227,9 @@ struct TerminalHostView: UIViewRepresentable {
     func makeUIView(context: Context) -> TerminalEmulatorView {
         let view = session.terminalView
         view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        // Lets a UI test find the terminal's frame (DuoLayoutUITests checks
+        // the column count against it). Not spoken by VoiceOver.
+        view.accessibilityIdentifier = "terminalView"
         return view
     }
 

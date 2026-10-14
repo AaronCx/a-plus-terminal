@@ -121,11 +121,17 @@ jobs:
             APLUSTERMINAL_DUO=1 build-for-testing 2>&1 \
             | tee "$OUT/build-ui.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)'
 
-      # The Duo's panel sizes come from its device profile, not `simctl io`.
-      - name: Start loopback sshd, record the Duo's display sizes
+      # The Duo's panel sizes come from its device profile, not `simctl io`;
+      # its model identifier lets the test refuse to run on anything else.
+      - name: Start loopback sshd, record the Duo's display sizes and model
         timeout-minutes: 4
         run: |
           scripts/duo-ci-sshd.sh start
+          xcrun simctl list devicetypes -j | python3 -I -c 'import json,sys
+          print(next(d["modelIdentifier"] for d in json.load(sys.stdin)["devicetypes"]
+                     if d["identifier"] == "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo"))' \
+            | tee "$HOME/.aplus-duo/model.txt"
+          [ -s "$HOME/.aplus-duo/model.txt" ] || { echo "no iPhone Duo device type" >&2; exit 1; }
           caps="/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone Duo.simdevicetype/Contents/Resources/capabilities.plist"
           for i in 0 1; do
             id=$(plutil -extract "capabilities.displays.$i.screenID" raw "$caps")
@@ -139,7 +145,7 @@ jobs:
       # as it happens (so a stall is visible in this step's log), and after
       # 20 minutes the run is stopped with the simulator's recent app/runner
       # log, so the job always reaches its later steps.
-      - name: Duo layout UI test (fills its panel; live pty resize)
+      - name: Duo layout UI test (outer panel only; fills it, columns follow width, live pty resize)
         timeout-minutes: 50
         env:
           GH_TOKEN: ${{ github.token }}
@@ -217,8 +223,8 @@ jobs:
           tail -5 "$OUT/duo-ui.log"
           exit $rc
 
-      # A skipped test is not a pass: both Duo tests must have RUN and passed.
-      - name: Both Duo tests ran
+      # A skipped test is not a pass: every Duo test must have RUN and passed.
+      - name: All Duo tests ran
         if: always()
         timeout-minutes: 4
         run: |
@@ -236,7 +242,8 @@ jobs:
           for root in tree["testNodes"]:
               walk(root)
           print(found)
-          want = {"testWindowFillsTheDuoPanelItIsOn()", "testLiveSessionResizesThePtyMidSession()"}
+          want = {"testWindowFillsTheOuterPanel()", "testColumnsFollowTheTerminalWidth()",
+                  "testLiveSessionResizesThePtyMidSession()"}
           bad = {n: found.get(n) for n in want if found.get(n) != "Passed"}
           if bad:
               sys.exit(f"Duo tests did not pass: {bad}")
