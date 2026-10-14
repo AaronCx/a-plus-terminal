@@ -50,24 +50,37 @@ jobs:
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD build-for-testing 2>&1 \
             | tee "$OUT/build-beta.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)'
 
-      # Boot in its own step, so the boot (several minutes on a fresh iOS
-      # 27.1 Duo, Metal shader compiles holding this VM at load 300-650) is
-      # not charged to the test step's limit. No wait for the load to settle
-      # here: on this job it did not settle in 20 minutes (still ~478 when
-      # the wait gave up, run 38500119005), and the unit tests then passed
-      # under that load in 13 minutes. The test step's limit covers that.
-      - name: Boot the Duo simulator
-        timeout-minutes: 21
+      # A fresh iOS 27.1 Duo simulator's first boot holds this VM at load
+      # 300-650 (Metal shader compiles) for ~15-20 minutes, and the preview
+      # VM can freeze outright inside that: with no wait here, run
+      # 38508509559's xcodebuild sat at "Resolve Package Graph" for the
+      # whole 40-minute test limit. So boot it and wait: until the storm is
+      # draining (the 1-minute load under 30, or under 60 and below half the
+      # 5-minute load), 20 minutes at most. The wait is load-bearing even
+      # when it runs out its 20 minutes with the load still high (run
+      # 38500119005 then passed its tests in 13 minutes at load ~478); the
+      # log says which ended it.
+      - name: Boot the Duo simulator and let the first-boot load settle
+        timeout-minutes: 25
         run: |
           t() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          start=$SECONDS
           t 600 xcrun simctl boot "$UDID" || true
           t 600 xcrun simctl bootstatus "$UDID" -b | tail -1
-          echo "load $(sysctl -n vm.loadavg); $(memory_pressure | tail -1)"
+          ended="the 20-minute cap"
+          while [ $((SECONDS - start)) -lt 1200 ]; do
+            sleep 30
+            echo "[$((SECONDS - start))s] load $(sysctl -n vm.loadavg); $(memory_pressure | tail -1)"
+            if sysctl -n vm.loadavg | awk '{ exit !($2 < 30 || ($2 < 60 && $2 < $3 / 2)) }'; then
+              ended="the load settling"; break
+            fi
+          done
+          echo "warm-up ended by $ended after $((SECONDS - start))s: load $(sysctl -n vm.loadavg)"
 
       # One simulator, never clones: parallel testing would boot extra copies
       # of the two-display Duo on a small VM.
       - name: Unit tests on Duo
-        timeout-minutes: 40
+        timeout-minutes: 25
         run: |
           set -o pipefail
           df -h / | tail -1; memory_pressure | tail -1; echo "load $(sysctl -n vm.loadavg)"
