@@ -79,7 +79,7 @@ jobs:
   layout-ui:
     name: Duo layout UI test
     runs-on: xcode-27
-    timeout-minutes: 50
+    timeout-minutes: 90
     # checks: write is for the live log below — the only record that
     # survives when a preview VM freezes mid-step and takes the job's own
     # logs with it.
@@ -123,10 +123,10 @@ jobs:
 
       # xcodebuild runs under a watchdog inside the step: progress is printed
       # as it happens (so a stall is visible in this step's log), and after
-      # 14 minutes the run is stopped with the simulator's recent app/runner
+      # 20 minutes the run is stopped with the simulator's recent app/runner
       # log, so the job always reaches its later steps.
-      - name: Duo layout UI test (fills the inner display; reshape mid-session)
-        timeout-minutes: 20
+      - name: Duo layout UI test (fills the inner display; fold mid-session)
+        timeout-minutes: 50
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -146,12 +146,33 @@ jobs:
                   return "".join(open(os.path.join(out, name), errors="replace").readlines()[-n:])
               except OSError:
                   return "(none)\n"
-          text = ("## watchdog\n```\n" + tail("watchdog.log", 40) + "```\n## xcodebuild (tail)\n```\n"
-                  + tail("duo-ui.log", 120) + "```\n")
+          text = ("## watchdog\n```\n" + tail("watchdog.log", 40) + "```\n## pose driver\n```\n"
+                  + tail("pose-driver.log", 20) + "```\n## xcodebuild (tail)\n```\n" + tail("duo-ui.log", 120) + "```\n")
           print(json.dumps({"output": {"title": "Duo UI test progress", "summary": text[-60000:]}}))
           PY
             t 20 gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$check" --input "$OUT/live.json" >/dev/null 2>&1 || true
           }
+          census() {
+            echo "[$1 $((SECONDS - start))s] disk $(df -h / | awk 'NR==2 {print $4}') free; $(memory_pressure | tail -1); load $(sysctl -n vm.loadavg); top processes: $(ps -axo comm | sed 's#.*/##' | sort | uniq -c | sort -rn | head -6 | awk '{printf "%s×%s ", $2, $1}')" | tee -a "$OUT/watchdog.log"
+            live
+          }
+          # Warm-up. A fresh iOS 27.1 Duo simulator's first boot pegs this VM
+          # (load 300-650: Metal shader compiles, MTLCompilerService) for
+          # several minutes, and a UI test started inside that times out
+          # on everything. Boot it, then wait for the load to settle.
+          start=$SECONDS
+          census boot
+          t 600 xcrun simctl boot "$UDID" || true
+          t 600 xcrun simctl bootstatus "$UDID" -b | tail -1
+          census booted
+          while [ $((SECONDS - start)) -lt 1200 ]; do
+            sleep 30
+            census warm-up
+            load1=$(sysctl -n vm.loadavg | awk '{print int($2)}')
+            [ "$load1" -lt 30 ] && break
+          done
+          nohup scripts/duo-pose-driver.sh "$UDID" 2> "$OUT/pose-driver.log" > /dev/null &
+          echo "DRIVER_PID=$!" >> "$GITHUB_ENV"
           xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
             -only-testing:aPlusTerminalUITests/DuoLayoutUITests -resultBundlePath "$OUT/duo-ui.xcresult" \
@@ -160,15 +181,15 @@ jobs:
           pid=$!
           seen=0
           start=$SECONDS
+          census tests
           while kill -0 "$pid" 2>/dev/null; do
             sleep 20
             lines=$(wc -l < "$OUT/duo-ui.log")
             sed -n "$((seen + 1)),${lines}p" "$OUT/duo-ui.log" \
               | grep -E 'DUO:|error:|Test Case|Testing failed|hung|\*\* TEST' || true
             seen=$lines
-            echo "[watchdog $((SECONDS - start))s] log lines=$lines; disk $(df -h / | awk 'NR==2 {print $4}') free; $(memory_pressure | tail -1); load $(sysctl -n vm.loadavg); top processes: $(ps -axo comm | sed 's#.*/##' | sort | uniq -c | sort -rn | head -6 | awk '{printf "%s×%s ", $2, $1}')" | tee -a "$OUT/watchdog.log"
-            live
-            if [ $((SECONDS - start)) -gt 840 ]; then
+            census "tests, log lines=$lines,"
+            if [ $((SECONDS - start)) -gt 1200 ]; then
               echo "[watchdog] stopping a stalled run"
               t 60 xcrun simctl spawn "$UDID" log show --last 3m --style compact \
                 --predicate 'process == "aPlusTerminal" OR process CONTAINS "Runner" OR process == "testmanagerd"' \
@@ -204,7 +225,7 @@ jobs:
           for root in tree["testNodes"]:
               walk(root)
           print(found)
-          want = {"testUnfoldedWindowFillsTheInnerDisplay()", "testReshapingMidSessionResizesTheGrid()"}
+          want = {"testUnfoldedWindowFillsTheInnerDisplay()", "testFoldingMidSessionResizesTheGrid()"}
           bad = {n: found.get(n) for n in want if found.get(n) != "Passed"}
           if bad:
               sys.exit(f"Duo tests did not pass: {bad}")
@@ -258,6 +279,8 @@ jobs:
         if: always()
         timeout-minutes: 4
         run: |
+          [ -z "${DRIVER_PID:-}" ] || kill "$DRIVER_PID" 2>/dev/null || true
+          cat "$OUT/pose-driver.log" 2>/dev/null || true
           cat "$HOME/.aplus-duo/sshd.log" 2>/dev/null | tail -20 || true
           scripts/duo-ci-sshd.sh stop || true
           [ -z "${UDID:-}" ] || xcrun simctl delete "$UDID" || true
