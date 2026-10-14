@@ -63,8 +63,9 @@ jobs:
           while [ $((SECONDS - start)) -lt 1200 ]; do
             sleep 30
             echo "[$((SECONDS - start))s] load $(sysctl -n vm.loadavg); $(memory_pressure | tail -1)"
-            [ "$(sysctl -n vm.loadavg | awk '{print int($2)}')" -lt 30 ] && break
+            if [ "$(sysctl -n vm.loadavg | awk '{print int($2)}')" -lt 30 ]; then break; fi
           done
+          echo "settled after $((SECONDS - start))s (or gave up at 20 min): load $(sysctl -n vm.loadavg)"
 
       # One simulator, never clones: parallel testing would boot extra copies
       # of the two-display Duo on a small VM.
@@ -181,7 +182,7 @@ jobs:
             sleep 30
             census warm-up
             load1=$(sysctl -n vm.loadavg | awk '{print int($2)}')
-            [ "$load1" -lt 30 ] && break
+            if [ "$load1" -lt 30 ]; then break; fi
           done
           xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
