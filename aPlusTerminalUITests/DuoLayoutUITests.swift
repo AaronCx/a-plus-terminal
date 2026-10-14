@@ -1,19 +1,26 @@
 import XCTest
 
-/// iPhone Duo (the foldable): unfolded, the app fills the inner display
-/// instead of running letterboxed, and folding and unfolding mid-session
-/// keeps the session and resizes the pty the server sees.
+/// iPhone Duo (the foldable), on the iOS 27.1 simulator: the app's window
+/// fills the panel it is on (not letterboxed into a phone-sized box), and a
+/// live terminal session resizes the pty the server sees when its window
+/// area changes mid-session.
 ///
 /// Runs on CI only, from `.github/workflows/duo.yml` on the iPhone Duo
 /// simulator built with the iOS 27.1 SDK. That job starts a throwaway
 /// loopback sshd (`scripts/duo-ci-sshd.sh`) whose login writes the pty size
-/// the SERVER sees to `~/.aplus-duo/grid.txt`, records the Duo's display
-/// sizes from its device profile in `~/.aplus-duo/display.txt`, and runs a
-/// host-side pose driver (`scripts/duo-pose-driver.sh`) that folds and
-/// unfolds the simulator when this test asks through
-/// `~/.aplus-duo/pose-request` — XCUITest cannot fold a device. The
+/// the SERVER sees to `~/.aplus-duo/grid.txt`, and records the Duo's panel
+/// sizes from its device profile in `~/.aplus-duo/display.txt`. The
 /// simulator shares the host filesystem, so the seed, the key and the grid
 /// all come from files and nothing secret crosses a build setting.
+///
+/// What this cannot do: fold or unfold. The simulator boots folded (the app
+/// on the outer panel), and its only scriptable fold control, `simctl io
+/// screenConfig --display=N power off`, crashed SpringBoard in CI ("The
+/// system shell (SpringBoard) probably crashed", 2026-10-14) — so the inner
+/// panel and the fold transition are not exercised here. Rotation is no
+/// substitute either: on the outer panel it left the window unchanged.
+/// The mid-session resize below hides the keyboard instead, the same
+/// size-change path (window area -> SwiftTerm -> pty) a fold drives.
 ///
 /// Skipped unless the runner passes `APLUSTERMINAL_DUO=1`; the workflow then
 /// checks the result bundle, so a skip there fails the job instead of passing.
@@ -42,7 +49,6 @@ final class DuoLayoutUITests: XCTestCase {
             }
             return false
         }
-        try pose("unfolded")
         print("DUO: setUp launching")
         app.launch()
         print("DUO: setUp launched, state \(app.state.rawValue)")
@@ -59,59 +65,53 @@ final class DuoLayoutUITests: XCTestCase {
 
     // MARK: - Tests
 
-    /// Unfolded, the app's window is the whole inner display: built with the
-    /// iOS 27.1 SDK it is not letterboxed into a phone-sized box.
-    func testUnfoldedWindowFillsTheInnerDisplay() throws {
+    /// The app's window is the whole panel it is on — one of the Duo's two
+    /// panels, pixel for pixel — not a letterboxed phone-sized box.
+    func testWindowFillsTheDuoPanelItIsOn() throws {
         try capture("01-launch")
         let displays = try XCTUnwrap(displaySizes(), "duo.yml wrote no display sizes")
-        let inner = try XCTUnwrap(displays[3], "no inner display (3) among \(displays)")
         let window = app.windows.firstMatch.frame
         // The runner's own display scale (both Duo panels are @3x).
         let traitScale = UITraitCollection.current.displayScale
         let scale = traitScale > 0 ? traitScale : 3
-        record("displays \(displays) px, window \(window) pt @\(scale)x, app \(app.frame)")
-        // The window in pixels, in either orientation of the panel.
         let px = CGSize(width: window.width * scale, height: window.height * scale)
-        let fills = (abs(px.width - inner.width) <= scale && abs(px.height - inner.height) <= scale)
-            || (abs(px.width - inner.height) <= scale && abs(px.height - inner.width) <= scale)
-        XCTAssertTrue(fills, "not filling the inner display: window \(window) pt = \(px) px on a \(inner.width)x\(inner.height) px panel")
-        XCTAssertEqual(window.minX, 0, accuracy: 1, "window is inset from the display: \(window)")
-        XCTAssertEqual(window.minY, 0, accuracy: 1, "window is inset from the display: \(window)")
+        record("displays \(displays) px, window \(window) pt @\(scale)x = \(px) px, app \(app.frame)")
+        // Either orientation of either panel.
+        let panel = displays.first { _, size in
+            (abs(px.width - size.width) <= scale && abs(px.height - size.height) <= scale)
+                || (abs(px.width - size.height) <= scale && abs(px.height - size.width) <= scale)
+        }
+        XCTAssertNotNil(panel, "letterboxed: window \(window) pt = \(px) px matches no Duo panel \(displays)")
+        record("window fills panel \(panel.map { "\($0.key) (\(Int($0.value.width))x\(Int($0.value.height)) px)" } ?? "none")")
+        XCTAssertEqual(window.minX, 0, accuracy: 1, "window is inset from the panel: \(window)")
+        XCTAssertEqual(window.minY, 0, accuracy: 1, "window is inset from the panel: \(window)")
     }
 
-    /// A live session through unfolded -> folded -> unfolded -> folded: the
-    /// app stays in the foreground, the session stays connected, and the pty
-    /// the server sees follows the display — fewer columns on the outer
-    /// panel, and each return to a pose restores that pose's grid.
-    func testFoldingMidSessionResizesTheGrid() throws {
+    /// A live session's pty follows its window area mid-session: hiding the
+    /// keyboard gives the terminal more rows and the server sees them;
+    /// raising it again gives them back. The session stays connected and the
+    /// app in the foreground throughout.
+    func testLiveSessionResizesThePtyMidSession() throws {
         openSession()
-        let unfolded = try grid(after: nil)
-        try capture("02-session-unfolded")
-        record("unfolded grid \(unfolded), window \(app.windows.firstMatch.frame)")
+        let withKeyboard = try grid(after: nil)
+        try capture("02-session-keyboard-up")
+        record("keyboard up: grid \(withKeyboard), window \(app.windows.firstMatch.frame)")
 
-        try pose("folded")
-        let folded = try grid(after: unfolded)
-        XCTAssertEqual(app.state, .runningForeground, "folding sent the app away")
-        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 20), "folding dropped the session screen")
-        try capture("03-session-folded")
-        record("folded grid \(folded), window \(app.windows.firstMatch.frame)")
-        XCTAssertLessThan(folded.cols, unfolded.cols, "the outer panel must fit fewer columns than the inner one")
+        app.buttons["Toggle Keyboard"].tap()
+        let withoutKeyboard = try grid(after: withKeyboard)
+        XCTAssertEqual(app.state, .runningForeground)
+        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 20), "the session screen went away")
+        try capture("03-session-keyboard-down")
+        record("keyboard down: grid \(withoutKeyboard)")
+        XCTAssertGreaterThan(withoutKeyboard.rows, withKeyboard.rows, "hiding the keyboard must give the pty more rows")
+        XCTAssertEqual(withoutKeyboard.cols, withKeyboard.cols, "the keyboard changes rows, not columns")
 
-        try pose("unfolded")
-        let reopened = try grid(after: folded)
-        XCTAssertEqual(app.state, .runningForeground, "unfolding sent the app away")
-        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 20), "unfolding dropped the session screen")
-        try capture("04-session-unfolded-again")
-        record("unfolded-again grid \(reopened)")
-        XCTAssertEqual(reopened.cols, unfolded.cols, "unfolding again did not restore the inner panel's columns")
-
-        try pose("folded")
-        let refolded = try grid(after: reopened)
-        XCTAssertEqual(app.state, .runningForeground, "folding again sent the app away")
-        XCTAssertTrue(app.buttons["Paste"].waitForExistence(timeout: 20), "folding again dropped the session screen")
-        try capture("05-session-folded-again")
-        record("folded-again grid \(refolded)")
-        XCTAssertEqual(refolded.cols, folded.cols, "folding again did not restore the outer panel's columns")
+        app.buttons["Toggle Keyboard"].tap()
+        let again = try grid(after: withoutKeyboard)
+        XCTAssertEqual(app.state, .runningForeground)
+        try capture("04-session-keyboard-up-again")
+        record("keyboard up again: grid \(again)")
+        XCTAssertEqual(again, withKeyboard, "raising the keyboard again did not restore the grid")
     }
 
     // MARK: - Helpers
@@ -166,33 +166,6 @@ final class DuoLayoutUITests: XCTestCase {
         let parts = text.split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
         guard parts.count == 2 else { return nil }
         return Grid(rows: parts[0], cols: parts[1])
-    }
-
-    /// Asks the host-side pose driver to fold or unfold the simulator and
-    /// waits for it to say the simulator is in that pose.
-    private func pose(_ name: String, timeout: TimeInterval = 120) throws {
-        print("DUO: pose \(name) requested")
-        let request = "\(duoDir)/pose-request"
-        let done = "\(duoDir)/pose-done"
-        let token = "\(name) \(UUID().uuidString)"
-        try? FileManager.default.removeItem(atPath: done)
-        try Data((token + "\n").utf8).write(to: URL(fileURLWithPath: request), options: .atomic)
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let reply = try? String(contentsOfFile: done, encoding: .utf8) {
-                let line = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-                if line == token {
-                    print("DUO: pose \(name) reached")
-                    return
-                }
-                if line.hasPrefix("error \(token)") {
-                    XCTFail("the pose driver could not reach \"\(name)\": \(line)")
-                    return
-                }
-            }
-            usleep(250_000)
-        }
-        XCTFail("the host pose driver never answered \"\(name)\" — is scripts/duo-pose-driver.sh running?")
     }
 
     /// A screenshot of the app's window, kept in the result bundle (the
