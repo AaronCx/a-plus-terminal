@@ -4,7 +4,8 @@ name: Duo (iOS 27.1 SDK)
 # GitHub's xcode-27 image carries; main CI (ci.yml) stays on macos-26 with
 # Xcode 26.x, so everything here must also compile there. One job builds both
 # schemes for the Duo simulator and runs the unit tests on it; the other runs
-# DuoLayoutUITests against a real loopback SSH session. Two jobs on two fresh
+# DuoLayoutUITests against a real loopback SSH session (on demand only, see
+# the job). Two jobs on two fresh
 # VMs: a stalled preview VM takes its job's logs with it, so each is short.
 # Nothing here folds the simulator: it boots folded, and its only
 # scriptable fold control (`simctl io screenConfig --display=N power off`)
@@ -106,6 +107,14 @@ jobs:
 
   layout-ui:
     name: Duo layout UI test
+    # On demand only: a push whose head commit message contains [duo-ui]
+    # (workflow_dispatch can't reach a file that isn't on main). It passed on this image
+    # (runs 38491819347, 38500119005), but on most pushes the preview VM sits
+    # at load 400+ compiling the fresh Duo runtime's Metal shaders and
+    # xcodebuild never writes a line before the job's timeout, so as a push
+    # gate it blocked on the runner, not the app. Pushes still build both
+    # schemes and run the unit tests on the Duo (build-and-unit above).
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[duo-ui]')
     runs-on: xcode-27
     # Setup and build ~13, the test step up to 65, the export/upload/clean
     # steps below up to 22.
