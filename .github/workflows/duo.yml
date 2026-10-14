@@ -27,7 +27,7 @@ jobs:
   build-and-unit:
     name: Build both schemes, unit tests on Duo
     runs-on: xcode-27
-    timeout-minutes: 50
+    timeout-minutes: 90
     env:
       OUT: ${{ github.workspace }}/duo-out
     steps:
@@ -50,10 +50,26 @@ jobs:
             -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD build-for-testing 2>&1 \
             | tee "$OUT/build-beta.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)'
 
+      # A fresh iOS 27.1 Duo simulator's first boot holds this VM at load
+      # 300-650 (Metal shader compiles) for ~15 minutes; tests started
+      # inside that crawl past their timeouts. Boot it and wait it out.
+      - name: Boot the Duo simulator and let the first-boot load settle
+        timeout-minutes: 25
+        run: |
+          t() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          start=$SECONDS
+          t 600 xcrun simctl boot "$UDID" || true
+          t 600 xcrun simctl bootstatus "$UDID" -b | tail -1
+          while [ $((SECONDS - start)) -lt 1200 ]; do
+            sleep 30
+            echo "[$((SECONDS - start))s] load $(sysctl -n vm.loadavg); $(memory_pressure | tail -1)"
+            [ "$(sysctl -n vm.loadavg | awk '{print int($2)}')" -lt 30 ] && break
+          done
+
       # One simulator, never clones: parallel testing would boot extra copies
       # of the two-display Duo on a small VM.
       - name: Unit tests on Duo
-        timeout-minutes: 20
+        timeout-minutes: 25
         run: |
           set -o pipefail
           df -h / | tail -1; memory_pressure | tail -1; echo "load $(sysctl -n vm.loadavg)"
