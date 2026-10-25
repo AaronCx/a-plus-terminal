@@ -1,39 +1,51 @@
 #!/bin/bash
-# ship-ci-archive.sh <build-number> <archive.zip> <commit-sha> — sign and upload
-# a TestFlight TEST build whose archive was built on CI.
+# ship-ci-archive.sh <build-number> <archive.zip> <commit-sha> [--app-store]
+# — sign and upload a TestFlight build whose archive was built on CI.
 #
 # Why this exists: the iPhone Duo work needs the iOS 27.1 SDK (Xcode 27.1),
-# and Xcode 27.1 needs macOS 26.6+, which this Mac Mini doesn't run yet. So
-# .github/workflows/duo-archive.yml archives the App Store scheme UNSIGNED on
-# GitHub's xcode-27 image, and this script does the rest here, where the
-# signing identity lives: no signing material ever reaches GitHub.
+# which this Mac Mini doesn't have. So .github/workflows/duo-archive.yml
+# archives the App Store scheme UNSIGNED on GitHub's xcode-27 image, and this
+# script does the rest here, where the signing identity lives: no signing
+# material ever reaches GitHub.
 #
-# It is NOT a release path. ship-testflight.sh stays the only way to cut a
-# beta or an App Store candidate. The image's Xcode 27.1 is beta 1, and App
-# Store Connect accepts beta-SDK builds for TestFlight only, so a build from
-# here can be tested but never submitted. What to Test says so.
+# Without --app-store it ships a TEST build, and What to Test says it is not a
+# candidate. With --app-store it ships an App Store candidate. That requires
+# an archive from the Xcode 27.1 release (RELEASE_XCODE_BUILD): App Store
+# Connect takes beta-Xcode builds for TestFlight only, never for review.
+# Every other build still goes through ship-testflight.sh.
 #
 # Steps:
 #  1. The tree is clean, and <commit-sha> is the remote branch head the
-#     archive was built from.
-#  2. Unpack the archive. Its CFBundleVersion must equal <build-number>, and
-#     it must have been built with the iOS 27.1 SDK.
+#     archive was built from. With --app-store, ci.yml passed on it.
+#  2. Unpack the archive. Its CFBundleVersion must equal <build-number>, it
+#     must have been built with the iOS 27.1 SDK and, with --app-store, with
+#     the Xcode 27.1 release.
 #  3. Sign the widget, then the app, with the Apple Distribution identity and
 #     the entitlements the last ship-testflight archive was signed with (the
 #     entitlements files are unchanged since then; checked against the
 #     reference archive's commit).
-#  4. The same gates as ship-testflight.sh --app-store:
+#  4. The archive gates of ship-testflight.sh --app-store:
 #     - ITMS-90626, dyld/@rpath (0 references), asset bundles;
-#     - check-no-meshyy.sh;
+#     - check-no-meshyy.sh on the archived app;
 #     - plus no agent-notification copy.
+#     Its Debug-build meshyy check runs in ci.yml instead, so --app-store
+#     also requires ci.yml green on the commit (step 1).
 #  5. Upload with xcodebuild -exportArchive (Xcode 26.5 here).
 #  6. Poll to VALID, write What to Test, and send ONE Pushover.
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
 
-USAGE="usage: ship-ci-archive.sh <build-number> <archive.zip> <commit-sha>"
-BUILD_N="${1:?$USAGE}"; ZIP="${2:?$USAGE}"; SHA="${3:?$USAGE}"
+USAGE="usage: ship-ci-archive.sh <build-number> <archive.zip> <commit-sha> [--app-store]"
+(( $# >= 3 && $# <= 4 )) || { echo "$USAGE" >&2; exit 2; }
+BUILD_N="$1"; ZIP="$2"; SHA="$3"
 [[ "$BUILD_N" =~ ^[0-9]+$ ]] || { echo "$USAGE" >&2; exit 2; }
+case "${4:-}" in
+  "") APP_STORE=0 ;;
+  --app-store) APP_STORE=1 ;;
+  *) echo "$USAGE" >&2; exit 2 ;;
+esac
+# The Xcode 27.1 release. Keep in step with the pin in duo-archive.yml.
+RELEASE_XCODE_BUILD="27A9275"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_ID="6779393452"
 TEAM="P6VJJ7XQN9"
@@ -44,13 +56,19 @@ ISSUER="12c7020e-9bb7-4f89-aa7d-0b9818f9bc61"
 DEV_DIR="/Applications/Xcode.app/Contents/Developer"
 PUSHOVER="$HOME/bin/pushover.sh"
 ARCHIVE_DIR="$HOME/Library/Developer/Xcode/Archives/aPlusTerminal"
-ARCHIVE="$ARCHIVE_DIR/build-$BUILD_N-duo-test.xcarchive"
-LOG="$ARCHIVE_DIR/build-$BUILD_N-duo-test.log"
+if (( APP_STORE )); then
+  ARCHIVE="$ARCHIVE_DIR/build-$BUILD_N-appstore.xcarchive"
+  LOG="$ARCHIVE_DIR/build-$BUILD_N-appstore.log"
+  LABEL="App Store candidate $BUILD_N"
+else
+  ARCHIVE="$ARCHIVE_DIR/build-$BUILD_N-duo-test.xcarchive"
+  LOG="$ARCHIVE_DIR/build-$BUILD_N-duo-test.log"
+  LABEL="test build $BUILD_N"
+fi
 # Entitlements source: the last archive ship-testflight.sh signed, and the
 # commit it was built from.
 REF_ARCHIVE="${REF_ARCHIVE:-$ARCHIVE_DIR/build-76-appstore.xcarchive}"
 REF_COMMIT="${REF_COMMIT:-ec114a4}"
-LABEL="test build $BUILD_N"
 
 die() {
   echo "ABORT: $1" >&2
@@ -60,7 +78,9 @@ die() {
 
 cd "$REPO_DIR"
 mkdir -p "$ARCHIVE_DIR" || die "could not create $ARCHIVE_DIR"
-: >"$LOG"
+# --app-store names match ship-testflight.sh's, so never touch the archive the
+# entitlements come from.
+[[ "$ARCHIVE" != "$REF_ARCHIVE" ]] || die "build $BUILD_N's archive is the entitlements reference $REF_ARCHIVE — refusing to replace it"
 
 # [1] Provenance: clean tree; the archive's commit is this branch's pushed head.
 [[ -z "$(git status --porcelain)" ]] || die "working tree dirty — commit or remove first"
@@ -72,23 +92,39 @@ remote_head=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
   || die "archive commit $SHA, local HEAD $(git rev-parse --short HEAD) and origin/$branch ${remote_head:0:9} must all match"
 git diff --quiet "$REF_COMMIT" HEAD -- '*.entitlements' \
   || die "entitlements changed since $REF_COMMIT — the reference archive's entitlements no longer apply"
+if (( APP_STORE )); then
+  # The Debug-build meshyy check (make build-appstore check-appstore) runs in
+  # ci.yml, not here, so a candidate needs ci.yml green on this exact commit.
+  ci=$(gh run list -R AaronCx/a-plus-terminal --workflow ci.yml --commit "$remote_head" \
+    --json conclusion --jq '.[0].conclusion // ""') || die "could not read ci.yml's result for ${remote_head:0:9}"
+  [[ "$ci" == success ]] || die "ci.yml on ${remote_head:0:9} is '${ci:-missing}'; it runs the Debug-build meshyy check a candidate needs"
+fi
 
-# [2] Unpack and identify.
-rm -rf "$ARCHIVE"
+# [2] Unpack and identify. Checks run on a temporary copy, so a wrong build
+# number or archive never replaces an existing archive or empties its log.
 tmp=$(mktemp -d "$ARCHIVE_DIR/.unpack.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
 ditto -x -k "$ZIP" "$tmp" || die "could not unzip $ZIP"
 src=$(find "$tmp" -maxdepth 1 -name '*.xcarchive' | head -1)
 [[ -n "$src" ]] || die "no .xcarchive inside $ZIP"
-mv "$src" "$ARCHIVE" && rm -rf "$tmp"
-app_dir="$ARCHIVE/Products/Applications/aPlusTerminal.app"
-widget_dir="$app_dir/PlugIns/aPlusTerminalWidgets.appex"
-[[ -d "$app_dir" && -d "$widget_dir" ]] || die "archive lacks the app or the widget"
+app_rel="Products/Applications/aPlusTerminal.app"
+widget_rel="$app_rel/PlugIns/aPlusTerminalWidgets.appex"
+[[ -d "$src/$app_rel" && -d "$src/$widget_rel" ]] || die "archive lacks the app or the widget"
 plist() { /usr/libexec/PlistBuddy -c "Print :$2" "$1/Info.plist"; }
-ver=$(plist "$app_dir" CFBundleVersion); mkt=$(plist "$app_dir" CFBundleShortVersionString)
-sdk=$(plist "$app_dir" DTSDKName); xc=$(plist "$app_dir" DTXcodeBuild)
+ver=$(plist "$src/$app_rel" CFBundleVersion); mkt=$(plist "$src/$app_rel" CFBundleShortVersionString)
+sdk=$(plist "$src/$app_rel" DTSDKName); xc=$(plist "$src/$app_rel" DTXcodeBuild)
 [[ "$ver" == "$BUILD_N" ]] || die "archive CFBundleVersion is $ver, expected $BUILD_N"
-[[ "$(plist "$widget_dir" CFBundleVersion)" == "$BUILD_N" ]] || die "widget CFBundleVersion differs from $BUILD_N"
+[[ "$(plist "$src/$widget_rel" CFBundleVersion)" == "$BUILD_N" ]] || die "widget CFBundleVersion differs from $BUILD_N"
 [[ "$sdk" == iphoneos27.1* ]] || die "archive built with $sdk, expected the iOS 27.1 SDK"
+if (( APP_STORE )); then
+  [[ "$xc" == "$RELEASE_XCODE_BUILD" ]] \
+    || die "archive built with Xcode $xc; an App Store candidate needs the Xcode 27.1 release ($RELEASE_XCODE_BUILD)"
+fi
+rm -rf "$ARCHIVE"
+mv "$src" "$ARCHIVE"
+app_dir="$ARCHIVE/$app_rel"
+widget_dir="$ARCHIVE/$widget_rel"
+: >"$LOG"
 echo "archive: $mkt ($ver), SDK $sdk, Xcode build $xc, commit ${SHA:0:9}" | tee -a "$LOG"
 
 # [3] Sign: widget first, then the app that contains it.
@@ -205,7 +241,13 @@ finally:
 PY
 }
 json_get() { python3 -I -c 'import json, sys; d = json.loads(sys.argv[1]); print(eval(sys.argv[2]))' "$1" "$2"; }
-WHAT_TO_TEST="TEST build — $mkt (build $BUILD_N) from branch $branch @ ${SHA:0:9}. NOT the $mkt App Store candidate (that is build 76) and never to be submitted: built with Xcode 27.1 beta 1 (iOS 27.1 SDK) on CI for iPhone Duo support. Agent notifications are compiled out of this build; the agent badge, Live Activity and custom agents are unchanged."
+if (( APP_STORE )); then
+  WHAT_TO_TEST="App Store candidate — $mkt (build $BUILD_N), the iPhone Duo build, from branch $branch @ ${SHA:0:9}, built on CI with Xcode 27.1 ($xc, iOS 27.1 SDK). This is the build that gets submitted. Agent notifications are compiled out and come back in a later release; the agent badge, Live Activity, custom agents and Sessions widget are unchanged."
+  VALID_TITLE="App Store candidate $BUILD_N VALID"
+else
+  WHAT_TO_TEST="TEST build — $mkt (build $BUILD_N) from branch $branch @ ${SHA:0:9}, built on CI with Xcode build $xc (iOS 27.1 SDK) for iPhone Duo support. Not an App Store candidate and never to be submitted. Agent notifications are compiled out of this build; the agent badge, Live Activity and custom agents are unchanged."
+  VALID_TITLE="TestFlight test build $BUILD_N VALID"
+fi
 set_what_to_test() {
   local out loc_id body
   out=$(asc_call GET "/v1/builds/$1/betaBuildLocalizations?limit=50") || return $?
@@ -232,8 +274,8 @@ for i in $(seq 1 60); do
   if [[ "$state" == "VALID" ]]; then
     [[ $notes -eq 1 ]] || { set_what_to_test "$build_id" "$WHAT_TO_TEST" && notes=1; } \
       || die "build $BUILD_N is VALID but What to Test could not be written — set it before handing the build out"
-    "$PUSHOVER" "TestFlight test build $BUILD_N VALID" \
-      "${SHIP_PUSHOVER_MESSAGE:-Test build $mkt ($BUILD_N) processed. Not the App Store candidate.}" \
+    "$PUSHOVER" "$VALID_TITLE" \
+      "${SHIP_PUSHOVER_MESSAGE:-$WHAT_TO_TEST}" \
       "https://appstoreconnect.apple.com/apps/$APP_ID/testflight/ios" >/dev/null 2>&1 \
       || echo "warning: the VALID Pushover did not send" >&2
     echo "$LABEL VALID"
@@ -243,7 +285,7 @@ for i in $(seq 1 60); do
   if [[ $i -eq 20 && "$state" == "ABSENT" && $alarmed -eq 0 ]]; then
     alarmed=1
     "$PUSHOVER" "Build $BUILD_N MISSING at 10 min — likely silent rejection" \
-      "Baseline is VALID in 1-2 min. Check aaronc3214@icloud.com for the ITMS code (a beta-Xcode build would be ITMS-90111). Still polling to 30 min." \
+      "Baseline is VALID in 1-2 min. Check aaronc3214@icloud.com for the ITMS code. Still polling to 30 min." \
       '' >/dev/null 2>&1 || true
   fi
   echo "poll $i: $state"

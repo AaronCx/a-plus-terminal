@@ -33,6 +33,25 @@ notes. The candidate Aaron tests is the build that gets submitted; any change
 after his review means a new candidate. Archives are kept in
 `~/Library/Developer/Xcode/Archives/aPlusTerminal/`.
 
+The iPhone Duo build needs the iOS 27.1 SDK, which this Mac doesn't have.
+`.github/workflows/duo-archive.yml` therefore archives it unsigned on GitHub's
+`xcode-27` image, pinned to the Xcode 27.1 release (27A9275). That runs when a
+push to a `test/**` branch has `[duo-archive]` in its head commit message.
+Then `scripts/ship-ci-archive.sh <build> <archive.zip> <commit> --app-store`
+signs it here and uploads it as the candidate. It runs the archive gates
+above, including `check-no-meshyy.sh` on the archived app. The Debug-build
+meshyy check runs in `ci.yml` (`make check-appstore`), so the script requires
+`ci.yml` to have passed on that commit. Run the dev-signed launch proof on the
+iPhone before the upload. The script refuses an archive from any other Xcode,
+since beta-Xcode builds can't go to App Review.
+
+When Apple approves a candidate cut this way, the commit in step 1 below is
+the `test/**` commit its archive was built from, not a bump merge on
+`develop`. That branch compiles agent notifications out
+(`AGENT_NOTIFY_CONDITION: ""` in `project.yml`). After merging `main` back
+into `develop` in step 5, set it to `AGENT_NOTIFY` on `develop`, unless
+notifications are meant to stay out of the next release as well.
+
 `main` will contain meshyy source behind `#if MESHYY` after a release merge.
 That is expected: the approved binary did not include it.
 
