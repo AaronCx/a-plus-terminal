@@ -1,7 +1,8 @@
 name: Duo setup
 description: >
-  Xcode 27.1, the iOS 27.1 simulator runtime and Metal toolchain it lacks on
-  the xcode-27 image, an iPhone Duo simulator (UDID in the environment), the
+  Xcode 27.1 (pinned to the release, build 27A9275, as in duo-archive.yml),
+  the iOS 27.1 simulator runtime and Metal toolchain (downloaded only if the
+  image lacks them), an iPhone Duo simulator (UDID in the environment), the
   generated project and resolved packages. Frees disk first: the image ships
   several Xcodes and runtimes, and the 27.1 runtime download is ~8 GB.
 runs:
@@ -12,6 +13,8 @@ runs:
       run: |
         app=/Applications/Xcode_27.1.app
         [ -d "$app" ] || { echo "no $app on this image" >&2; ls /Applications | grep -i xcode >&2; exit 1; }
+        build=$("$app/Contents/Developer/usr/bin/xcodebuild" -version | awk '/^Build version/ {print $3}')
+        [ "$build" = 27A9275 ] || { echo "$app is build $build, not the Xcode 27.1 release (27A9275)" >&2; exit 1; }
         echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
         mkdir -p "$OUT/shots" "$OUT/attachments"
         sw_vers; "$app/Contents/Developer/usr/bin/xcodebuild" -version
