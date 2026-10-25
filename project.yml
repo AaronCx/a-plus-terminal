@@ -11,7 +11,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # One source of truth for both targets — the app and widget MUST ship with
     # identical versions or App Store Connect rejects the upload.
-    CURRENT_PROJECT_VERSION: 77
+    CURRENT_PROJECT_VERSION: 78
     MARKETING_VERSION: "1.0.4"
     # Agent notifications are compiled OUT on this branch: this switch is
     # empty, and `#if AGENT_NOTIFY` removes every entry point (posting for
