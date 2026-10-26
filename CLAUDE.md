@@ -20,8 +20,8 @@ Privacy-first iOS SSH terminal. Spec: `~/Documents/github/relay-ios-terminal-spe
 - **`develop` is the integration branch.** Feature branches base on `develop`;
   open PRs with `--base develop` (the global pr-base-main reminder is
   satisfied by any explicit base). CI runs on all PRs.
-- **`main` = latest App Store–approved release only** (currently 1.0.3,
-  build 43). Never push app code to `main`; it moves via a `release/vX.Y.Z`
+- **`main` = latest App Store–approved release only** (currently 1.0.4,
+  build 78). Never push app code to `main`; it moves via a `release/vX.Y.Z`
   PR after Apple approves — full process in `RELEASING.md`. A server-side
   ruleset enforces PR-only, no force pushes.
 - `/ship N` (scripts/ship-testflight.sh) builds TestFlight uploads from
@@ -32,8 +32,10 @@ Privacy-first iOS SSH terminal. Spec: `~/Documents/github/relay-ios-terminal-spe
   commit of a `test/**` push), and
   `scripts/ship-ci-archive.sh N <zip> <sha> --app-store` signs and uploads it.
   See `RELEASING.md`.
-- On approval: tag `vX.Y.Z` at the approved bump commit, GitHub release
-  titled "X.Y.Z (build N)", then merge `main` back into `develop`.
+- On approval: tag `vX.Y.Z` at the commit the approved build was archived
+  from (the bump merge on `develop`, or the `test/**` commit for a
+  CI-archived Duo candidate), GitHub release titled "X.Y.Z (build N)", then
+  merge `main` back into `develop`.
 
 ## Constraints
 
