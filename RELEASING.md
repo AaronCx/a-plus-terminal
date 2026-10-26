@@ -47,10 +47,12 @@ since beta-Xcode builds can't go to App Review.
 
 When Apple approves a candidate cut this way, the commit in step 1 below is
 the `test/**` commit its archive was built from, not a bump merge on
-`develop`. That branch compiles agent notifications out
-(`AGENT_NOTIFY_CONDITION: ""` in `project.yml`). After merging `main` back
-into `develop` in step 5, set it to `AGENT_NOTIFY` on `develop`, unless
-notifications are meant to stay out of the next release as well.
+`develop`. If that branch compiles agent notifications out
+(`AGENT_NOTIFY_CONDITION: ""` in `project.yml`, as `test/1.0.4-duo` did for
+1.0.4), set it back to `AGENT_NOTIFY` on `develop` after merging `main` back
+in step 5, unless notifications are meant to stay out of the next release as
+well. `ship-ci-archive.sh` reads the switch from the commit it ships and runs
+its no-notification-copy gate only when the switch is empty.
 
 `main` will contain meshyy source behind `#if MESHYY` after a release merge.
 That is expected: the approved binary did not include it.

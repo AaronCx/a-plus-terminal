@@ -27,7 +27,9 @@
 #  4. The archive gates of ship-testflight.sh --app-store:
 #     - ITMS-90626, dyld/@rpath (0 references), asset bundles;
 #     - check-no-meshyy.sh on the archived app;
-#     - plus no agent-notification copy.
+#     - plus no agent-notification copy when the commit's project.yml leaves
+#       AGENT_NOTIFY_CONDITION empty (notifications compiled out, as in the
+#       1.0.4 candidate); develop sets it to AGENT_NOTIFY.
 #     Its Debug-build meshyy check runs in ci.yml instead, so --app-store
 #     also requires ci.yml green on the commit (step 1).
 #  5. Upload with xcodebuild -exportArchive (Xcode 26.5 here).
@@ -92,6 +94,14 @@ remote_head=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
   || die "archive commit $SHA, local HEAD $(git rev-parse --short HEAD) and origin/$branch ${remote_head:0:9} must all match"
 git diff --quiet "$REF_COMMIT" HEAD -- '*.entitlements' \
   || die "entitlements changed since $REF_COMMIT — the reference archive's entitlements no longer apply"
+# Agent notifications follow project.yml's AGENT_NOTIFY_CONDITION switch:
+# empty compiles them out, AGENT_NOTIFY compiles them in.
+notify_switch=$(git show "$remote_head:project.yml" | sed -n 's/^ *AGENT_NOTIFY_CONDITION: *//p' | tr -d '"')
+case "$notify_switch" in
+  "") NOTIFY=0 ;;
+  AGENT_NOTIFY) NOTIFY=1 ;;
+  *) die "project.yml's AGENT_NOTIFY_CONDITION is '$notify_switch'; expected empty or AGENT_NOTIFY" ;;
+esac
 if (( APP_STORE )); then
   # The Debug-build meshyy check (make build-appstore check-appstore) runs in
   # ci.yml, not here, so a candidate needs ci.yml green on this exact commit.
@@ -169,12 +179,17 @@ for car in "$app_dir/Assets.car" "$widget_dir/Assets.car"; do
   [[ -z "$missing" ]] || die "asset gate: $car lacks agent icons: $missing"
 done
 "$REPO_DIR/scripts/check-no-meshyy.sh" "$app_dir" >>"$LOG" 2>&1 || die "check-no-meshyy.sh FAILED on the archive — see $LOG"
-for needle in 'Send test notification' 'preferredNotifChannel' 'To get notified'; do
-  if strings -a "$app_bin" "$widget_dir/aPlusTerminalWidgets" | grep -qF "$needle"; then
-    die "agent-notification copy \"$needle\" is in the binary; this build must have notifications compiled out"
-  fi
-done
-echo "gates: ITMS-90626 ok, 0 @rpath, $(wc -l <<<"$icons" | tr -d ' ') agent icons in app and widget, no meshyy, no notification copy" | tee -a "$LOG"
+if (( NOTIFY )); then
+  notify_gate="notifications compiled in"
+else
+  for needle in 'Send test notification' 'preferredNotifChannel' 'To get notified'; do
+    if strings -a "$app_bin" "$widget_dir/aPlusTerminalWidgets" | grep -qF "$needle"; then
+      die "agent-notification copy \"$needle\" is in the binary; this commit's AGENT_NOTIFY_CONDITION is empty, so notifications must be compiled out"
+    fi
+  done
+  notify_gate="no notification copy"
+fi
+echo "gates: ITMS-90626 ok, 0 @rpath, $(wc -l <<<"$icons" | tr -d ' ') agent icons in app and widget, no meshyy, $notify_gate" | tee -a "$LOG"
 
 # [5] Upload (Xcode 26.5's exportArchive re-signs with the App Store profiles).
 exp=$(mktemp -t exportopts).plist
@@ -242,10 +257,20 @@ PY
 }
 json_get() { python3 -I -c 'import json, sys; d = json.loads(sys.argv[1]); print(eval(sys.argv[2]))' "$1" "$2"; }
 if (( APP_STORE )); then
-  WHAT_TO_TEST="App Store candidate — $mkt (build $BUILD_N), the iPhone Duo build, from branch $branch @ ${SHA:0:9}, built on CI with Xcode 27.1 ($xc, iOS 27.1 SDK). This is the build that gets submitted. Agent notifications are compiled out and come back in a later release; the agent badge, Live Activity, custom agents and Sessions widget are unchanged."
+  if (( NOTIFY )); then
+    notify_note="Agent notifications are compiled in."
+  else
+    notify_note="Agent notifications are compiled out and come back in a later release; the agent badge, Live Activity, custom agents and Sessions widget are unchanged."
+  fi
+  WHAT_TO_TEST="App Store candidate — $mkt (build $BUILD_N), the iPhone Duo build, from branch $branch @ ${SHA:0:9}, built on CI with Xcode 27.1 ($xc, iOS 27.1 SDK). This is the build that gets submitted. $notify_note"
   VALID_TITLE="App Store candidate $BUILD_N VALID"
 else
-  WHAT_TO_TEST="TEST build — $mkt (build $BUILD_N) from branch $branch @ ${SHA:0:9}, built on CI with Xcode build $xc (iOS 27.1 SDK) for iPhone Duo support. Not an App Store candidate and never to be submitted. Agent notifications are compiled out of this build; the agent badge, Live Activity and custom agents are unchanged."
+  if (( NOTIFY )); then
+    notify_note="Agent notifications are compiled in."
+  else
+    notify_note="Agent notifications are compiled out of this build; the agent badge, Live Activity and custom agents are unchanged."
+  fi
+  WHAT_TO_TEST="TEST build — $mkt (build $BUILD_N) from branch $branch @ ${SHA:0:9}, built on CI with Xcode build $xc (iOS 27.1 SDK) for iPhone Duo support. Not an App Store candidate and never to be submitted. $notify_note"
   VALID_TITLE="TestFlight test build $BUILD_N VALID"
 fi
 set_what_to_test() {
