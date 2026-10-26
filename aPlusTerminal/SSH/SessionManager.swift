@@ -221,8 +221,13 @@ final class TerminalSession: Identifiable, Hashable {
     }
     /// Asks for notification permission (once per process, in the shell).
     /// A seam so tests can see WHEN it is asked without a system dialog.
+    /// Without AGENT_NOTIFY (agent notifications compiled out) it asks nothing:
+    /// `AgentAlertCenter.agentDetected()` is compiled out too, so a default
+    /// that still called it would not build.
     @ObservationIgnored var requestAlertAuthorization: () -> Void = {
+        #if AGENT_NOTIFY
         AgentAlertCenter.shared.agentDetected()
+        #endif
     }
 
     /// Every observed agent-status change funnels here — from the SSH byte
@@ -249,6 +254,7 @@ final class TerminalSession: Identifiable, Hashable {
     /// Claude Code users the one setting that makes it ring.
     private func noteNamedAgent(_ agent: String) {
         requestAlertAuthorization()
+        #if AGENT_NOTIFY
         // Runs per output chunk: write only on the edge, since an
         // @Observable setter notifies observers even when the value is
         // unchanged and would re-render the terminal screen every chunk.
@@ -256,6 +262,7 @@ final class TerminalSession: Identifiable, Hashable {
            !showNotificationSetupCard {
             showNotificationSetupCard = true
         }
+        #endif
     }
 
     /// Why a signal did or did not reach the alert policy.
@@ -2181,6 +2188,10 @@ final class SessionManager {
         #if MESHYY
         session.meshyyNamesInUse = { [weak self] in self?.meshyyNamesInUse() ?? [] }
         #endif
+        #if AGENT_NOTIFY
+        // Without AGENT_NOTIFY the seam keeps its no-op default: signals are
+        // still parsed and gated (the tests drive them), but nothing reaches
+        // AgentAlertCenter, so nothing posts.
         session.postAgentAlert = { [weak self, weak session] trigger in
             guard let self, let session else { return }
             #if MESHYY
@@ -2199,6 +2210,7 @@ final class SessionManager {
                 pipShowsThisSession: self.pipShowsTerminal(session.id)
             )
         }
+        #endif
         session.onStateChange = { [weak self, weak session] in
             self?.refreshActivity()
             // State drives the pop-out's chip too — multicast into the

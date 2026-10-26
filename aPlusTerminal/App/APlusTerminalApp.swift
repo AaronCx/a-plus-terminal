@@ -1,6 +1,8 @@
 import AppIntents
 import SwiftUI
+#if AGENT_NOTIFY
 import UserNotifications
+#endif
 import os
 
 let deepLinkLog = Logger(subsystem: "com.aaroncx.aplusterminal", category: "deeplink")
@@ -85,12 +87,14 @@ struct APlusTerminalApp: App {
         // …and a pop-out of a session's terminal is the user watching it:
         // that session's agent alerts stay quiet (only that session's).
         sessions.pipShowsTerminal = { [weak pip] in pip?.isShowingTerminal(of: $0) ?? false }
+        #if AGENT_NOTIFY
         // Agent alerts: a notification tap routes its deep link through the
         // same router every other entry point uses.
         UNUserNotificationCenter.current().delegate = AgentAlertCenter.shared
         AgentAlertCenter.shared.openURL = { [weak router] url in
             router?.handle(url)
         }
+        #endif
         vncMonitors.pipKeepsProcessAlive = { [weak pip] in pip?.isActive ?? false }
         // …and when the pop-out ends while still backgrounded, the normal
         // grace window starts at that moment instead.

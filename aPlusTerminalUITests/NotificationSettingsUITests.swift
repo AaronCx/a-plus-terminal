@@ -1,3 +1,6 @@
+// Agent notifications are compiled out unless the app's AGENT_NOTIFY switch
+// is on (project.yml); with them out there is nothing here to test.
+#if AGENT_NOTIFY
 import XCTest
 
 /// Settings → Notifications → "Send test notification" really delivers, and
@@ -40,3 +43,4 @@ final class NotificationSettingsUITests: XCTestCase {
         add(attachment)
     }
 }
+#endif

@@ -1,3 +1,6 @@
+// Agent notifications are compiled out unless the app's AGENT_NOTIFY switch
+// is on (project.yml); with them out there is nothing here to test.
+#if AGENT_NOTIFY
 import XCTest
 
 /// Verifies the notification-tap crash fix: a tap on an agent notification
@@ -41,3 +44,4 @@ final class NotificationTapVerifyUITests: XCTestCase {
                        "the app died within the old crash window after the tap")
     }
 }
+#endif

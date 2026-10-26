@@ -89,8 +89,13 @@ final class PreviewPiPFrameSource: PiPFrameSource {
     /// surface can actually use is `renderer.size.width` PIXELS, so the request
     /// has to be that divided by the screen scale, and never more points than
     /// the view genuinely has.
+    ///
+    /// The scale is the view's own display's (its window's screen, else its
+    /// trait collection), never `UIScreen.main`: on a device with two
+    /// displays — the iPhone Duo's outer and inner screens — "main" is not
+    /// necessarily the one showing the view.
     private func snapshotPointWidth(for webView: WKWebView) -> CGFloat {
-        let scale = max(1, webView.window?.screen.scale ?? UIScreen.main.scale)
+        let scale = max(1, webView.window?.screen.scale ?? webView.traitCollection.displayScale)
         return min(webView.bounds.width, renderer.size.width / scale)
     }
 

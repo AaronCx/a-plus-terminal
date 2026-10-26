@@ -59,6 +59,19 @@ final class AppStoreBuildSettingsUITests: XCTestCase {
         XCTAssertTrue(diagnostics.isEmpty, "the scroll-trace \"Diagnostics\" section is present")
         XCTAssertFalse(texts.contains("settings.scrollTrace"), "the Scroll trace row is present")
 
+        #if !AGENT_NOTIFY
+        // Agent notifications are compiled out (project.yml AGENT_NOTIFY_CONDITION
+        // empty): no Notifications section, no test-notification button, no
+        // Claude Code setup page.
+        let notificationHits = texts.filter {
+            $0.caseInsensitiveCompare("Notifications") == .orderedSame
+                || $0 == "sendTestNotification"
+                || $0.localizedCaseInsensitiveContains("Send test notification")
+                || $0.localizedCaseInsensitiveContains("Set up Claude Code")
+        }
+        XCTAssertTrue(notificationHits.isEmpty, "agent notifications in Settings with AGENT_NOTIFY unset: \(notificationHits)")
+        #endif
+
         // Proof the walk covered the form: the rows either side of where the
         // meshyy section sits in the beta build, and the last row of all.
         let seen = Set(pages.flatMap(\.texts))

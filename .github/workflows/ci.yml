@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    # test/** is for this test branch only (no PR, so nothing else runs CI
+    # on its pushes); develop and main keep [main, develop].
+    branches: [main, develop, 'test/**']
   pull_request:
 
 permissions:

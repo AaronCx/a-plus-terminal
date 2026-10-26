@@ -94,7 +94,9 @@ final class AgentAlertCenter: NSObject {
     static let shared = AgentAlertCenter()
 
     private var policy = AgentAlertPolicy()
+    #if AGENT_NOTIFY
     private var authorizationRequested = false
+    #endif
     /// Injected in tests; the real router in the app.
     var openURL: ((URL) -> Void)?
     /// Hands a decided-yes request to iOS. A seam so a test can see what
@@ -113,6 +115,10 @@ final class AgentAlertCenter: NSObject {
         #endif
     }
 
+    // The permission ask exists only with AGENT_NOTIFY (agent notifications
+    // compiled in). Without it there is no method here that could ask, so a
+    // caller that forgot its own `#if AGENT_NOTIFY` does not build.
+    #if AGENT_NOTIFY
     /// Called the first time an agent is DETECTED in any session — a profile
     /// marker matched, or a program announced itself over OSC 7501 — the
     /// moment notifications become meaningful, which is the sensible ask.
@@ -125,6 +131,7 @@ final class AgentAlertCenter: NSObject {
             options: [.alert, .sound]
         ) { _, _ in }
     }
+    #endif
 
     /// The agent in `session` needs the user. Posts when the policy allows.
     /// `daemonSessionName` is the resumable transport's session name when one
@@ -221,6 +228,7 @@ final class AgentAlertCenter: NSObject {
     /// a banner; it also shows in the foreground (see `willPresent`).
     static let testNotificationDelay: TimeInterval = 5
 
+    #if AGENT_NOTIFY
     enum TestNotificationResult: Equatable {
         case scheduled
         /// Notifications are off for the app; only iOS Settings can fix it.
@@ -253,8 +261,12 @@ final class AgentAlertCenter: NSObject {
         agentAlertLog.notice("test notification scheduled")
         return .scheduled
     }
+    #endif
 }
 
+// Installed as the notification delegate only with AGENT_NOTIFY (see
+// APlusTerminalApp); without it nothing posts, so nothing lands here.
+#if AGENT_NOTIFY
 extension AgentAlertCenter: @preconcurrency UNUserNotificationCenterDelegate {
     /// iOS asks here whenever a notification lands while the app is in the
     /// foreground — which includes `.inactive` (the app switcher, Notification
@@ -294,3 +306,4 @@ extension AgentAlertCenter: @preconcurrency UNUserNotificationCenterDelegate {
         openURL?(url)
     }
 }
+#endif

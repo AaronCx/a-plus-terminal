@@ -1,0 +1,73 @@
+name: Duo archive (iOS 27.1 SDK, unsigned)
+
+# An UNSIGNED Release archive of the App Store scheme, built with the iOS 27.1
+# SDK on GitHub's xcode-27 image, for the iPhone Duo build. This Mac Mini has
+# no Xcode 27.1, so the archive is built here and signed + uploaded on the Mac
+# with the relay-ci keychain (scripts/ship-ci-archive.sh). No signing material
+# ever reaches GitHub.
+#
+# Xcode is pinned to the Xcode 27.1 release (build 27A9275). App Store Connect
+# takes beta-Xcode builds for TestFlight only, never for review, and the
+# image's Xcode_27.1.app was beta 1 (27A9269) until mid-October (build 77).
+# A different build at that path fails the job instead of archiving quietly.
+# Keep the pin in step with .github/actions/duo-setup and
+# scripts/ship-ci-archive.sh.
+
+# Runs when a push to a test/** branch has [duo-archive] in its head commit
+# message (workflow_dispatch can't reach a file that isn't on main).
+on:
+  workflow_dispatch:
+  push:
+    branches: ['test/**']
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    name: Archive aPlusTerminalAppStore (unsigned)
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[duo-archive]')
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode 27.1
+        run: |
+          app=/Applications/Xcode_27.1.app
+          [ -d "$app" ] || { echo "no $app on this image" >&2; ls /Applications | grep -i xcode >&2; exit 1; }
+          build=$("$app/Contents/Developer/usr/bin/xcodebuild" -version | awk '/^Build version/ {print $3}')
+          [ "$build" = 27A9275 ] || { echo "$app is build $build, not the Xcode 27.1 release (27A9275)" >&2; exit 1; }
+          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
+          sw_vers; "$app/Contents/Developer/usr/bin/xcodebuild" -version
+
+      - name: Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain | tail -2
+
+      - name: Generate project and resolve packages
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminalAppStore -resolvePackageDependencies | tail -3
+
+      - name: Archive (no signing)
+        run: |
+          set -o pipefail
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminalAppStore \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/aPlusTerminal.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            archive 2>&1 | tee "$RUNNER_TEMP/archive.log" | grep -E 'error:|warning: .*deprecated|\*\* ARCHIVE (SUCCEEDED|FAILED)'
+          test -d "$RUNNER_TEMP/aPlusTerminal.xcarchive/Products/Applications/aPlusTerminal.app"
+          /usr/libexec/PlistBuddy -c 'Print :DTXcodeBuild' -c 'Print :DTSDKName' -c 'Print :DTSDKBuild' -c 'Print :CFBundleVersion' \
+            "$RUNNER_TEMP/aPlusTerminal.xcarchive/Products/Applications/aPlusTerminal.app/Info.plist"
+          cd "$RUNNER_TEMP" && ditto -c -k --keepParent aPlusTerminal.xcarchive aPlusTerminal.xcarchive.zip
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: duo-archive-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/aPlusTerminal.xcarchive.zip
+            ${{ runner.temp }}/archive.log
+          retention-days: 14

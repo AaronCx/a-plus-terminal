@@ -1,3 +1,6 @@
+// Agent notifications are compiled out unless the app's AGENT_NOTIFY switch
+// is on (project.yml); with them out there is nothing here to test.
+#if AGENT_NOTIFY
 import XCTest
 
 /// Agent notifications against a real Claude Code, over real SSH to the build
@@ -423,3 +426,4 @@ final class AgentNotificationLiveUITests: XCTestCase {
         add(attachment)
     }
 }
+#endif

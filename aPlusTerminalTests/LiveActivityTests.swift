@@ -274,8 +274,12 @@ final class SessionActivityRuntimeTests: XCTestCase {
 
     /// Live Activity updates are dispatched async (`Task { await activity.update }`),
     /// so poll the running Activity's content until it reflects the change.
+    /// It returns the moment the predicate holds, so the cap only matters on a
+    /// slow host: on the loaded xcode-27 runner (iPhone Duo, iOS 27.1) a burst
+    /// of four serialized updates once took longer than the old 5 s to land.
+    /// A dropped update still fails — it never converges, however long this waits.
     private func waitForLiveState(
-        timeout: TimeInterval = 5,
+        timeout: TimeInterval = 15,
         _ predicate: @escaping (SessionActivityAttributes.ContentState) -> Bool
     ) async -> SessionActivityAttributes.ContentState? {
         let deadline = Date().addingTimeInterval(timeout)

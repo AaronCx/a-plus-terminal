@@ -27,6 +27,11 @@ Privacy-first iOS SSH terminal. Spec: `~/Documents/github/relay-ios-terminal-spe
 - `/ship N` (scripts/ship-testflight.sh) builds TestFlight uploads from
   `develop`. App Store candidates: `scripts/ship-testflight.sh N --app-store`
   (archives `aPlusTerminalAppStore`, meshyy compiled out).
+- Exception: the iPhone Duo candidate needs Xcode 27.1, which this Mac
+  doesn't have. CI archives it (`duo-archive.yml`, `[duo-archive]` in the head
+  commit of a `test/**` push), and
+  `scripts/ship-ci-archive.sh N <zip> <sha> --app-store` signs and uploads it.
+  See `RELEASING.md`.
 - On approval: tag `vX.Y.Z` at the approved bump commit, GitHub release
   titled "X.Y.Z (build N)", then merge `main` back into `develop`.
 
