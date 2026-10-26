@@ -70,11 +70,20 @@ struct SettingsScreen: View {
                             Text(mux.displayName).tag(mux.id)
                         }
                     }
+                    Toggle("Agent icons", isOn: $settings.agentMascotIcons)
+                    NavigationLink("Agents") {
+                        AgentsView()
+                    }
+                    .accessibilityIdentifier("settings.agents")
                 } header: {
                     Text("Agent & Multiplexer")
                 } footer: {
-                    Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server.")
+                    Text("a+Terminal is agent-agnostic. Auto-detect names whichever CLI agent it sees (Claude Code, Codex, aider, Gemini CLI, Hermes…). Set a default here or per server. Agents: add your own CLI tool with its own icon, or change a built-in agent's icon. Agent icons: sessions and the Live Activity show the detected agent's icon instead of the terminal glyph. Agent names, icons and mascots are trademarks or artwork of their respective owners; a+Terminal is independent and not affiliated with, sponsored by, or endorsed by any of them.")
                 }
+
+                #if AGENT_NOTIFY
+                NotificationSettingsSection()
+                #endif
 
                 Section {
                     Toggle("Send scroll as mouse wheel in full-screen apps", isOn: $settings.scrollWheelBridge)
@@ -111,6 +120,17 @@ struct SettingsScreen: View {
                     Text("Shows the previewed page's console.log messages in a pane inside the preview, since a phone has no developer tools. This works by injecting a small script into your own page — it's the only part of Preview that does, which is why it's a choice. Off = nothing is injected and no messages are captured. Nothing leaves your device either way.")
                 }
 
+                #if MESHYY
+                Section {
+                    Toggle("Use meshyy when available (beta)", isOn: $settings.meshyyTransport)
+                        .accessibilityIdentifier("settings.meshyyTransport")
+                } header: {
+                    Text("Connection")
+                } footer: {
+                    Text("Keeps your session alive on the server, so it survives the app being suspended or the network dropping, and replays what you missed. Needs meshyyd on the host; without it nothing changes. Turn this off to get the normal SSH behaviour back.")
+                }
+                #endif
+
                 Section {
                     NavigationLink("Customize key bar") {
                         KeyBarSettingsView()
@@ -126,6 +146,18 @@ struct SettingsScreen: View {
                         KeysView()
                     }
                 }
+
+                #if MESHYY
+                // On-device diagnostics. Nothing here leaves the phone unless
+                // the user shares it from inside the screen. Beta-only: the
+                // scroll trace exists to debug meshyy.
+                Section("Diagnostics") {
+                    NavigationLink("Scroll trace") {
+                        ScrollTraceView()
+                    }
+                    .accessibilityIdentifier("settings.scrollTrace")
+                }
+                #endif
 
                 Section {
                     Link(destination: supportURL) {
@@ -154,6 +186,9 @@ struct SettingsScreen: View {
                     }
                     NavigationLink("License Agreement") {
                         BundledDocumentView(resource: "LicenseAgreement", title: "License Agreement")
+                    }
+                    NavigationLink("Third-Party Notices") {
+                        BundledDocumentView(resource: "ThirdPartyNotices", title: "Third-Party Notices")
                     }
                     Link(destination: privacyPolicyURL) {
                         Label("Privacy Policy (Web)", systemImage: "safari")

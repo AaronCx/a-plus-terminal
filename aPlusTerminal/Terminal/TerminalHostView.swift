@@ -30,6 +30,25 @@ final class TerminalEmulatorView: TerminalView {
         super.insertText(text)
     }
 
+    /// True while the emulator itself is writing to the pty. In SwiftTerm
+    /// 1.13.0 every such write — a reply to a query in the output (DA, DSR
+    /// and cursor position, mode reports, colors, window ops, kitty
+    /// keyboard flags and graphics), a mode-1004 focus report, or a mouse
+    /// report — goes through `Terminal.sendResponse` / `setTerminalFocus` to
+    /// this `send(source:data:)`. Typing (soft and hardware keyboard, kitty
+    /// encoding included), paste, dictation and the accessory keys go
+    /// through the view's `send(data:)` and never set it. Marked HERE, the
+    /// one funnel, rather than around the pumps' `feed` calls, so no output
+    /// path can forget to mark its replies. A SwiftTerm bump must re-check
+    /// that split.
+    private(set) var isEmulatorWriting = false
+
+    override func send(source: Terminal, data: ArraySlice<UInt8>) {
+        isEmulatorWriting = true
+        defer { isEmulatorWriting = false }
+        super.send(source: source, data: data)
+    }
+
     override func addGestureRecognizer(_ gestureRecognizer: UIGestureRecognizer) {
         super.addGestureRecognizer(gestureRecognizer)
         if let priorityPan, gestureRecognizer !== priorityPan,
@@ -37,6 +56,44 @@ final class TerminalEmulatorView: TerminalView {
             gestureRecognizer.require(toFail: priorityPan)
         }
     }
+
+    #if MESHYY
+    /// When the emulator's mouse-mode belief last moved (scroll trace). Every
+    /// scroll bug so far was this belief diverging from the far side's, so
+    /// the trace needs to say how fresh it was when a swipe was routed on it.
+    ///
+    /// Stamped only on an actual change: SwiftTerm calls `mouseModeChanged`
+    /// on every assignment, and meshyy's `.modes` frames re-assert the same
+    /// mode, so stamping every call would make an unchanged belief look as
+    /// if it had just flipped.
+    private(set) var lastMouseModeChangeAt: Date?
+    /// The mode before the last change (nil until one happens).
+    private(set) var previousMouseMode: Terminal.MouseMode?
+    private var currentMouseMode: Terminal.MouseMode = .off
+    /// When the emulator last switched between the primary and alt buffer
+    /// (SwiftTerm reports a re-entry into the buffer already active too).
+    private(set) var lastBufferSwitchAt: Date?
+    private var currentBufferIsAlternate = false
+
+    override func mouseModeChanged(source: Terminal) {
+        let mode = source.mouseMode
+        if mode != currentMouseMode {
+            previousMouseMode = currentMouseMode
+            currentMouseMode = mode
+            lastMouseModeChangeAt = Date()
+        }
+        super.mouseModeChanged(source: source)
+    }
+
+    override func bufferActivated(source: Terminal) {
+        let alternate = source.isCurrentBufferAlternate
+        if alternate != currentBufferIsAlternate {
+            currentBufferIsAlternate = alternate
+            lastBufferSwitchAt = Date()
+        }
+        super.bufferActivated(source: source)
+    }
+    #endif
 }
 
 /// Connects the SwiftUI layer (accessory bar, screens) to the UIKit terminal
@@ -170,6 +227,9 @@ struct TerminalHostView: UIViewRepresentable {
     func makeUIView(context: Context) -> TerminalEmulatorView {
         let view = session.terminalView
         view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        // Lets a UI test find the terminal's frame (DuoLayoutUITests checks
+        // the column count against it). Not spoken by VoiceOver.
+        view.accessibilityIdentifier = "terminalView"
         return view
     }
 

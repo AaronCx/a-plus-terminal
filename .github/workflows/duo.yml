@@ -1,0 +1,336 @@
+name: Duo (iOS 27.1 SDK)
+
+# The iPhone Duo (foldable) needs the iOS 27.1 SDK and simulator, which only
+# GitHub's xcode-27 image carries; main CI (ci.yml) stays on macos-26 with
+# Xcode 26.x, so everything here must also compile there. One job builds both
+# schemes for the Duo simulator and runs the unit tests on it; the other runs
+# DuoLayoutUITests against a real loopback SSH session (on demand only, see
+# the job). Two jobs on two fresh
+# VMs: a stalled preview VM takes its job's logs with it, so each is short.
+# Nothing here folds the simulator: it boots folded, and its only
+# scriptable fold control (`simctl io screenConfig --display=N power off`)
+# crashed SpringBoard in CI, so the inner panel and the fold itself are
+# exercised on a device, not here.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['test/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: duo-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-unit:
+    name: Build both schemes, unit tests on Duo
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      OUT: ${{ github.workspace }}/duo-out
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/duo-setup
+
+      - name: Build App Store candidate for Duo
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminalAppStore \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD build 2>&1 \
+            | tee "$OUT/build-appstore.log" | grep -E 'error:|BUILD (SUCCEEDED|FAILED)'
+
+      - name: Build beta app and tests for Duo
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD build-for-testing 2>&1 \
+            | tee "$OUT/build-beta.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)'
+
+      # A fresh iOS 27.1 Duo simulator's first boot holds this VM at load
+      # 300-650 (Metal shader compiles) for ~15-20 minutes, and the preview
+      # VM can freeze outright inside that: with no wait here, run
+      # 38508509559's xcodebuild sat at "Resolve Package Graph" for the
+      # whole 40-minute test limit. So boot it and wait: until the storm is
+      # draining (the 1-minute load under 30, or under 60 and below half the
+      # 5-minute load), 20 minutes at most. The wait is load-bearing even
+      # when it runs out its 20 minutes with the load still high (run
+      # 38500119005 then passed its tests in 13 minutes at load ~478); the
+      # log says which ended it.
+      - name: Boot the Duo simulator and let the first-boot load settle
+        timeout-minutes: 25
+        run: |
+          t() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          start=$SECONDS
+          t 600 xcrun simctl boot "$UDID" || true
+          t 600 xcrun simctl bootstatus "$UDID" -b | tail -1
+          ended="the 20-minute cap"
+          while [ $((SECONDS - start)) -lt 1200 ]; do
+            sleep 30
+            echo "[$((SECONDS - start))s] load $(sysctl -n vm.loadavg); $(memory_pressure | tail -1)"
+            if sysctl -n vm.loadavg | awk '{ exit !($2 < 30 || ($2 < 60 && $2 < $3 / 2)) }'; then
+              ended="the load settling"; break
+            fi
+          done
+          echo "warm-up ended by $ended after $((SECONDS - start))s: load $(sysctl -n vm.loadavg)"
+
+      # One simulator, never clones: parallel testing would boot extra copies
+      # of the two-display Duo on a small VM.
+      - name: Unit tests on Duo
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          df -h / | tail -1; memory_pressure | tail -1; echo "load $(sysctl -n vm.loadavg)"
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
+            -only-testing:aPlusTerminalTests -resultBundlePath "$OUT/unit.xcresult" \
+            -parallel-testing-enabled NO test-without-building 2>&1 \
+            | tee "$OUT/unit.log" | grep -E 'error:|Executed .* tests|\*\* TEST (SUCCEEDED|FAILED)' | tail -20
+
+      - name: Upload logs
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: duo-unit-logs
+          path: ${{ env.OUT }}/*.log
+          if-no-files-found: ignore
+
+      - name: Clean up
+        if: always()
+        timeout-minutes: 4
+        run: '[ -z "${UDID:-}" ] || xcrun simctl delete "$UDID" || true'
+
+  layout-ui:
+    name: Duo layout UI test
+    # On demand only: a push whose head commit message contains [duo-ui]
+    # (workflow_dispatch can't reach a file that isn't on main). It passed on this image
+    # (runs 38491819347, 38500119005), but on most pushes the preview VM sits
+    # at load 400+ compiling the fresh Duo runtime's Metal shaders and
+    # xcodebuild never writes a line before the job's timeout, so as a push
+    # gate it blocked on the runner, not the app. Pushes still build both
+    # schemes and run the unit tests on the Duo (build-and-unit above).
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[duo-ui]')
+    runs-on: xcode-27
+    # Setup and build ~13, the test step up to 65, the export/upload/clean
+    # steps below up to 22.
+    timeout-minutes: 110
+    # checks: write is for the live log below — the only record that
+    # survives when a preview VM freezes mid-step and takes the job's own
+    # logs with it.
+    permissions:
+      contents: read
+      checks: write
+    env:
+      OUT: ${{ github.workspace }}/duo-out
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/duo-setup
+
+      # APLUSTERMINAL_DUO lands in the .xctestrun here (the scheme forwards
+      # it), which is what test-without-building runs with.
+      - name: Build beta app and UI tests for Duo
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
+            APLUSTERMINAL_DUO=1 build-for-testing 2>&1 \
+            | tee "$OUT/build-ui.log" | grep -E 'error:|TEST BUILD (SUCCEEDED|FAILED)'
+
+      # The Duo's panel sizes come from its device profile, not `simctl io`;
+      # its model identifier lets the test refuse to run on anything else.
+      - name: Start loopback sshd, record the Duo's display sizes and model
+        timeout-minutes: 4
+        run: |
+          scripts/duo-ci-sshd.sh start
+          xcrun simctl list devicetypes -j | python3 -I -c 'import json,sys
+          print(next(d["modelIdentifier"] for d in json.load(sys.stdin)["devicetypes"]
+                     if d["identifier"] == "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo"))' \
+            | tee "$HOME/.aplus-duo/model.txt"
+          [ -s "$HOME/.aplus-duo/model.txt" ] || { echo "no iPhone Duo device type" >&2; exit 1; }
+          caps="/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone Duo.simdevicetype/Contents/Resources/capabilities.plist"
+          for i in 0 1; do
+            id=$(plutil -extract "capabilities.displays.$i.screenID" raw "$caps")
+            w=$(plutil -extract "capabilities.displays.$i.width" raw "$caps")
+            h=$(plutil -extract "capabilities.displays.$i.height" raw "$caps")
+            echo "$id $w $h"
+          done | tee "$HOME/.aplus-duo/display.txt"
+          echo "load $(sysctl -n vm.loadavg); $(ps -axo comm | wc -l) processes"
+
+      # xcodebuild runs under a watchdog inside the step: progress is printed
+      # as it happens (so a stall is visible in this step's log), and after
+      # 20 minutes the run is stopped with the simulator's recent app/runner
+      # log, so the job always reaches its later steps. The step's limit has
+      # to cover boot (~1-5 min), the warm-up (20 min by its clock, ~25 on
+      # a VM that stalls), the watchdog's 20 minutes and its stop-and-log
+      # tail; at 50 minutes run 38514007678's step timed out right after the
+      # watchdog fired, before its cleanup could run.
+      - name: Duo layout UI test (outer panel only; fills it, columns follow width, live pty resize)
+        timeout-minutes: 65
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          t() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+          # Live log: a check run on this commit whose summary is rewritten
+          # every 20 s with the tail of what this step has seen.
+          check=$(t 30 gh api "repos/$GITHUB_REPOSITORY/check-runs" -f name="Duo UI live log" \
+            -f head_sha="$GITHUB_SHA" -f status=in_progress --jq .id 2>/dev/null || true)
+          echo "live log check run: ${check:-none}"
+          live() {
+            [ -n "$check" ] || return 0
+            python3 -I - "$OUT" > "$OUT/live.json" <<'PY' || return 0
+          import json, os, sys
+          out = sys.argv[1]
+          def tail(name, n):
+              try:
+                  return "".join(open(os.path.join(out, name), errors="replace").readlines()[-n:])
+              except OSError:
+                  return "(none)\n"
+          text = ("## watchdog\n```\n" + tail("watchdog.log", 40) + "```\n## xcodebuild (tail)\n```\n" + tail("duo-ui.log", 120) + "```\n")
+          print(json.dumps({"output": {"title": "Duo UI test progress", "summary": text[-60000:]}}))
+          PY
+            t 20 gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$check" --input "$OUT/live.json" >/dev/null 2>&1 || true
+          }
+          # This step runs under `bash -e`: every command whose failure is
+          # expected (a dead pid, a red xcodebuild) is guarded below, so the
+          # step always reaches its cleanup and its diagnostic tail.
+          census() {
+            echo "[$1 $((SECONDS - start))s] disk $(df -h / | awk 'NR==2 {print $4}') free; $(memory_pressure | tail -1); load $(sysctl -n vm.loadavg); top processes: $(ps -axo comm | sed 's#.*/##' | sort | uniq -c | sort -rn | head -6 | awk '{printf "%s×%s ", $2, $1}')" | tee -a "$OUT/watchdog.log"
+            live
+          }
+          # Warm-up. A fresh iOS 27.1 Duo simulator's first boot pegs this VM
+          # (load 300-650: Metal shader compiles, MTLCompilerService) for
+          # ~15-20 minutes, and a UI test started inside that times out on
+          # everything. Boot it, then wait until the storm is draining: the
+          # 1-minute load under 30, or under 60 and below half the 5-minute
+          # load (run 38500119005 went 531 -> 48 between 13 and 20 minutes).
+          # 20 minutes at most; the log says which ended it.
+          start=$SECONDS
+          census boot
+          t 600 xcrun simctl boot "$UDID" || true
+          t 600 xcrun simctl bootstatus "$UDID" -b | tail -1
+          census booted
+          ended="the 20-minute cap"
+          while [ $((SECONDS - start)) -lt 1200 ]; do
+            sleep 30
+            census warm-up
+            if sysctl -n vm.loadavg | awk '{ exit !($2 < 30 || ($2 < 60 && $2 < $3 / 2)) }'; then
+              ended="the load settling"; break
+            fi
+          done
+          echo "[warm-up] ended by $ended after $((SECONDS - start))s: load $(sysctl -n vm.loadavg)" | tee -a "$OUT/watchdog.log"
+          xcodebuild -project aPlusTerminal.xcodeproj -scheme aPlusTerminal \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath DD \
+            -only-testing:aPlusTerminalUITests/DuoLayoutUITests -resultBundlePath "$OUT/duo-ui.xcresult" \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 300 \
+            -parallel-testing-enabled NO APLUSTERMINAL_DUO=1 test-without-building > "$OUT/duo-ui.log" 2>&1 &
+          pid=$!
+          seen=0
+          start=$SECONDS
+          census tests
+          while kill -0 "$pid" 2>/dev/null; do
+            sleep 20
+            lines=$(wc -l < "$OUT/duo-ui.log")
+            sed -n "$((seen + 1)),${lines}p" "$OUT/duo-ui.log" \
+              | grep -E 'DUO:|error:|Test Case|Testing failed|hung|\*\* TEST' || true
+            seen=$lines
+            census "tests, log lines=$lines,"
+            if [ $((SECONDS - start)) -gt 1200 ]; then
+              echo "[watchdog] stopping a stalled run"
+              t 60 xcrun simctl spawn "$UDID" log show --last 3m --style compact \
+                --predicate 'process == "aPlusTerminal" OR process CONTAINS "Runner" OR process == "testmanagerd"' \
+                > "$OUT/stalled-sim.log" 2>&1 || true
+              kill -INT "$pid" 2>/dev/null || true; sleep 20; kill -KILL "$pid" 2>/dev/null || true
+              break
+            fi
+          done
+          rc=0; wait "$pid" || rc=$?
+          echo "[watchdog] xcodebuild exited $rc" >> "$OUT/watchdog.log"
+          live
+          [ -z "$check" ] || t 20 gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$check" \
+            -f status=completed -f conclusion=neutral >/dev/null 2>&1 || true
+          tail -5 "$OUT/duo-ui.log" || true
+          exit $rc
+
+      # A skipped test is not a pass: every Duo test must have RUN and passed.
+      - name: All Duo tests ran
+        if: always()
+        timeout-minutes: 4
+        run: |
+          [ -d "$OUT/duo-ui.xcresult" ] || { echo "no result bundle"; exit 1; }
+          perl -e 'alarm shift; exec @ARGV' 120 xcrun xcresulttool get test-results tests --path "$OUT/duo-ui.xcresult" > "$OUT/duo-ui-tests.json"
+          python3 -I - "$OUT/duo-ui-tests.json" <<'PY'
+          import json, sys
+          tree = json.load(open(sys.argv[1]))
+          found = {}
+          def walk(node):
+              if node.get("nodeType") == "Test Case":
+                  found[node["name"]] = node.get("result")
+              for child in node.get("children", []):
+                  walk(child)
+          for root in tree["testNodes"]:
+              walk(root)
+          print(found)
+          want = {"testWindowFillsTheOuterPanel()", "testColumnsFollowTheTerminalWidth()",
+                  "testLiveSessionResizesThePtyMidSession()"}
+          bad = {n: found.get(n) for n in want if found.get(n) != "Passed"}
+          if bad:
+              sys.exit(f"Duo tests did not pass: {bad}")
+          PY
+
+      - name: Export test screenshots
+        if: always()
+        timeout-minutes: 4
+        run: |
+          for r in duo-ui; do
+            [ -d "$OUT/$r.xcresult" ] || continue
+            perl -e 'alarm shift; exec @ARGV' 120 xcrun xcresulttool export attachments --path "$OUT/$r.xcresult" --output-path "$OUT/attachments/$r" || true
+          done
+          # Name the XCTest screenshots by their attachment names.
+          python3 -I - "$OUT/attachments/duo-ui" "$OUT/shots" <<'PY'
+          import json, os, shutil, sys
+          src, dst = sys.argv[1], sys.argv[2]
+          manifest = os.path.join(src, "manifest.json")
+          if not os.path.exists(manifest):
+              sys.exit(0)
+          for test in json.load(open(manifest)):
+              for a in test.get("attachments", []):
+                  name = a.get("suggestedHumanReadableName") or a["exportedFileName"]
+                  if a["exportedFileName"].lower().endswith(".png"):
+                      shutil.copy(os.path.join(src, a["exportedFileName"]), os.path.join(dst, "xctest-" + name.replace("/", "-")))
+          PY
+          ls -la "$OUT/shots"
+
+      - name: Upload screenshots
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: duo-screenshots
+          path: ${{ env.OUT }}/shots
+          if-no-files-found: warn
+
+      - name: Upload logs
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: duo-ui-logs
+          path: |
+            ${{ env.OUT }}/*.log
+            ${{ env.OUT }}/*.json
+            ${{ env.OUT }}/attachments
+          if-no-files-found: ignore
+
+      - name: Clean up
+        if: always()
+        timeout-minutes: 4
+        run: |
+          cat "$HOME/.aplus-duo/sshd.log" 2>/dev/null | tail -20 || true
+          scripts/duo-ci-sshd.sh stop || true
+          [ -z "${UDID:-}" ] || xcrun simctl delete "$UDID" || true

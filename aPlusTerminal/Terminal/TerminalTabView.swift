@@ -37,6 +37,10 @@ struct TerminalTabView: View {
                             SessionRow(session: session) {
                                 sessionManager.close(session)
                             }
+                            // A container, so the row's own identifier doesn't
+                            // overwrite its children's (the agent icon's
+                            // identifier says which art was drawn).
+                            .accessibilityElement(children: .contain)
                             .accessibilityIdentifier("session-\(session.id.uuidString)")
                             .contentShape(Rectangle())
                             .onTapGesture {
@@ -72,7 +76,11 @@ struct TerminalTabView: View {
                     ForEach(serverGroups, id: \.title) { group in
                         Section(group.title) {
                             ForEach(group.servers) { server in
-                                ServerRow(server: server, status: reachability.statuses[server.id] ?? .unknown)
+                                ServerRow(
+                                    server: server,
+                                    status: reachability.statuses[server.id] ?? .unknown,
+                                    waitingCount: waitingCount(on: server)
+                                )
                                     .contentShape(Rectangle())
                                     .onTapGesture {
                                         if server.kind == .vncMonitor {
@@ -131,11 +139,19 @@ struct TerminalTabView: View {
             .onChange(of: router.connectServerID) { _, _ in
                 consumeConnectRequest()
             }
+            #if MESHYY
+            .onChange(of: router.targetServerSession?.name) { _, _ in
+                consumeServerSessionLink()
+            }
+            #endif
             .onAppear {
                 // A cold-launch deep link (or App Intent) can land before this
                 // view observes changes — consume whatever is already pending.
                 consumeDeepLink()
                 consumeConnectRequest()
+                #if MESHYY
+                consumeServerSessionLink()
+                #endif
             }
             .task {
                 await reachability.refresh(serverStore.servers)
@@ -275,6 +291,51 @@ struct TerminalTabView: View {
         return result
     }
 
+    /// Open sessions on `server` whose agent is waiting — the server-list
+    /// glance count. A helper, because the same expression inline sent the
+    /// type-checker into the weeds.
+    private func waitingCount(on server: Server) -> Int {
+        sessionManager.sessions.filter {
+            $0.server.id == server.id && $0.effectiveAgentStatus == .waiting
+        }.count
+    }
+
+    #if MESHYY
+    /// Notification tap → the NAMED daemon session on a server (PR 3 of the
+    /// product brief). The name outlives tabs; the flow is: an open tab
+    /// already on that session wins, else a new tab that resumes it, and a
+    /// name the daemon no longer holds is SAID OUT LOUD — never silently
+    /// swapped for a fresh shell, which is the slot bug's failure class worn
+    /// as a convenience.
+    private func consumeServerSessionLink() {
+        guard let target = router.targetServerSession else { return }
+        router.targetServerSession = nil
+        // An open tab already attached to that daemon session: just focus it.
+        if let existing = sessionManager.sessions.first(where: {
+            $0.server.id == target.server && $0.meshyy?.sessionName == target.name
+        }) {
+            deepLinkLog.debug("consume: focusing named session \(target.name, privacy: .public)")
+            router.selectedTab = .terminal
+            path = [existing]
+            return
+        }
+        guard let server = serverStore.servers.first(where: { $0.id == target.server }) else {
+            deepLinkLog.debug("consume: no server for \(target.server.uuidString, privacy: .public)")
+            return
+        }
+        deepLinkLog.debug("consume: opening \(server.name, privacy: .public) to resume \(target.name, privacy: .public)")
+        router.selectedTab = .terminal
+        let session = sessionManager.open(server: server)
+        session.requestedMeshyySession = target.name
+        path = [session]
+        // NO connect() here: open() already started one. The extra call ran a
+        // SECOND connect concurrently — the exact double-connect the test
+        // harness documented in July — and two connects racing into the
+        // survivor-picker park can resume its continuation twice, which is a
+        // fatalError. That was the crash on tapping a notification.
+    }
+    #endif
+
     /// Live Activity tap → land inside the session (§4.5). After an app
     /// relaunch the tapped session no longer exists — clear the target so a
     /// stale ID can't hijack navigation later; the user just lands in the app.
@@ -321,6 +382,8 @@ struct TerminalTabView: View {
 }
 
 struct SessionRow: View {
+    @Environment(AppSettings.self) private var settings
+
     let session: TerminalSession
     var onClose: () -> Void
 
@@ -329,14 +392,39 @@ struct SessionRow: View {
             Circle()
                 .fill(stateColor)
                 .frame(width: 9, height: 9)
+            if settings.agentMascotIcons, let icon = session.effectiveAgentIconName {
+                let source = CustomAgentIconStore.source(forIconName: icon)
+                agentIconImage(source)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 20, height: 20)
+                    .clipShape(RoundedRectangle(cornerRadius: 4.5))
+                    .accessibilityLabel(session.effectiveAgentName ?? "Agent")
+                    // Which art was drawn, for UI tests: agentIcon.custom.<id>,
+                    // agentIcon.bundled.<id> or agentIcon.generic.<id>.
+                    .accessibilityIdentifier(
+                        "agentIcon.\(source.kind).\(CustomAgentIconStore.profileID(fromIconName: icon))")
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.server.name)
                     .font(.body.weight(.medium))
-                Text(session.startedAt, style: .time)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if session.effectiveAgentStatus == .waiting {
+                    Text("\(session.effectiveAgentName ?? "Agent") is waiting")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                } else {
+                    Text(session.startedAt, style: .time)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
+            if session.effectiveAgentStatus == .waiting {
+                // One glance, no switching: the tab that needs a human says so.
+                Image(systemName: "exclamationmark.bubble.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Agent waiting")
+            }
             Button(role: .destructive, action: onClose) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.red)
@@ -344,6 +432,16 @@ struct SessionRow: View {
             .buttonStyle(.borderless)
             .accessibilityLabel("Close Session")
         }
+    }
+
+    /// Custom user icon first (App Group), bundled asset second, the generic
+    /// doodle last — a custom agent without a picked icon must not render
+    /// an empty slot.
+    private func agentIconImage(_ source: CustomAgentIconStore.Source) -> Image {
+        if case .custom(let url) = source, let ui = UIImage(contentsOfFile: url.path) {
+            return Image(uiImage: ui)
+        }
+        return Image(source.assetName)
     }
 
     private var stateColor: Color {
@@ -420,6 +518,9 @@ struct ServerRow: View {
 
     let server: Server
     var status: ReachabilityStore.Status = .unknown
+    /// Open sessions on this server whose agent is waiting on a human. A user
+    /// running several agents scans this list; the count is the glance.
+    var waitingCount: Int = 0
 
     var body: some View {
         HStack {
@@ -435,6 +536,15 @@ struct ServerRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if waitingCount > 0 {
+                Text("\(waitingCount) waiting")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.orange.opacity(0.2), in: Capsule())
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("\(waitingCount) agents waiting")
+            }
             if server.kind == .vncMonitor {
                 Text("Monitor")
                     .font(.caption2.weight(.semibold))

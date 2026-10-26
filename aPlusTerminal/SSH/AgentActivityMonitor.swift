@@ -26,9 +26,37 @@ final class AgentActivityMonitor {
     private(set) var status: Status = .none
     /// The profile whose marker last matched; nil under the generic heuristic.
     /// Drives the Live Activity label.
-    private(set) var detected: AgentProfile?
+    private(set) var detected: AgentProfile? {
+        didSet {
+            if oldValue?.id != detected?.id { onDetectedChange?() }
+        }
+    }
     /// Fired on every status transition (main actor).
     var onChange: (() -> Void)?
+    /// Fired when the latched agent changes (a marker names one, or an idle
+    /// prompt un-latches it). A name can latch with no status transition —
+    /// a quiet CLI prints its banner and waits — and the row icon and Live
+    /// Activity must still pick it up.
+    var onDetectedChange: (() -> Void)?
+
+    /// Fired whenever the quiet timer finds the session sitting at a bare
+    /// shell prompt — whatever was running there has exited. The session
+    /// uses it to drop latches the monitor does not own (OSC 7501).
+    var onIdleShellPrompt: (() -> Void)?
+
+    /// Positive evidence that the named agent is running right now, not
+    /// just that one was configured or once mentioned. A marker latch counts
+    /// (an idle shell prompt un-latches it). An explicit pick is named from
+    /// the start, so for it the evidence is the heuristic being active: a
+    /// pick on a server sitting at a bare shell prompt reads `.none`, and a
+    /// shell's bell there is not the agent's.
+    var hasRunningAgentEvidence: Bool {
+        guard let detected else { return false }
+        if let explicitAgent, detected.id == explicitAgent.id {
+            return status != .none
+        }
+        return true
+    }
 
     private static let tailWindowBytes = 128
     /// Raw tail of recent output kept for idle-prompt detection — wider than
@@ -39,6 +67,9 @@ final class AgentActivityMonitor {
     /// never end an idle frame with a bare POSIX terminator. Extend here for
     /// fancy prompts (e.g. "❯") if a real one proves safe.
     static let promptTerminators: Set<Character> = ["%", "$", "#"]
+    /// Cap on the spaces one cursor-forward expands to — a marker never spans
+    /// a jump wider than a line.
+    private static let maxCursorForward = 512
 
     private let candidates: [AgentProfile]
     /// Candidates that carry markers — scanned to upgrade `detected`.
@@ -93,12 +124,16 @@ final class AgentActivityMonitor {
         if detected == nil, !markerCandidates.isEmpty {
             scanForMarker(bytes)
         }
-        guard agentSeen else { return }
-
-        burstBytes += bytes.count
-        if status != .working, burstBytes >= activeBurst {
-            transition(to: .working)
+        if agentSeen {
+            burstBytes += bytes.count
+            if status != .working, burstBytes >= activeBurst {
+                transition(to: .working)
+            }
         }
+        // Scheduled even with detection off or status `.none`: the
+        // idle-prompt check also un-latches a marker that matched a typed
+        // command's echo (`cd codex-repo`, `man aider`), which is too short
+        // to ever leave `.none`, and tells the session a program exited.
         scheduleQuiet()
     }
 
@@ -116,14 +151,27 @@ final class AgentActivityMonitor {
     }
 
     private func scanForMarker(_ bytes: [UInt8]) {
-        let text = String(decoding: carryBytes + bytes, as: UTF8.self).lowercased()
+        // Markers are matched against what the user SEES as well as the raw
+        // bytes. tmux redraws only the cells that changed, so "Claude Code"
+        // arrives as `Claude C`, an attribute reset, `ode` — or with a
+        // cursor-forward where a space already sat — and a shell that
+        // colorizes input (zsh syntax highlighting) splices escape codes into
+        // the echo of a typed command, so a custom agent's command-name
+        // marker never appears contiguously in the raw bytes either. The raw
+        // text still counts: an escape whose end has not arrived yet (an OSC
+        // cut off by the read) makes the stripped text drop everything after
+        // it. Stripping only runs when the chunk has an escape.
+        let raw = String(decoding: carryBytes + bytes, as: UTF8.self)
+        let text = raw.lowercased()
+        let visible = raw.contains("\u{1B}") ? Self.stripANSI(raw).lowercased() : nil
         // Prefer the most specific (longest) matching marker. When one chunk
         // carries markers for two agents, this names the one whose marker
         // matched most specifically rather than whichever profile happens to
         // be first in file order.
         var best: (candidate: AgentProfile, length: Int)?
         for candidate in markerCandidates {
-            for marker in candidate.detectionMarkers where text.contains(marker) {
+            for marker in candidate.detectionMarkers
+            where text.contains(marker) || visible?.contains(marker) == true {
                 if best == nil || marker.count > best!.length {
                     best = (candidate, marker.count)
                 }
@@ -145,23 +193,43 @@ final class AgentActivityMonitor {
             try? await Task.sleep(nanoseconds: UInt64(quiet * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
             self.burstBytes = 0
-            guard self.status != .none else { return }
             if self.tailShowsIdleShellPrompt() {
                 // The "burst" was a login banner / MOTD / multiplexer redraw,
-                // or the agent has exited: the session sits at a bare shell
-                // prompt, so nothing is waiting for input. Clear status and
-                // un-latch a name the marker scan may have picked up from
-                // banner text (an explicit user pick keeps its name).
+                // a typed command's echo, or the agent has exited: the
+                // session sits at a bare shell prompt, so nothing is waiting
+                // for input. Clear status and un-latch a name the marker
+                // scan may have picked up from banner or echo text (an
+                // explicit user pick keeps its name).
+                let unlatched = self.detected?.id != self.explicitAgent?.id
                 self.detected = self.explicitAgent
-                self.transition(to: .none)
+                self.onIdleShellPrompt?()
+                if self.status != .none {
+                    self.transition(to: .none)
+                } else if unlatched {
+                    self.onChange?()
+                }
             } else if self.status == .working {
-                self.transition(to: .waiting)
+                // Quiet is not waiting while the agent SAYS it is busy: a
+                // silent tool call keeps the profile's busy marker near the
+                // end of the stream (the spinner re-prints it). Same gate as
+                // meshyy's daemon-side monitor; bounded to the recent tail
+                // because bytes outlive the redraws that erased them.
+                if !self.tailShowsBusyMarker() {
+                    self.transition(to: .waiting)
+                }
             }
         }
     }
 
     private func tailShowsIdleShellPrompt() -> Bool {
         Self.endsAtShellPrompt(String(decoding: promptTail, as: UTF8.self))
+    }
+
+    private func tailShowsBusyMarker() -> Bool {
+        guard let markers = detected?.busyMarkers, !markers.isEmpty else { return false }
+        let stripped = Self.stripANSI(String(decoding: promptTail, as: UTF8.self)).lowercased()
+        let window = String(stripped.suffix(512))
+        return markers.contains { window.contains($0.lowercased()) }
     }
 
     /// True when the ANSI-stripped tail ends at a bare shell prompt (`%`,
@@ -176,8 +244,11 @@ final class AgentActivityMonitor {
         return promptTerminators.contains(last)
     }
 
-    /// Removes CSI (`ESC [ … final`), OSC (`ESC ] … BEL` / `ESC \`) and
-    /// two-character escapes so prompt detection sees what the user sees.
+    /// Removes CSI (`ESC [ … final`), OSC (`ESC ] … BEL` / `ESC \`),
+    /// character-set designations (`ESC ( B`) and two-character escapes so
+    /// prompt and marker detection see what the user sees. A cursor-forward
+    /// (`ESC [ n C`) becomes `n` spaces: a redraw skips a cell that already
+    /// holds a space instead of rewriting it.
     static func stripANSI(_ text: String) -> String {
         var result = String.UnicodeScalarView()
         var scalars = text.unicodeScalars[...]
@@ -192,10 +263,21 @@ final class AgentActivityMonitor {
             switch introducer {
             case "[":
                 // CSI: skip parameter/intermediate bytes up to a final byte.
+                var parameters = ""
                 while let byte = scalars.first {
                     scalars = scalars.dropFirst()
-                    if (0x40...0x7E).contains(byte.value) { break }
+                    if (0x40...0x7E).contains(byte.value) {
+                        if byte == "C" {
+                            let count = min(Int(parameters) ?? 1, Self.maxCursorForward)
+                            result.append(contentsOf: String(repeating: " ", count: max(count, 1)).unicodeScalars)
+                        }
+                        break
+                    }
+                    parameters.unicodeScalars.append(byte)
                 }
+            case "(", ")", "*", "+":
+                // Character-set designation: one more byte names the set.
+                scalars = scalars.dropFirst()
             case "]":
                 // OSC: terminated by BEL or ESC-backslash (ST).
                 var previous: UnicodeScalar?
@@ -213,6 +295,7 @@ final class AgentActivityMonitor {
     }
 
     private func transition(to newStatus: Status) {
+        agentAlertLog.notice("monitor \(self.status.rawValue, privacy: .public)->\(newStatus.rawValue, privacy: .public) burst=\(self.burstBytes, privacy: .public) agent=\(self.detected.map { AgentProfile.logName(forID: $0.id) } ?? "nil", privacy: .public)")
         status = newStatus
         onChange?()
     }

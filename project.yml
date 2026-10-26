@@ -11,8 +11,25 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # One source of truth for both targets — the app and widget MUST ship with
     # identical versions or App Store Connect rejects the upload.
-    CURRENT_PROJECT_VERSION: 43
-    MARKETING_VERSION: "1.0.3"
+    CURRENT_PROJECT_VERSION: 78
+    MARKETING_VERSION: "1.0.4"
+    # Agent notifications are compiled OUT on this branch: this switch is
+    # empty, and `#if AGENT_NOTIFY` removes every entry point (posting for
+    # bells / OSC 9 / 777 / 7501, the notification delegate) together with
+    # the permission ask (AgentAlertCenter.agentDetected and
+    # sendTestNotification, the only requestAuthorization calls) and the UI
+    # (the Claude Code setup card, Settings → Notifications). What stays
+    # compiled is unreachable: AgentAlertPolicy and AgentAlertCenter's
+    # posting shell, kept so the policy's unit tests still run.
+    # Setting it to AGENT_NOTIFY turns the condition on in BOTH app targets
+    # and all three test targets at once and restores develop's code (each
+    # gated hunk is develop's text); the notification work itself is
+    # preserved unchanged on branch test/agent-notifications. It is a plain build setting rather than a
+    # condition here because a project-level SWIFT_ACTIVE_COMPILATION_CONDITIONS
+    # would drop Debug's `DEBUG` (see the MESHYY note on the aPlusTerminal
+    # target). The agent-status heuristic (badge, Live Activity, Dynamic
+    # Island) and custom agents are NOT behind it.
+    AGENT_NOTIFY_CONDITION: ""
 packages:
   # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
   # floats to the latest matching tag, so CI and each developer could silently
@@ -33,8 +50,28 @@ packages:
   # demo. MIT licensed (transitives: CryptoSwift fork, system zlib, d3des).
   RoyalVNCKit:
     path: Vendor/royalvnc
-targets:
-  aPlusTerminal:
+  # Resumable terminal transport, opt-in via a Settings toggle — BETA ONLY: linked
+  # by the aPlusTerminal (TestFlight) target, never by aPlusTerminalAppStore. Kept
+  # declared here so Package.resolved stays identical for both. Aaron's own MIT,
+  # clean-room, zero-dependency package. Only the CLIENT half is linked — MeshyyCore
+  # (wire format) and MeshyyKit (session/transport); the daemon targets are macOS-only.
+  #
+  # Exact-pinned like SwiftTerm: this carries the pty byte stream when enabled, and a
+  # floating version could change resume arithmetic under a shipped build.
+  Meshyy:
+    url: https://github.com/AaronCx/meshyy.git
+    exactVersion: "0.1.22"
+# The app target's body lives in a template so the App Store candidate can be
+# the SAME app minus meshyy (brief 1.0.4 §1: App Review tests the uploaded
+# binary, and guideline 2.3.1 forbids dormant features, so a runtime "off"
+# isn't enough). Two targets, one template:
+#   aPlusTerminal          beta/TestFlight — links Meshyy and compiles with
+#                          MESHYY. What develop, CI, Run and Test use.
+#   aPlusTerminalAppStore  App Store candidate — no Meshyy package, no MESHYY.
+#                          Same bundle id, Info.plist, entitlements and widget.
+# Every meshyy entry point in the sources is wrapped in `#if MESHYY`.
+targetTemplates:
+  aPlusTerminalApp:
     type: application
     platform: iOS
     entitlements:
@@ -45,6 +82,10 @@ targets:
     sources:
       - aPlusTerminal
       - path: Resources
+        buildPhase: resources
+      # Agent mascot marks — shared with the widget so the Live Activity can
+      # draw the same icon the app shows.
+      - path: AgentIcons.xcassets
         buildPhase: resources
     dependencies:
       - target: aPlusTerminalWidgets
@@ -88,6 +129,42 @@ targets:
           - CFBundleURLName: com.aaroncx.aplusterminal
             CFBundleURLSchemes:
               - aplusterminal
+targets:
+  aPlusTerminal:
+    templates: [aPlusTerminalApp]
+    dependencies:
+      - package: Meshyy
+        product: MeshyyKit
+      - package: Meshyy
+        product: MeshyyCore
+    settings:
+      base:
+        # Target level, not project level: here `$(inherited)` picks up the
+        # project's Debug `DEBUG`, which a project-level base value would drop.
+        # AGENT_NOTIFY_CONDITION: empty on this branch (agent notifications
+        # compiled out); AGENT_NOTIFY restores them — see the project settings.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY $(AGENT_NOTIFY_CONDITION)"
+  aPlusTerminalAppStore:
+    templates: [aPlusTerminalApp]
+    settings:
+      base:
+        # No MESHYY, ever. AGENT_NOTIFY follows the project-level switch.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(AGENT_NOTIFY_CONDITION)"
+      configs:
+        # Release (what Archive uses) is named exactly like the beta app, so
+        # the archived .app, its binary and the Swift module are aPlusTerminal
+        # either way. Archives build in per-scheme ArchiveIntermediates, so
+        # the two never meet there.
+        Release:
+          PRODUCT_NAME: aPlusTerminal
+          PRODUCT_MODULE_NAME: aPlusTerminal
+        # Debug keeps its own name. Both schemes build into ONE products
+        # directory, and with a shared name the second scheme's build finds
+        # the first one's aPlusTerminal.debug.dylib "up to date" and skips the
+        # link: measured, the beta app then ran the App Store code (zero
+        # meshyy strings) and vice versa. Distinct names make that impossible.
+        Debug:
+          PRODUCT_NAME: aPlusTerminalAppStore
   aPlusTerminalWidgets:
     type: app-extension
     platform: iOS
@@ -98,11 +175,20 @@ targets:
           - group.com.aaroncx.aplusterminal
     sources:
       - aPlusTerminalWidgets
-      # Shared with the app target — must compile identically in both.
+      - path: AgentIcons.xcassets
+        buildPhase: resources
+      # Shared with the app target — must compile identically in both. The
+      # widget never defines MESHYY: it only reads servers.json (never writes
+      # it), so Server's meshyy-only field is simply absent here.
       - path: aPlusTerminal/LiveActivity/SessionActivityAttributes.swift
+      - path: aPlusTerminal/LiveActivity/SessionSnapshotStore.swift
       - path: aPlusTerminal/Servers/Server.swift
       - path: aPlusTerminal/Servers/ServerStore.swift
       - path: aPlusTerminal/Network/Reachability.swift
+      # Custom agent icons: the widget reads the same App Group file the app
+      # writes, through the same code (path, id guard, generic fallback).
+      - path: aPlusTerminal/Profiles/AgentProfile.swift
+      - path: aPlusTerminal/Profiles/CustomAgentIconStore.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.aplusterminal.widgets
@@ -122,6 +208,9 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        # Hosted by the beta app, so the meshyy suites compile and run here.
+        # The notification suites follow the app's AGENT_NOTIFY switch.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY $(AGENT_NOTIFY_CONDITION)"
     sources:
       - aPlusTerminalTests
     dependencies:
@@ -134,6 +223,10 @@ targets:
       # against it, resolve symbols from the host app binary at run time —
       # linking it twice would duplicate the code, the Citadel pattern.
       - package: RoyalVNCKit
+      - package: Meshyy
+        product: MeshyyKit
+      - package: Meshyy
+        product: MeshyyCore
         link: false
   aPlusTerminalUITests:
     type: bundle.ui-testing
@@ -149,10 +242,30 @@ targets:
         APLUSTERMINAL_UITESTS_BUNDLE_ID: com.aaroncx.aPlusTerminalUITests
         PRODUCT_BUNDLE_IDENTIFIER: "$(APLUSTERMINAL_UITESTS_BUNDLE_ID)"
         PROVISIONING_PROFILE_SPECIFIER: "$(APLUSTERMINAL_PROFILE_UITESTS)"
+        # The notification UI suites follow the app's AGENT_NOTIFY switch.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(AGENT_NOTIFY_CONDITION)"
     sources:
       - aPlusTerminalUITests
+      # The form walker shared with the App Store UI test (BetaBuildSettingsUITests
+      # is its mirror, so both must walk identically).
+      - path: aPlusTerminalAppStoreUITests/SettingsFormWalker.swift
     dependencies:
       - target: aPlusTerminal
+  # UI tests against the App Store candidate (TEST_TARGET_NAME =
+  # aPlusTerminalAppStore): proves the shipped Settings has no meshyy row.
+  aPlusTerminalAppStoreUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.aaroncx.aPlusTerminalAppStoreUITests
+        # Follows the app's AGENT_NOTIFY switch (the no-notifications check).
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(AGENT_NOTIFY_CONDITION)"
+    sources:
+      - aPlusTerminalAppStoreUITests
+    dependencies:
+      - target: aPlusTerminalAppStore
 schemes:
   aPlusTerminal:
     build:
@@ -181,6 +294,36 @@ schemes:
         APLUSTERMINAL_SHOT_PORT: $(APLUSTERMINAL_SHOT_PORT)
         APLUSTERMINAL_TEST_VNC_SERVER: $(APLUSTERMINAL_TEST_VNC_SERVER)
         APLUSTERMINAL_TEST_VNC_PASSWORD: $(APLUSTERMINAL_TEST_VNC_PASSWORD)
+        # Agent-notification live tests: the DEBUG alert probe and a floor
+        # override (seconds) so repeated posts are counted, not rate-limited.
+        APLUSTERMINAL_TEST_ALERT_PROBE: $(APLUSTERMINAL_TEST_ALERT_PROBE)
+        APLUSTERMINAL_TEST_ALERT_FLOOR: $(APLUSTERMINAL_TEST_ALERT_FLOOR)
+        # Custom agents seams (TestSeed.prepareAgentsIfRequested). The Agents
+        # UI tests set these on the launched app directly; forwarding them
+        # here also lets a manual run seed the app under test.
+        APLUSTERMINAL_TEST_AGENT_PROFILES: $(APLUSTERMINAL_TEST_AGENT_PROFILES)
+        APLUSTERMINAL_TEST_RESET_AGENTS: $(APLUSTERMINAL_TEST_RESET_AGENTS)
+        APLUSTERMINAL_TEST_AGENT_ICON_ID: $(APLUSTERMINAL_TEST_AGENT_ICON_ID)
+        APLUSTERMINAL_TEST_AGENT_ICON_FILE: $(APLUSTERMINAL_TEST_AGENT_ICON_FILE)
+        APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON: $(APLUSTERMINAL_TEST_IMPORT_AGENTS_JSON)
+        # iPhone Duo layout suite (DuoLayoutUITests): only duo.yml sets it,
+        # with its loopback sshd running. Nothing folds the simulator.
+        APLUSTERMINAL_DUO: $(APLUSTERMINAL_DUO)
       targets:
         - aPlusTerminalTests
         - aPlusTerminalUITests
+  # The App Store candidate: `scripts/ship-testflight.sh N --app-store` archives
+  # this scheme (Release). Its test action is the no-meshyy Settings UI test.
+  aPlusTerminalAppStore:
+    build:
+      targets:
+        aPlusTerminalAppStore: all
+    run:
+      config: Debug
+      storeKitConfiguration: aPlusTerminal.storekit
+    test:
+      config: Debug
+      targets:
+        - aPlusTerminalAppStoreUITests
+    archive:
+      config: Release

@@ -1,6 +1,8 @@
 # a+Terminal
 
-Privacy-first iOS SSH terminal for working on your own machines from your iPhone — **agent- and multiplexer-agnostic**. Run any terminal multiplexer (tmux, zellij, screen) and any CLI AI coding agent (Claude Code, Codex, aider, Gemini CLI, Hermes, …) over plug-and-play profiles you can extend yourself.
+**The only agent control surface that works with any agent, on your own machine, over your own network, with no account and no relay.**
+
+An agent asks for permission; your phone tells you; one tap answers it — and none of it touches a server that isn't yours. a+Terminal is a privacy-first iOS SSH terminal, **agent- and multiplexer-agnostic**: any CLI AI coding agent (Claude Code, Codex, aider, Gemini CLI, Hermes, …), any multiplexer (tmux, zellij, screen), over plug-and-play profiles you can extend yourself. The zero-data-collection claim is CI-enforced: a build fails if a network symbol appears outside the audited SSH/meshyy/VNC layers.
 
 [![Download on the App Store](https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg)](https://apps.apple.com/app/id6779393452)
 

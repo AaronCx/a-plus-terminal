@@ -7,9 +7,27 @@ import Observation
 final class AppSettings {
     /// §4.1 — after a reconnect, automatically reattach to the last recorded
     /// multiplexer target (tmux/zellij/screen/…). Renamed from `autoReattachTmux`.
+    /// Show the detected agent's mascot mark (session rows, Live Activity)
+    /// instead of the generic terminal glyph.
+    var agentMascotIcons: Bool {
+        didSet { defaults.set(agentMascotIcons, forKey: Keys.agentMascotIcons) }
+    }
+
     var autoReattachMultiplexer: Bool {
         didSet { defaults.set(autoReattachMultiplexer, forKey: Keys.autoReattachMultiplexer) }
     }
+
+    #if MESHYY
+    /// Carry the pty byte stream over meshyy when the host runs `meshyyd`.
+    ///
+    /// OFF by default, and the toggle is the ONLY fallback: there is no runtime
+    /// switching between transports, because a session that changes transport mid-flight
+    /// is two different shells sharing one screen. Off = exactly this app without
+    /// meshyy in it.
+    var meshyyTransport: Bool {
+        didSet { defaults.set(meshyyTransport, forKey: Keys.meshyyTransport) }
+    }
+    #endif
 
     /// §4.3 — translate pan gestures into SGR mouse wheel events when the
     /// remote app requested mouse reporting.
@@ -67,15 +85,64 @@ final class AppSettings {
         didSet { defaults.set(previewConsoleCapture, forKey: Keys.previewConsoleCapture) }
     }
 
+    #if MESHYY
+    /// Scroll trace (Settings → Diagnostics): the user's explicit choice, nil
+    /// when they never touched the toggle. nil follows the build channel —
+    /// ON for DEBUG and TestFlight builds, OFF for the App Store — so a
+    /// TestFlight tester records the next dead swipe without having to know
+    /// the toggle exists, and a store user never records anything unasked.
+    var scrollTraceOverride: Bool? {
+        didSet {
+            if let scrollTraceOverride {
+                defaults.set(scrollTraceOverride, forKey: Keys.scrollTraceOverride)
+            } else {
+                defaults.removeObject(forKey: Keys.scrollTraceOverride)
+            }
+        }
+    }
+
+    /// What the build channel says when there is no override. Starts from the
+    /// value cached by the previous launch's channel resolution (or a
+    /// synchronous hint on first launch) and is corrected once
+    /// `BuildChannel.resolve()` answers.
+    var scrollTraceChannelDefault: Bool {
+        didSet { defaults.set(scrollTraceChannelDefault, forKey: Keys.scrollTraceChannelDefault) }
+    }
+
+    /// The effective switch. Writing it records an explicit override.
+    var scrollTraceEnabled: Bool {
+        get { scrollTraceOverride ?? scrollTraceChannelDefault }
+        set { scrollTraceOverride = newValue }
+    }
+
+    /// Applies a resolved build channel to the default (never to an override).
+    func applyBuildChannel(_ channel: BuildChannel) {
+        guard let value = channel.scrollTraceDefault else { return }
+        if scrollTraceChannelDefault != value {
+            scrollTraceChannelDefault = value
+        }
+    }
+    #endif
+
+    /// The one-time "how to get notified" card has been shown (it raises the
+    /// first time Claude Code is detected; Settings keeps it reachable).
+    var notificationSetupCardShown: Bool {
+        didSet { defaults.set(notificationSetupCardShown, forKey: Keys.notificationSetupCardShown) }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         // Migration: honor the old keys if the new ones were never written.
+        self.agentMascotIcons = defaults.object(forKey: Keys.agentMascotIcons) as? Bool ?? true
         self.autoReattachMultiplexer = defaults.object(forKey: Keys.autoReattachMultiplexer) as? Bool
             ?? defaults.object(forKey: Keys.legacyAutoReattachTmux) as? Bool
             ?? true
         self.scrollWheelBridge = defaults.object(forKey: Keys.scrollWheelBridge) as? Bool ?? true
+        #if MESHYY
+        self.meshyyTransport = defaults.bool(forKey: Keys.meshyyTransport)
+        #endif
         self.multiplexerHintShown = defaults.object(forKey: Keys.multiplexerHintShown) as? Bool
             ?? defaults.bool(forKey: Keys.legacyTmuxMouseHintShown)
         self.autoSendDictation = defaults.bool(forKey: Keys.autoSendDictation)
@@ -92,10 +159,25 @@ final class AppSettings {
         self.autoPopOutOnAppSwitch = defaults.bool(forKey: Keys.autoPopOutOnAppSwitch)
         // OFF by default — JS injection into the user's page is opt-in.
         self.previewConsoleCapture = defaults.bool(forKey: Keys.previewConsoleCapture)
+        #if MESHYY
+        self.scrollTraceOverride = defaults.object(forKey: Keys.scrollTraceOverride) as? Bool
+        #if DEBUG
+        self.scrollTraceChannelDefault = true
+        #else
+        // A definite receipt wins over the cache: a TestFlight tester who
+        // installs the App Store build over it keeps UserDefaults (cached ON),
+        // and offline the async resolve can't correct it.
+        self.scrollTraceChannelDefault = BuildChannel.synchronousHint.scrollTraceDefault
+            ?? defaults.object(forKey: Keys.scrollTraceChannelDefault) as? Bool
+            ?? false
+        #endif
+        #endif
+        self.notificationSetupCardShown = defaults.bool(forKey: Keys.notificationSetupCardShown)
     }
 
     private enum Keys {
         static let autoReattachMultiplexer = "autoReattachMultiplexer"
+        static let agentMascotIcons = "agentMascotIcons"
         static let scrollWheelBridge = "scrollWheelBridge"
         static let multiplexerHintShown = "multiplexerHintShown"
         static let autoSendDictation = "autoSendDictation"
@@ -105,6 +187,12 @@ final class AppSettings {
         static let popOutSessions = "popOutSessions"
         static let autoPopOutOnAppSwitch = "autoPopOutOnAppSwitch"
         static let previewConsoleCapture = "previewConsoleCapture"
+        #if MESHYY
+        static let meshyyTransport = "meshyyTransport"
+        static let scrollTraceOverride = "scrollTraceEnabled"
+        static let scrollTraceChannelDefault = "scrollTraceChannelDefault"
+        #endif
+        static let notificationSetupCardShown = "notificationSetupCardShown"
         // Legacy keys, read-only for migration.
         static let legacyAutoReattachTmux = "autoReattachTmux"
         static let legacyTmuxMouseHintShown = "tmuxMouseHintShown"

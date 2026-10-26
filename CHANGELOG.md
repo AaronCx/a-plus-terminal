@@ -3,6 +3,52 @@
 Notable user-facing changes per release. Versions map to App Store releases;
 unreleased work accumulates at the top.
 
+## Unreleased
+
+- **Scroll trace (diagnostics):** Settings → Diagnostics → Scroll trace
+  records, on this iPhone only, how each recent swipe was routed and what it
+  sent, so a scroll that goes dead can be shared (share sheet or your
+  server's inbox) and diagnosed. TestFlight (beta) builds only, on by
+  default there; compiled out of App Store builds along with meshyy.
+- **meshyy transport (opt-in, beta):** a session can run over meshyy, a
+  clean-room resumable terminal transport — a dropped connection resumes
+  where it left off instead of reconnecting into a fresh shell. Typing
+  `exit` closes the tab like a real terminal, and a resumed terminal
+  re-learns the running program's input modes, so tmux scrolling still
+  works after an auto-resume. While an agent waits, a one-tap palette
+  answers it, and tapping an agent notification no longer races a meshyy
+  connect into a crash. Off by default. (#131, #132, #137, #138, #142)
+- **Agent notifications:** the phone tells you when an agent asks for
+  you — only when the agent itself signals it (the terminal bell, or an
+  OSC 9 / OSC 777 / OSC 7501 notification sequence), never by guessing
+  from its output, so leaving the app no longer produces a notification.
+  Claude Code needs one setting on the server, which a one-time card
+  (also in Settings → Notifications) shows with a Copy button; Settings
+  also sends a test notification. A ring you have already seen stays
+  quiet until you answer. Notifications arrive only while a+Terminal is
+  still running: briefly after you leave it, or while a pop-out keeps it
+  running. A pop-out of a session's terminal mutes that session, since
+  you are already watching it. Claude Code's "finished" ring comes about
+  a minute after a turn, so it usually arrives only while a pop-out keeps
+  the app running. Agent status is surfaced where you are already
+  looking.
+  (#139, #140, #143, #149)
+- **Sessions widget:** a home-screen widget that lists live sessions and
+  opens exactly the session it shows. (#135, #136)
+- **Agent icons and custom agents:** agents get their real faces across the
+  app, with a hand-drawn doodle set as the default and support for custom
+  icons, sized to fit the Dynamic Island. Settings → Agents now lets you
+  create your own agent for any command-line tool, with its own icon from
+  Photos or Files: a+Terminal recognizes it from the command name or what
+  it prints when it starts, and shows it on the session, the Live Activity
+  and the Dynamic Island like a built-in; its bell or notification sequence
+  reaches your phone like a built-in's too. Agents export and import as
+  JSON; your icons stay on your device. (#143, #144, #145, #146, #148)
+- **Fixes:** returning from a preview refocuses the terminal program, and
+  the Sessions widget orders sessions correctly (#136); scrolling is
+  consistent and alerts are honest about state (#145); the session picker
+  keeps its payload and a swipe stays off the status line (#147).
+
 ## 1.0.3 (build 43) — 2026-08-01
 
 - **Preview pop-out and console:** a preview can now be popped out into the

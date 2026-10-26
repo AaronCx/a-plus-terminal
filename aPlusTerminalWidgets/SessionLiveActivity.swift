@@ -1,6 +1,7 @@
 import ActivityKit
 import WidgetKit
 import SwiftUI
+import UIKit
 
 /// Lock Screen + Dynamic Island presentations for active SSH sessions (§4.5).
 struct SessionLiveActivity: Widget {
@@ -13,7 +14,7 @@ struct SessionLiveActivity: Widget {
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 6) {
-                        Image(systemName: "terminal.fill")
+                        AgentGlyph(iconName: context.state.sessions.first?.agentIconName)
                         Text("a+Terminal")
                             .font(.headline)
                     }
@@ -46,7 +47,7 @@ struct SessionLiveActivity: Widget {
                     .padding(.horizontal, 4)
                 }
             } compactLeading: {
-                Image(systemName: "terminal.fill")
+                AgentGlyph(iconName: context.state.sessions.first?.agentIconName, size: 14)
                     .widgetURL(deepLink(for: context.state))
             } compactTrailing: {
                 // An agent waiting for input outranks the session count —
@@ -75,7 +76,52 @@ struct SessionLiveActivity: Widget {
     }
 
     private func deepLink(for state: SessionActivityAttributes.ContentState) -> URL? {
-        state.mostRecentSessionID.map { URL.sessionDeepLink(id: $0) }
+        state.primarySessionID.map { URL.sessionDeepLink(id: $0) }
+    }
+}
+
+/// The detected agent's icon, or the terminal glyph when none — the payload
+/// only carries an icon name when the user's toggle is on. A USER-SUPPLIED
+/// icon (App Group AgentIcons/<id>.png) wins over the bundled default, which
+/// is what lets users bring vendor art the app itself does not ship. A
+/// custom agent with neither draws the generic doodle, never a blank slot.
+struct AgentGlyph: View {
+    let iconName: String?
+    var size: CGFloat = 16
+
+    var body: some View {
+        if let iconName {
+            let source = CustomAgentIconStore.source(forIconName: iconName)
+            if case .custom(let url) = source, let custom = thumbnail(at: url) {
+                Image(uiImage: custom)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
+            } else {
+                Image(source.assetName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
+            }
+        } else {
+            Image(systemName: "terminal.fill")
+        }
+    }
+
+    /// The custom file's path comes from CustomAgentIconStore, compiled into
+    /// this extension too, so it always matches where the app wrote it.
+    ///
+    /// The loaded bitmap is thumbnailed DOWN TO THE SLOT before it reaches
+    /// ActivityKit: the island's compact presentation replaces images larger
+    /// than the slot with a gray placeholder box rather than scaling them —
+    /// which is exactly how a user-imported 360px custom icon rendered as a
+    /// gray square while the pre-sized bundled assets drew fine.
+    private func thumbnail(at url: URL) -> UIImage? {
+        guard let full = UIImage(contentsOfFile: url.path) else { return nil }
+        let side = size * 3   // the slot in pixels at max display scale
+        return full.preparingThumbnail(of: CGSize(width: side, height: side)) ?? full
     }
 }
 
@@ -97,6 +143,9 @@ struct SessionActivityRow: View {
                     Circle()
                         .fill(session.isConnected ? Color.green : Color.orange)
                         .frame(width: 8, height: 8)
+                }
+                if let icon = session.agentIconName {
+                    AgentGlyph(iconName: icon, size: 13)
                 }
                 Text(session.name)
                     .font(.subheadline.weight(.medium))
@@ -143,7 +192,7 @@ struct LockScreenSessionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Image(systemName: "terminal.fill")
+                AgentGlyph(iconName: state.sessions.first?.agentIconName)
                 Text(title)
                     .font(.headline)
                 Spacer()

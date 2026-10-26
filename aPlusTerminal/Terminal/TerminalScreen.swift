@@ -9,6 +9,7 @@ struct TerminalScreen: View {
     @Environment(SessionManager.self) private var sessionManager
     @Environment(PiPCoordinator.self) private var pip
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     let session: TerminalSession
 
@@ -26,6 +27,29 @@ struct TerminalScreen: View {
         ZStack {
             TerminalHostView(session: session, fontSize: theme.terminalFontSize)
 
+            // With AGENT_NOTIFY this is develop's if/else exactly (one view
+            // slot, the tmux hint ahead of the setup card); without it, the
+            // hint alone.
+            #if AGENT_NOTIFY
+            if session.showMultiplexerHint {
+                VStack {
+                    TmuxMouseHintBanner {
+                        session.showMultiplexerHint = false
+                    }
+                    Spacer()
+                }
+            } else if session.showNotificationSetupCard {
+                VStack {
+                    NotificationSetupCard {
+                        session.showNotificationSetupCard = false
+                    }
+                    .onAppear {
+                        sessionManager.notificationSetupCardAppeared(in: session)
+                    }
+                    Spacer()
+                }
+            }
+            #else
             if session.showMultiplexerHint {
                 VStack {
                     TmuxMouseHintBanner {
@@ -34,6 +58,7 @@ struct TerminalScreen: View {
                     Spacer()
                 }
             }
+            #endif
 
             switch session.state {
             case .connecting:
@@ -66,18 +91,22 @@ struct TerminalScreen: View {
                         dismiss()
                     }
                 } else {
-                    // Cleanly paused (backgrounded long enough that iOS froze
-                    // us). Reconnect queries the *live* sessions, then attaches
-                    // or shows the picker — so the choices are never stale.
-                    SessionPausedView(
-                        reattachEnabled: session.reattachEnabled,
-                        onReconnect: { Task { await session.reconnectChoosingSession() } },
-                        onFreshShell: { Task { await session.reconnect(attachTo: nil) } },
-                        onClose: {
-                            sessionManager.close(session)
-                            dismiss()
+                    #if MESHYY
+                    if session.usesMeshyy {
+                        // meshyy resumes itself (see appWillEnterForeground), so this
+                        // is the moment between foregrounding and the reattach
+                        // landing. Showing the paused card here would offer a choice
+                        // that is already being made — and its "Fresh Shell" button
+                        // would throw away the very session meshyy exists to keep.
+                        statusCard {
+                            ProgressView("Resuming your session…")
                         }
-                    )
+                    } else {
+                        pausedCard
+                    }
+                    #else
+                    pausedCard
+                    #endif
                 }
             case .connected, .closed:
                 EmptyView()
@@ -91,6 +120,19 @@ struct TerminalScreen: View {
                     onStayInShell: { session.dismissReattachChoice() }
                 )
             }
+
+            #if MESHYY
+            // The daemon holds detached meshyy sessions for this server — the user
+            // decides whether this tab resumes one or starts fresh. Never guessed:
+            // guessing is exactly what used to drop new tabs into old shells.
+            if let survivors = session.meshyySurvivors {
+                MeshyySurvivorPickerView(
+                    survivors: survivors,
+                    onResume: { session.chooseMeshyySession(.resume($0)) },
+                    onNew: { session.chooseMeshyySession(.new) }
+                )
+            }
+            #endif
         }
         .navigationTitle(session.server.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -105,6 +147,33 @@ struct TerminalScreen: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if session.state == .connected {
+                #if MESHYY
+                // The agent is waiting and the daemon has one-tap answers for
+                // it. Above the accessory bar — thumb height, where the
+                // answer keys would otherwise have to be hunted on the
+                // keyboard. Labels come from the agent profile via the
+                // daemon; the app draws them and adds nothing.
+                if !session.offeredQuickActions.isEmpty {
+                    QuickActionPaletteBar(
+                        actions: session.offeredQuickActions,
+                        onTap: { id in
+                            Task {
+                                if await session.performQuickAction(id: id) {
+                                    // Blind one-tap action: the tap has no
+                                    // visible echo until the agent reacts, so
+                                    // the confirmation is felt, not seen.
+                                    await UINotificationFeedbackGenerator()
+                                        .notificationOccurred(.success)
+                                }
+                                // Refusal is deliberately silent: the prompt
+                                // moved on, the palette withdraws, nothing
+                                // was sent. An error dialog would interrupt
+                                // the very flow the palette exists to speed.
+                            }
+                        }
+                    )
+                }
+                #endif
                 KeyAccessoryBar(
                     bridge: session.bridge,
                     onMic: { showDictation = true },
@@ -115,7 +184,13 @@ struct TerminalScreen: View {
         }
         .sheet(isPresented: $showDictation) {
             DictationSheet { text, appendReturn in
-                session.sendInput(Data((appendReturn ? text + "\n" : text).utf8))
+                // CARRIAGE RETURN, not newline. Every other Enter in the app sends
+                // CR (SwiftTerm's `returnByteSequence`), and a raw-mode TUI — an
+                // agent's permission prompt, which is exactly what dictation is for
+                // — reads LF as a literal line feed rather than Enter. In a cooked
+                // shell both happen to submit, which is why this survived: it broke
+                // only where it mattered most.
+                session.sendInput(Data((appendReturn ? text + "\r" : text).utf8))
             }
         }
         .sheet(isPresented: $showPreview, onDismiss: {
@@ -124,8 +199,38 @@ struct TerminalScreen: View {
             // with no UI attached to it. (stopPreview is idempotent, so the
             // Done path calling it first is harmless.)
             Task { await session.stopPreview() }
+            // Give the terminal its focus back. Presenting the sheet resigned
+            // it, and SwiftTerm told the running program so (a mode-1004
+            // focus-out escape). Nothing on the dismiss path restored either
+            // half, so the program behind the terminal — an agent chat is
+            // where it shows — kept behaving as an unfocused window: scroll
+            // wheel input ignored, first tap swallowed by the refocus. The
+            // .onAppear refocus never runs here because a sheet does not
+            // detach the screen underneath it.
+            session.bridge.focus()
         }) {
             PreviewScreen(session: session, initialPort: previewPort)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Foregrounding WITH this screen up is also looking at it —
+            // onAppear does not refire on scene activation.
+            if phase == .active {
+                session.markViewed()
+            }
+            #if DEBUG
+            // Live notification tests: on a device, leaving the app hides
+            // the keyboard — the pty grows and the agent repaints as the app
+            // goes. The simulator does not do that reliably, so the test
+            // asks for it: a real dismissal (and refocus on return), never a
+            // synthetic resize.
+            if AgentAlertProbe.shared.hidesKeyboardOnLeave {
+                switch phase {
+                case .inactive: session.bridge.dismissKeyboard()
+                case .active: session.bridge.focus()
+                default: break
+                }
+            }
+            #endif
         }
         .onChange(of: session.pendingPreviewPort) { _, port in
             // A loopback OSC 8 link was tapped in the terminal. Consume the
@@ -173,6 +278,7 @@ struct TerminalScreen: View {
             }
         }
         .onAppear {
+            session.markViewed()
             switch session.state {
             case .connected:
                 session.bridge.focus()
@@ -240,6 +346,21 @@ struct TerminalScreen: View {
         .padding(.top, 8)
         .transition(.move(edge: .top).combined(with: .opacity))
         .accessibilityLabel("Uploading attachment")
+    }
+
+    /// Cleanly paused (backgrounded long enough that iOS froze us). Reconnect
+    /// queries the *live* sessions, then attaches or shows the picker — so the
+    /// choices are never stale.
+    private var pausedCard: some View {
+        SessionPausedView(
+            reattachEnabled: session.reattachEnabled,
+            onReconnect: { Task { await session.reconnectChoosingSession() } },
+            onFreshShell: { Task { await session.reconnect(attachTo: nil) } },
+            onClose: {
+                sessionManager.close(session)
+                dismiss()
+            }
+        )
     }
 
     private func statusCard(@ViewBuilder content: () -> some View) -> some View {
@@ -328,6 +449,71 @@ struct SessionPausedView: View {
         .padding(24)
     }
 }
+
+#if MESHYY
+/// Detached meshyy sessions found on the server at connect time. The card the
+/// connect parks behind: each survivor is a shell still running exactly as it was
+/// left, and only a tap — never a guess — puts this tab into one.
+struct MeshyySurvivorPickerView: View {
+    let survivors: [MeshyyTransport.RemoteSession]
+    var onResume: (String) -> Void
+    var onNew: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text(survivors.count == 1 ? "A Session Is Still Running" : "Sessions Are Still Running")
+                .font(.headline)
+            Text("This server kept working while the app was away. Pick a session to resume, or start fresh.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(survivors) { survivor in
+                        Button { onResume(survivor.name) } label: {
+                            VStack(spacing: 2) {
+                                Label("Resume Session \(survivor.slot + 1)",
+                                      systemImage: "arrow.uturn.backward")
+                                Text(detail(for: survivor))
+                                    .font(.caption2)
+                                    .opacity(0.8)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Button(action: onNew) {
+                        Label("New Session", systemImage: "plus.rectangle").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: 320)
+            }
+            .frame(maxHeight: 300)
+        }
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding(24)
+    }
+
+    private func detail(for survivor: MeshyyTransport.RemoteSession) -> String {
+        var parts: [String] = []
+        if let last = survivor.lastOutputAt {
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .short
+            parts.append("active \(formatter.localizedString(for: last, relativeTo: Date()))")
+        }
+        if survivor.bufferedBytes > 0 {
+            parts.append(ByteCountFormatter.string(
+                fromByteCount: Int64(survivor.bufferedBytes), countStyle: .memory))
+        }
+        return parts.isEmpty ? "\(survivor.cols)×\(survivor.rows)" : parts.joined(separator: " · ")
+    }
+}
+#endif
 
 /// Live session picker shown over the reconnected shell when several sessions
 /// exist. `sessions` is a fresh query (no stale/closed entries).

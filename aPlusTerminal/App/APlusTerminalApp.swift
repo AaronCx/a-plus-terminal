@@ -1,5 +1,8 @@
 import AppIntents
 import SwiftUI
+#if AGENT_NOTIFY
+import UserNotifications
+#endif
 import os
 
 let deepLinkLog = Logger(subsystem: "com.aaroncx.aplusterminal", category: "deeplink")
@@ -18,6 +21,9 @@ struct APlusTerminalApp: App {
     @State private var router: DeepLinkRouter
     @State private var tipStore = TipStore()
     @State private var exitDiagnostics: BackgroundExitDiagnostics
+    #if MESHYY
+    @State private var scrollTrace: ScrollTraceStore
+    #endif
     @State private var pip: PiPCoordinator
     @State private var vncMonitors: VNCMonitorManager
 
@@ -26,7 +32,14 @@ struct APlusTerminalApp: App {
         let servers = ServerStore()
         let keys = KeyStore()
         let settings = AppSettings()
+        #if DEBUG
+        // Before the store loads, so seeded agents read like a normal launch.
+        TestSeed.prepareAgentsIfRequested()
+        #endif
         let profiles = ProfileStore()
+        // User icons never leave the device, including icons saved before
+        // every write excluded them from backup.
+        CustomAgentIconStore.excludeStoredIconsFromBackup()
         _theme = State(initialValue: theme)
         _servers = State(initialValue: servers)
         _keys = State(initialValue: keys)
@@ -39,7 +52,20 @@ struct APlusTerminalApp: App {
         // process left in UserDefaults, then resets the record for this run.
         let exitDiagnostics = BackgroundExitDiagnostics()
         _exitDiagnostics = State(initialValue: exitDiagnostics)
+        #if MESHYY
+        // On-device swipe trace (Settings → Diagnostics → Scroll trace).
+        // Default ON for DEBUG/TestFlight, OFF for the App Store; the channel
+        // is resolved once, asynchronously, from StoreKit's app transaction.
+        // Beta-only: App Store candidates compile the trace out entirely.
+        let scrollTrace = ScrollTraceStore(settings: settings)
+        _scrollTrace = State(initialValue: scrollTrace)
+        Task { @MainActor in
+            settings.applyBuildChannel(await BuildChannel.resolve())
+        }
+        let sessions = SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles, diagnostics: exitDiagnostics, scrollTrace: scrollTrace)
+        #else
         let sessions = SessionManager(keyStore: keys, serverStore: servers, passwords: passwords, settings: settings, profiles: profiles, diagnostics: exitDiagnostics)
+        #endif
         _sessions = State(initialValue: sessions)
         let router = DeepLinkRouter()
         _router = State(initialValue: router)
@@ -58,6 +84,17 @@ struct APlusTerminalApp: App {
         // While a pop-out is live, the background wind-down must not kill
         // the sessions it is monitoring…
         sessions.pipKeepsProcessAlive = { [weak pip] in pip?.isActive ?? false }
+        // …and a pop-out of a session's terminal is the user watching it:
+        // that session's agent alerts stay quiet (only that session's).
+        sessions.pipShowsTerminal = { [weak pip] in pip?.isShowingTerminal(of: $0) ?? false }
+        #if AGENT_NOTIFY
+        // Agent alerts: a notification tap routes its deep link through the
+        // same router every other entry point uses.
+        UNUserNotificationCenter.current().delegate = AgentAlertCenter.shared
+        AgentAlertCenter.shared.openURL = { [weak router] url in
+            router?.handle(url)
+        }
+        #endif
         vncMonitors.pipKeepsProcessAlive = { [weak pip] in pip?.isActive ?? false }
         // …and when the pop-out ends while still backgrounded, the normal
         // grace window starts at that moment instead.
@@ -73,6 +110,7 @@ struct APlusTerminalApp: App {
         AppDependencyManager.shared.add(dependency: router)
         AppDependencyManager.shared.add(dependency: servers)
         #if DEBUG
+        AgentAlertProbe.shared.start()
         TestSeed.applyIfRequested(servers: servers, keys: keys, router: router, settings: settings)
         TestSeed.applyVNCIfRequested(servers: servers, passwords: passwords, vncManager: vncMonitors)
         #endif
@@ -91,6 +129,9 @@ struct APlusTerminalApp: App {
             .environment(router)
             .environment(tipStore)
             .environment(exitDiagnostics)
+            #if MESHYY
+            .environment(scrollTrace)
+            #endif
             .environment(pip)
             .environment(vncMonitors)
             .preferredColorScheme(theme.theme.colorScheme)
@@ -100,10 +141,17 @@ struct APlusTerminalApp: App {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            agentAlertLog.notice("scene \(String(describing: phase), privacy: .public)")
+            sessions.scenePhaseChanged(to: String(describing: phase))
             switch phase {
             case .background:
                 sessions.appDidEnterBackground()
                 vncMonitors.appDidEnterBackground()
+                #if MESHYY
+                // A force-quit from the app switcher must not lose the last
+                // couple of seconds of trace.
+                Task { await scrollTrace.flush() }
+                #endif
             case .active:
                 sessions.appWillEnterForeground()
                 vncMonitors.appWillEnterForeground()
@@ -148,6 +196,9 @@ struct RootTabView: View {
         .onChange(of: router.selectedTab) { old, new in
             deepLinkLog.debug("tabview: selection \(String(describing: old), privacy: .public) -> \(String(describing: new), privacy: .public)")
         }
+        #if DEBUG
+        .overlay(alignment: .topLeading) { TestSeedMarker() }
+        #endif
     }
 }
 
@@ -165,6 +216,12 @@ final class DeepLinkRouter: @unchecked Sendable {
     /// Set when an App Intent (or aplusterminal://connect/<uuid>) asks to
     /// open a session to a saved server; TerminalTabView consumes it.
     var connectServerID: UUID?
+    #if MESHYY
+    /// aplusterminal://server/<id>/session/<name> — attach the NAMED daemon
+    /// session on that server. The name outlives tabs, which is what lets a
+    /// notification link land in the right session after the tab is gone.
+    var targetServerSession: (server: UUID, name: String)?
+    #endif
 
     func requestConnect(toServer id: UUID) {
         deepLinkLog.debug("router: connect request \(id.uuidString, privacy: .public)")
@@ -196,6 +253,17 @@ final class DeepLinkRouter: @unchecked Sendable {
             guard let id = UUID(uuidString: url.lastPathComponent) else { break }
             requestConnect(toServer: id)
             return
+        #if MESHYY
+        case "server":
+            // /<serverUUID>/session/<name>
+            let parts = url.pathComponents.filter { $0 != "/" }
+            guard parts.count == 3, parts[1] == "session",
+                  let serverID = UUID(uuidString: parts[0]) else { break }
+            deepLinkLog.debug("router: server=\(serverID.uuidString, privacy: .public) session=\(parts[2], privacy: .public)")
+            selectedTab = .terminal
+            targetServerSession = (server: serverID, name: parts[2])
+            return
+        #endif
         default:
             break
         }

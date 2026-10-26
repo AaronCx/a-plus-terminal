@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftTerm
 import Observation
 import Citadel
+import WidgetKit
 
 enum SessionState: Equatable {
     case connecting
@@ -79,13 +80,389 @@ final class TerminalSession: Identifiable, Hashable {
     var showMultiplexerHint = false
 
     private(set) var connection = SSHConnection()
+    #if MESHYY
+    /// The meshyy transport, when the toggle is on and the host has a daemon.
+    /// The SSH connection above stays live regardless; this replaces only the pty.
+    private(set) var meshyy: MeshyyTransport? {
+        didSet {
+            // Scroll trace: frames belong to the daemon that sent them. Kept
+            // across `rebuilt()` (meshyy is replaced, never nil'd), dropped
+            // when meshyy stops carrying the pty — SSH fallback, clean exit,
+            // a closed tab — so a later record never reports another
+            // transport's far side as this one's.
+            if meshyy == nil {
+                lastModesFrame = nil
+                lastScreenModeFrame = nil
+            }
+        }
+    }
+    /// Why meshyy is not carrying this session, when it was asked to.
+    private(set) var meshyyUnavailable: String?
+    /// True when meshyy is carrying this session's pty — the transport survives a
+    /// suspend, so this stays true across the background/foreground cycle and is
+    /// what decides whether returning is automatic or a question.
+    var usesMeshyy: Bool { meshyy != nil }
+
+    /// A daemon session NAME this tab must resume — set by a notification's
+    /// deep link before connect. Names outlive tabs; honored exactly once.
+    @ObservationIgnored var requestedMeshyySession: String?
+
+    /// The daemon's current one-tap offer, empty when nothing is waiting.
+    /// Rendered as the palette above the accessory bar; labels are from the
+    /// agent profile, never from remote output.
+    var offeredQuickActions: [MeshyyQuickAction] = []
+    /// Why the last palette tap was refused, nil after a success. The refusal
+    /// is quiet in the UI by design; the reason must still exist somewhere a
+    /// debugger (and a test) can read, or dead buttons ship undiagnosable.
+    private(set) var lastQuickActionRefusal: String?
+
+    /// The daemon's read of the agent, when meshyy carries this session.
+    /// Ground truth (termios- and alt-screen-aware) where the byte-burst
+    /// heuristic is a guess; nil over SSH or before the first event.
+    private(set) var daemonAgentStatus: AgentActivityMonitor.Status?
+    private(set) var daemonAgentName: String?
+    private(set) var daemonAgentID: String?
+    #endif
+
+    /// The NAMED agent running here — a profile matched its marker (or the
+    /// daemon named it), never the generic "Agent" guess.
+    var namedAgentID: String? {
+        #if MESHYY
+        let id = (usesMeshyy ? daemonAgentID : nil) ?? agentMonitor.detected?.id
+        #else
+        let id = agentMonitor.detected?.id
+        #endif
+        guard let id, id != "generic" else { return nil }
+        return id
+    }
+
+    /// Log-safe agent name: a profile id this app knows. Under meshyy the
+    /// id comes from the remote daemon, so one that matches no local
+    /// profile logs as "other" — never the remote's string. A custom agent
+    /// logs as "custom" (its id carries the name the user typed).
+    var agentLogName: String {
+        guard let id = namedAgentID else { return speaksProgramStatus ? "osc7501" : "nil" }
+        return profiles.agent(id: id) != nil ? AgentProfile.logName(forID: id) : "other"
+    }
+
+    /// Bumped whenever the monitor's status or latched agent changes. The
+    /// monitor is not observable, so without this a row that read the agent
+    /// icon/label kept whatever it last drew until something unrelated
+    /// redrew it. Read by the `effectiveAgent*` accessors to register the
+    /// dependency.
+    private(set) var agentPresentationRevision = 0
+
+    func agentPresentationDidChange() {
+        agentPresentationRevision &+= 1
+    }
+
+    /// Asset name for the detected agent's mascot mark, when one is detected.
+    /// A custom agent's name ("agent-custom-…") has no bundled asset; every
+    /// renderer resolves it through `CustomAgentIconStore.source`, which
+    /// falls back to the user's PNG, then the generic doodle.
+    var effectiveAgentIconName: String? {
+        _ = agentPresentationRevision
+        return namedAgentID.map { "agent-\($0)" }
+    }
+
+    /// What the surfaces show: the daemon's read when there is one, the
+    /// heuristic otherwise (the SSH path's fallback, per the brief).
+    var effectiveAgentStatus: AgentActivityMonitor.Status {
+        _ = agentPresentationRevision
+        #if MESHYY
+        if usesMeshyy, let daemonAgentStatus { return daemonAgentStatus }
+        #endif
+        return agentMonitor.status
+    }
+    var effectiveAgentName: String? {
+        _ = agentPresentationRevision
+        #if MESHYY
+        if usesMeshyy, let daemonAgentName { return daemonAgentName }
+        #endif
+        return agentMonitor.detected?.displayName
+    }
+
+    /// Last agent status the funnel noted — bookkeeping and logs only.
+    @ObservationIgnored private var alertedAgentStatus: AgentActivityMonitor.Status = .none
+    /// An agent signal got through to the user and they have not answered
+    /// since.
+    @ObservationIgnored private var signalPending = false
+    /// True once the user has LOOKED at this session while a signal was
+    /// pending — and until they actually answer. The user's report was
+    /// notifications for a session they had already checked out and
+    /// deliberately not answered. Seeing it is the mute; SENDING INPUT is
+    /// what re-arms alerts, because a response is the only signal that the
+    /// next ring is news.
+    @ObservationIgnored private var currentWaitSeen = false
+    /// The last real pty size change or app scene-phase change. Every one of
+    /// them makes a TUI repaint, and for a moment afterwards nothing the
+    /// session says is about the user — leaving the app dismisses the
+    /// keyboard, resizes the pty, and the agent redraws.
+    @ObservationIgnored private(set) var lastDisruptionAt: Date?
+    /// Signals inside this window after a disruption are dropped.
+    static let disruptionQuietPeriod: TimeInterval = 2
+    /// The program here answered the OSC 7501 probe's promise with a record:
+    /// it announced itself, so it counts as an agent with or without a
+    /// marker match.
+    @ObservationIgnored private(set) var speaksProgramStatus = false
+    /// The one-time "how to get notified" card, raised when Claude Code is
+    /// detected and the card has never been ON SCREEN (the flag persists
+    /// when it appears — `SessionManager.notificationSetupCardAppeared` — so
+    /// a detection in a session the user never opens does not use it up).
+    var showNotificationSetupCard = false
+    /// Test seam: every write to the pty, and whether it counted as the
+    /// user's answer.
+    @ObservationIgnored var onSendInput: ((Data, Bool) -> Void)?
+    /// Seams for the alert shell, injectable so tests never touch
+    /// UNUserNotificationCenter. Defaults post through AgentAlertCenter.
+    @ObservationIgnored var postAgentAlert: (AgentAlertPolicy.Trigger) -> Void = { _ in }
+    @ObservationIgnored var appIsActive: () -> Bool = {
+        UIApplication.shared.applicationState == .active
+    }
+    /// Asks for notification permission (once per process, in the shell).
+    /// A seam so tests can see WHEN it is asked without a system dialog.
+    /// Without AGENT_NOTIFY (agent notifications compiled out) it asks nothing:
+    /// `AgentAlertCenter.agentDetected()` is compiled out too, so a default
+    /// that still called it would not build.
+    @ObservationIgnored var requestAlertAuthorization: () -> Void = {
+        #if AGENT_NOTIFY
+        AgentAlertCenter.shared.agentDetected()
+        #endif
+    }
+
+    /// Every observed agent-status change funnels here — from the SSH byte
+    /// heuristic and from meshyy's daemon events alike. It NEVER posts a
+    /// notification. Inferring "needs you" from output timing posted one
+    /// every time the user left the app (keyboard dismissal → resize →
+    /// repaint burst → quiet → "waiting"), and two rounds of filters on the
+    /// guess did not stop it. The heuristic still drives the badge, the
+    /// server-row count, the Live Activity and the pop-out chip, where a
+    /// wrong guess is cheap; notifications come from `noteAgentSignal`.
+    func noteAgentStatus(_ status: AgentActivityMonitor.Status, now: Date = Date()) {
+        defer { alertedAgentStatus = status }
+        agentAlertLog.debug("note session=\(self.id.logTag, privacy: .public) status=\(status.rawValue, privacy: .public) alerted=\(self.alertedAgentStatus.rawValue, privacy: .public) agent=\(self.agentLogName, privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public) wouldPost=false")
+        #if DEBUG
+        AgentAlertProbe.shared.noteAgent(namedAgentID)
+        #endif
+        if let agent = namedAgentID {
+            noteNamedAgent(agent)
+        }
+    }
+
+    /// A named agent is running here: the moment notifications become
+    /// meaningful, so ask for permission now (once per process), and show
+    /// Claude Code users the one setting that makes it ring.
+    private func noteNamedAgent(_ agent: String) {
+        requestAlertAuthorization()
+        #if AGENT_NOTIFY
+        // Runs per output chunk: write only on the edge, since an
+        // @Observable setter notifies observers even when the value is
+        // unchanged and would re-render the terminal screen every chunk.
+        if agent == "claude-code", !settings.notificationSetupCardShown,
+           !showNotificationSetupCard {
+            showNotificationSetupCard = true
+        }
+        #endif
+    }
+
+    /// Why a signal did or did not reach the alert policy.
+    enum SignalOutcome: Equatable {
+        case forwarded(AgentAlertPolicy.Trigger)
+        /// A status update, not a request (7501 working/idle/…).
+        case notARequest
+        /// No agent evidently running here: a plain shell's BEL is tab
+        /// completion or a script's `\a`, even on a server with an agent picked.
+        case noAgent
+        /// Within the quiet period after a resize or scene-phase change.
+        case disruption
+        /// The user saw the pending signal and has not answered yet.
+        case seenUnanswered
+
+        /// Log-safe: a forwarded trigger by its slug, never its text.
+        var logName: String {
+            switch self {
+            case .forwarded(let trigger): return "forwarded-\(trigger.slug)"
+            case .notARequest: return "notARequest"
+            case .noAgent: return "noAgent"
+            case .disruption: return "disruption"
+            case .seenUnanswered: return "seenUnanswered"
+            }
+        }
+    }
+
+    /// The ONLY path to a notification: the program in the terminal said
+    /// something meant for the user (BEL, OSC 9/777, OSC 7501). Gates, in
+    /// order: a named agent is evidently running (or a 7501 speaker is); no resize or
+    /// scene-phase change in the last 2 s; the user has not seen-and-left an
+    /// earlier signal unanswered. The policy (floor, app active, pop-out)
+    /// gets the last word.
+    @discardableResult
+    func noteAgentSignal(_ signal: AgentSignal, now: Date = Date()) -> SignalOutcome {
+        let outcome = signalOutcome(signal, now: now)
+        agentAlertLog.notice("signal session=\(self.id.logTag, privacy: .public) kind=\(signal.logName, privacy: .public) agent=\(self.agentLogName, privacy: .public) outcome=\(outcome.logName, privacy: .public)")
+        if case .forwarded(let trigger) = outcome {
+            signalPending = true
+            postAgentAlert(trigger)
+        }
+        return outcome
+    }
+
+    private func signalOutcome(_ signal: AgentSignal, now: Date) -> SignalOutcome {
+        guard let trigger = signal.trigger else { return .notARequest }
+        guard agentEvidentlyRunning || speaksProgramStatus else { return .noAgent }
+        if let last = lastDisruptionAt, now.timeIntervalSince(last) < Self.disruptionQuietPeriod {
+            return .disruption
+        }
+        guard !currentWaitSeen else { return .seenUnanswered }
+        return .forwarded(trigger)
+    }
+
+    /// Positive evidence that a named agent is running here NOW — the
+    /// notification gate. Naming alone is not enough: an explicit pick is
+    /// named before anything runs, so a build script's bell at a bare shell
+    /// prompt would have posted "Claude Code wants your attention".
+    private var agentEvidentlyRunning: Bool {
+        #if MESHYY
+        if usesMeshyy, let id = daemonAgentID, id != "generic" { return true }
+        #endif
+        return agentMonitor.hasRunningAgentEvidence
+    }
+
+    /// The program behind the pty is gone (suspend, close, reconnect): forget
+    /// what it was — the heuristic's latch and its 7501 announcement alike.
+    private func resetAgentDetection() {
+        agentMonitor.reset()
+        speaksProgramStatus = false
+    }
+
+    /// A real pty size change or app scene-phase change (see
+    /// `lastDisruptionAt`).
+    func noteDisruption(_ reason: String, now: Date = Date()) {
+        lastDisruptionAt = now
+        agentAlertLog.notice("disruption session=\(self.id.logTag, privacy: .public) reason=\(reason, privacy: .public)")
+    }
+
+    /// The session screen is in front of the user's eyes. If a signal is
+    /// pending right now, it is officially seen.
+    func markViewed() {
+        if signalPending {
+            currentWaitSeen = true
+        }
+        agentAlertLog.notice("viewed session=\(self.id.logTag, privacy: .public) pending=\(self.signalPending, privacy: .public) waitSeen=\(self.currentWaitSeen, privacy: .public)")
+    }
+
+    #if MESHYY
+    /// Answers a palette tap through MeshyyKit's tested gate. Returns whether
+    /// the send actually happened — a tap that lands after the prompt moved
+    /// on is refused QUIETLY: the palette just goes away, nothing was typed
+    /// into whatever the agent went on to do, and no dialog interrupts.
+    func performQuickAction(id: String) async -> Bool {
+        guard let meshyy else { return false }
+        // The tap must name an action that is CURRENTLY offered: a tap is
+        // only ever born from a visible button, so if the offer is gone by
+        // the time the tap runs, the moment has passed — refuse quietly.
+        // MeshyyKit's status gate stays underneath as defense-in-depth; this
+        // guard is the one that tracks what the user could actually see.
+        guard offeredQuickActions.contains(where: { $0.id == id }) else {
+            lastQuickActionRefusal = "the offer was already withdrawn"
+            return false
+        }
+        do {
+            try await meshyy.performQuickAction(id: id)
+            lastQuickActionRefusal = nil
+            currentWaitSeen = false
+            signalPending = false
+            return true
+        } catch {
+            lastQuickActionRefusal = "\(error)"
+            offeredQuickActions = []
+            return false
+        }
+    }
+
+    /// Everything a freshly adopted transport must be wired to. One place,
+    /// because the transport is born in three places (new, resumed,
+    /// remembered) and rebuilt in a fourth (reattach) — a callback wired at
+    /// two of the four is a bug that looks like a flaky feature.
+    private func wire(_ transport: MeshyyTransport) {
+        transport.onQuickActions = { [weak self] actions in
+            self?.offeredQuickActions = actions
+        }
+        transport.onAgentStatus = { [weak self] status, id, name in
+            guard let self else { return }
+            self.daemonAgentStatus = status
+            self.daemonAgentID = id
+            self.daemonAgentName = name
+            self.noteAgentStatus(status)
+            self.onStateChange?()   // repaint the rows that show it
+        }
+        // Scroll trace: frames the pump saw before this wiring (the attach
+        // handshake delivers both) are adopted; later ones arrive by callback.
+        // Kept on the session so they survive `rebuilt()`.
+        if let frame = transport.lastModesFrame,
+           frame.at > (lastModesFrame?.at ?? .distantPast) {
+            lastModesFrame = frame
+        }
+        if let frame = transport.lastScreenModeFrame,
+           frame.at > (lastScreenModeFrame?.at ?? .distantPast) {
+            lastScreenModeFrame = frame
+        }
+        transport.onModesFrame = { [weak self] active, at in
+            self?.lastModesFrame = (active, at)
+        }
+        transport.onScreenModeFrame = { [weak self] alt, at in
+            self?.lastScreenModeFrame = (alt, at)
+        }
+    }
+    private var meshyyPumpTask: Task<Void, Never>?
+
+    // MARK: Scroll trace telemetry (observation only)
+
+    /// When the emulator was last fed bytes, by either pump.
+    @ObservationIgnored private(set) var lastInboundBytesAt: Date?
+    /// The last `.modes` / `.screenMode` frame from the daemon (meshyy only).
+    @ObservationIgnored private(set) var lastModesFrame: (active: Set<Int>, at: Date)?
+    @ObservationIgnored private(set) var lastScreenModeFrame: (alt: Bool, at: Date)?
+    @ObservationIgnored private var scrollTracer: ScrollGestureTracer?
+    /// The store this session's swipes are recorded into (live tests read it).
+    @ObservationIgnored private(set) var scrollTraceStoreForTesting: ScrollTraceStore?
+    /// The last pty resize a transport was actually handed, and how it went.
+    /// A lost resize leaves tmux's pty smaller than the emulator, and wheel
+    /// events aimed below tmux's last row are dropped.
+    @ObservationIgnored private(set) var lastPtyResize: ScrollTraceContext.PtyResize?
+
+    /// Detached sessions the daemon holds for this server, set while the connect is
+    /// parked waiting for the user to choose — drives the survivor picker overlay.
+    /// Nil the rest of the time.
+    private(set) var meshyySurvivors: [MeshyyTransport.RemoteSession]?
+    /// What the user decided about the survivors.
+    enum MeshyyChoice {
+        case new
+        case resume(String)
+        /// The tab went away while the picker was up. Nothing to open.
+        case abort
+    }
+    @ObservationIgnored private var meshyyChoice: CheckedContinuation<MeshyyChoice, Never>?
+    /// A survivor this tab has chosen but not finished opening. The transport's own
+    /// name covers the claim once the bootstrap succeeds; this covers the seconds in
+    /// between, so a second tab resolving the same survivor sees it taken.
+    private(set) var meshyyPendingClaim: String?
+    /// Session names other live tabs are already drawing, injected by the manager.
+    /// Used twice: to keep an adopted survivor out of a second tab's picker, and to
+    /// re-check at resolve time (two pickers can be up at once).
+    @ObservationIgnored var meshyyNamesInUse: @MainActor () -> Set<String> = { [] }
+    #endif
+    /// The config the winning candidate connected with, so the SSH shell can still be
+    /// opened if the meshyy probe comes back empty.
+    private var lastCandidateConfig: SSHConnection.Configuration?
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore
     private let settings: AppSettings
     private let profiles: ProfileStore
     private var io: SessionIO?
-    private var scrollBridge: ScrollBridge?
+    /// Visible (read-only) so the SSH-oracle harness can drive real swipes.
+    private(set) var scrollBridge: ScrollBridge?
     private var pumpTask: Task<Void, Never>?
     private var reconnectLoop: Task<Void, Never>?
     private var keepaliveTask: Task<Void, Never>?
@@ -150,6 +527,11 @@ final class TerminalSession: Identifiable, Hashable {
     /// starts "the second you type".
     private enum Outbound {
         case data(Data)
+        #if MESHYY
+        /// Scroll bytes that belong to a scroll-trace record: sent exactly
+        /// like `.data`, but the send's outcome is reported to the trace.
+        case tracedData(Data, recordID: UUID, enqueuedAt: Date)
+        #endif
         case resize(cols: Int, rows: Int)
     }
 
@@ -181,9 +563,16 @@ final class TerminalSession: Identifiable, Hashable {
         bridge.sendData = { [weak self] data in
             self?.sendInput(data)
         }
+        registerAgentSignalHandlers()
+        // A bare shell prompt means the program that announced itself over
+        // OSC 7501 has exited, even if it never sent its root `clear`; a
+        // later shell bell is not its.
+        agentMonitor.onIdleShellPrompt = { [weak self] in
+            self?.speaksProgramStatus = false
+        }
 
         let scrollBridge = ScrollBridge(
-            sendData: { [weak self] data in self?.sendInput(data) },
+            sendData: { [weak self] data in self?.sendInput(data, countsAsResponse: false) },
             wheelBridgeEnabled: { [weak settings] in settings?.scrollWheelBridge ?? true }
         )
         scrollBridge.onModeBTriggered = { [weak self] in
@@ -198,8 +587,160 @@ final class TerminalSession: Identifiable, Hashable {
         self.scrollBridge = scrollBridge
     }
 
-    func sendInput(_ data: Data) {
+    #if MESHYY
+    /// Beta builds: the same session, its swipes recorded into `scrollTrace`
+    /// (nil records nothing, exactly like the plain init). An overload rather
+    /// than a defaulted parameter so App Store candidates carry no trace type.
+    convenience init(server: Server, keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, scrollTrace: ScrollTraceStore?) {
+        self.init(server: server, keyStore: keyStore, serverStore: serverStore, passwords: passwords, settings: settings, profiles: profiles)
+        guard let scrollTrace, let scrollBridge else { return }
+        let tracer = ScrollGestureTracer(store: scrollTrace) { [weak self] in
+            self?.scrollTraceContext()
+        }
+        scrollBridge.tracer = tracer
+        scrollBridge.sendTraced = { [weak self] data, recordID in
+            // Same path as sendInput(_, countsAsResponse: false): the
+            // FIFO outbox, nothing else.
+            self?.outboxContinuation.yield(.tracedData(data, recordID: recordID, enqueuedAt: Date()))
+        }
+        scrollTracer = tracer
+        scrollTraceStoreForTesting = scrollTrace
+    }
+
+    /// The session half of a scroll-trace record.
+    private func scrollTraceContext() -> ScrollTraceContext {
+        var transportState: ScrollTrace.TransportState = switch state {
+        case .connected: .connected
+        case .connecting, .reconnecting: .reconnecting
+        case .suspended, .closed: .dead
+        }
+        // A tab can sit `.connected` on a sealed meshyy transport (it finished
+        // inside establish()'s window-size await, before the pump could react):
+        // every byte sent there goes nowhere, so the transport is dead whatever
+        // the tab says. `rawSessionState` keeps what the tab said.
+        if transportState == .connected, meshyy?.isFinished == true {
+            transportState = .dead
+        }
+        let session: String?
+        let sessionSource: ScrollTrace.SessionSource?
+        if let name = meshyy?.sessionName {
+            (session, sessionSource) = (name, .meshyy)
+        } else {
+            (session, sessionSource) = (server.lastMultiplexerTarget, .serverLastMultiplexerTarget)
+        }
+        return ScrollTraceContext(
+            tabID: id,
+            server: server.name,
+            session: session,
+            sessionSource: sessionSource,
+            transport: usesMeshyy ? .meshyy : .ssh,
+            meshyyUnavailableReason: meshyyUnavailable,
+            transportState: transportState,
+            rawSessionState: String(describing: state),
+            meshyyTransportFinished: meshyy?.isFinished,
+            lastInboundBytesAt: lastInboundBytesAt,
+            lastPtyResize: lastPtyResize,
+            // Pong-inclusive (meshyy 0.1.22): an idle healthy session is still
+            // answered every heartbeat, so a large age here means the path went
+            // silent — the 3-4 s before the heartbeat declares death. Nil over
+            // SSH, which has no equivalent signal.
+            lastInboundFrameAt: meshyy?.lastInboundFrameAt,
+            // Only while meshyy carries the pty (see `meshyy`'s didSet).
+            lastModesFrame: meshyy != nil ? lastModesFrame : nil,
+            lastScreenModeFrame: meshyy != nil ? lastScreenModeFrame : nil
+        )
+    }
+
+    /// Uploads a diagnostics export (Settings → Diagnostics) to this server's
+    /// SFTP inbox over the session's existing SSH connection. User-initiated
+    /// only; returns the remote path. Nothing is typed into the terminal.
+    ///
+    /// Bounded by `timeout`: under meshyy nothing probes the SSH socket, so
+    /// after a network change it can be half-open while the tab says
+    /// connected, and SFTP on it would hang until TCP gives up — minutes, at
+    /// exactly the moment someone is sending a trace after a dead swipe.
+    func uploadDiagnostic(_ data: Data, filename: String, timeout: Duration = .seconds(20)) async throws -> String {
+        let connection = self.connection
+        return try await DiagnosticUploadRace.run(timeout: timeout) {
+            try await connection.uploadToInbox(data, filename: filename)
+        }
+    }
+    #endif
+
+    /// `countsAsResponse: false` marks machine-generated traffic — scroll
+    /// wheel events, internal multiplexer commands, focus reports, the
+    /// terminal's replies to queries — which must not re-arm notifications:
+    /// only the USER answering does.
+    func sendInput(_ data: Data, countsAsResponse: Bool = true) {
+        if countsAsResponse {
+            if currentWaitSeen {
+                agentAlertLog.notice("answered session=\(self.id.logTag, privacy: .public) bytes=\(data.count, privacy: .public) — seen-wait mute cleared")
+            }
+            currentWaitSeen = false
+            signalPending = false
+        }
+        onSendInput?(data, countsAsResponse)
         outboxContinuation.yield(.data(data))
+    }
+
+    /// The agent-signal escape sequences SwiftTerm does not deliver on iOS.
+    /// Registered once: the handlers live on the parser, which survives
+    /// `resetToInitialState()` on every (re)connect. They run synchronously
+    /// inside `feed`, on the main actor.
+    private func registerAgentSignalHandlers() {
+        let terminal = terminalView.getTerminal()
+        // OSC 777 notify;title;body. SwiftTerm parses it but forwards it to a
+        // delegate method the iOS view never implements.
+        terminal.registerOscHandler(code: 777) { [weak self] data in
+            MainActor.assumeIsolated {
+                guard let self, let signal = AgentSignal.parseOSC777(data) else { return }
+                self.noteAgentSignal(signal)
+            }
+        }
+        // OSC 9. Installing a handler replaces SwiftTerm's built-in, which
+        // only understood 9;4 progress — so progress is parsed here and
+        // handed back to the view's public progress API, keeping the bar.
+        terminal.registerOscHandler(code: 9) { [weak self, weak terminal] data in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                switch AgentSignal.parseOSC9(data) {
+                case .progress(let report):
+                    if let terminal {
+                        self.terminalView.progressReport(source: terminal, report: report)
+                    }
+                case .notification(let message):
+                    self.noteAgentSignal(.osc9(message: message))
+                case .ignored:
+                    break
+                }
+            }
+        }
+        // OSC 7501 Program Status. A program only reports after its probe is
+        // answered; the answer is the terminal speaking, not the user.
+        terminal.registerOscHandler(code: ProgramStatus.oscCode) { [weak self] data in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                switch ProgramStatus.parse(data) {
+                case .probe:
+                    agentAlertLog.notice("osc7501 probe answered session=\(self.id.logTag, privacy: .public)")
+                    self.sendInput(ProgramStatus.probeReply, countsAsResponse: false)
+                case .record(let record):
+                    // A root `clear` is the program withdrawing all its
+                    // records — it is leaving; a later shell bell is not its.
+                    let speaks = !(record.state == .clear && record.id == nil)
+                    // It may post without ever matching a profile marker, so
+                    // the permission ask cannot wait for a named agent —
+                    // unasked, its first `blocked` would be dropped silently.
+                    if speaks, !self.speaksProgramStatus {
+                        self.requestAlertAuthorization()
+                    }
+                    self.speaksProgramStatus = speaks
+                    self.noteAgentSignal(.programStatus(record))
+                case nil:
+                    break
+                }
+            }
+        }
     }
 
     func resize(cols: Int, rows: Int) {
@@ -400,11 +941,25 @@ final class TerminalSession: Identifiable, Hashable {
     /// reattaching is for *resuming* after a drop (the reconnect paths), not for
     /// a deliberate new session. (Otherwise every new session lands in the last
     /// tmux — the "it booted me into session 1/12" bug.)
+    /// Single-flight, same contract as the reconnect loop below: open()
+    /// starts a connect, and a deep link, a Live Activity tap, or the
+    /// foreground auto-resume can each ask again around the same moment. Two
+    /// attempt loops racing into the survivor-picker park can resume its
+    /// continuation twice — a fatalError, seen live as a crash on tapping an
+    /// agent notification. The second caller now awaits the first instead.
     func connect() async {
+        if let connectLoop {
+            await connectLoop.value
+            return
+        }
         guard state == .connecting || state == .suspended else { return }
         state = .connecting
-        await attemptLoop(maxAttempts: 1, intent: .freshShell)
+        let loop = Task { await attemptLoop(maxAttempts: 1, intent: .freshShell) }
+        connectLoop = loop
+        defer { connectLoop = nil }
+        await loop.value
     }
+    @ObservationIgnored private var connectLoop: Task<Void, Never>?
 
     /// Reconnect contract (§4.1): exponential backoff 0.5s → 1s → 2s.
     /// Single-flight: a dropped channel, the foreground handler, and the retry
@@ -506,8 +1061,17 @@ final class TerminalSession: Identifiable, Hashable {
         // a listener bound on the phone with nothing behind it, so every
         // teardown path has to take it down (preview brief §Phase 1).
         await stopPreview()
+        #if MESHYY
+        // DETACH, not shut down: the daemon keeps holding the pty and its ring buffer
+        // keeps filling, so what the shell says while the phone is asleep is still there
+        // to replay. Shutting down would end the session, which is what meshyy exists to
+        // avoid.
+        meshyyPumpTask?.cancel()
+        meshyyPumpTask = nil
+        await meshyy?.detach()
+        #endif
         await connection.disconnect()
-        agentMonitor.reset()
+        resetAgentDetection()
         state = .suspended
     }
 
@@ -529,7 +1093,7 @@ final class TerminalSession: Identifiable, Hashable {
         // never blocks, so this respects the handler's no-I/O contract while
         // still not leaking the bind across a suspend.
         stopPreviewImmediately()
-        agentMonitor.reset()
+        resetAgentDetection()
         state = .suspended
     }
 
@@ -616,14 +1180,27 @@ final class TerminalSession: Identifiable, Hashable {
     }
 
     func close() async {
+        // .closed FIRST, before any await: a connect that has not yet reached the
+        // survivor picker checks this before parking, and a park that began after
+        // this line would otherwise wait on a continuation nobody will ever
+        // resume — with a live SSH connection leaked behind it.
+        state = .closed
+        #if MESHYY
+        // A connect already parked on the picker must not outlive its tab.
+        chooseMeshyySession(.abort)
+        #endif
         pumpTask?.cancel()
         pumpTask = nil
         outboxTask?.cancel()
         outboxContinuation.finish()
         await stopPreview()
-        agentMonitor.reset()
+        #if MESHYY
+        // The user closed the tab, so end the session. Detaching would leave the daemon
+        // holding a shell nobody will reattach to, one per closed tab, forever.
+        await stopMeshyy(endSession: true)
+        #endif
+        resetAgentDetection()
         portDetector.reset()
-        state = .closed
         await connection.disconnect()
     }
 
@@ -633,6 +1210,21 @@ final class TerminalSession: Identifiable, Hashable {
             do {
                 reattachChoicePending = false
                 try await establish()
+                // close() can interleave anywhere in establish's awaits. Setting
+                // .connected past it would resurrect a tab the manager already
+                // discarded — a zombie with a live connection and keepalive. The
+                // meshyy teardown here is NOT redundant with close()'s: close()
+                // ran while the bootstrap was still in flight and saw meshyy nil,
+                // so the transport establish just opened is exactly the one only
+                // this line knows about — left alone it keeps a live QUIC attach
+                // (and a daemon session pinned "attached") under a dead tab.
+                if state == .closed {
+                    #if MESHYY
+                    await stopMeshyy(endSession: true)
+                    #endif
+                    await connection.disconnect()
+                    return
+                }
                 state = .connected
                 lastError = nil
                 hostKeyConflict = nil
@@ -640,6 +1232,15 @@ final class TerminalSession: Identifiable, Hashable {
                 // (especially a multiplexer attach) draws into it.
                 await syncWindowSize()
                 await applyReattach(intent)
+                return
+            } catch is CancellationError {
+                // The user closed the tab mid-connect (survivor picker up, or the
+                // park guard fired). Not an error, not retryable. The teardown in
+                // close() ran, but if it ran while the dial was still in flight it
+                // disconnected the PREVIOUS connection object — the one establish
+                // assigned afterwards is this loop's to release, or the socket and
+                // its server-side login outlive the tab until the app exits.
+                await connection.disconnect()
                 return
             } catch {
                 lastError = error.localizedDescription
@@ -686,9 +1287,28 @@ final class TerminalSession: Identifiable, Hashable {
     /// stale explicit/auto target) consults the *live* session list so the user
     /// never sees or lands in a session that was closed since the drop.
     private func applyReattach(_ intent: ReattachIntent) async {
+        #if MESHYY
+        // NOTHING to reattach under meshyy. The daemon held the shell the whole
+        // time and the transport's own reattach just restored it, scrollback and
+        // all — so the multiplexer is already exactly where the user left it.
+        //
+        // Sending the attach command anyway is not a harmless no-op: it starts
+        // ANOTHER multiplexer client inside the session on every reconnect. That
+        // is how one server ended up with six tmux clients on one session, and a
+        // multiplexer sizes itself to its smallest client, so the extras clamp
+        // the terminal for the live one.
+        guard meshyy == nil else { return }
+        #endif
+
         func attach(_ session: String) async {
             guard let cmd = MultiplexerController.attachCommand(resolvedMultiplexer, target: session) else { return }
-            try? await connection.send(cmd)
+            // Through the outbox, which routes to whichever transport carries the
+            // pty. Writing to `connection` directly sent this to the SSH connection
+            // — and under meshyy that connection is deliberately opened with NO
+            // pty, so the multiplexer attach was swallowed on every meshyy
+            // reconnect: the user came back to a bare login shell instead of their
+            // session, with nothing logged and nothing to see.
+            sendInput(Data(cmd.utf8), countsAsResponse: false)
         }
 
         switch intent {
@@ -734,7 +1354,14 @@ final class TerminalSession: Identifiable, Hashable {
         await stopPreview()
         await connection.disconnect()
 
-        let fresh = try await connectBestCandidate(auth: auth)
+        // ONE SHELL. Which transport carries the terminal is decided here, before any
+        // shell exists, and only the winner spawns one.
+        #if MESHYY
+        let wantsMeshyy = settings.meshyyTransport
+        let fresh = try await connectBestCandidate(auth: auth, openShell: !wantsMeshyy)
+        #else
+        let fresh = try await connectBestCandidate(auth: auth, openShell: true)
+        #endif
         connection = fresh
         // Clear whatever the dead PTY left on screen before the new shell and
         // tmux attach repaint — otherwise old and new frames overlay.
@@ -748,9 +1375,299 @@ final class TerminalSession: Identifiable, Hashable {
         // Re-arm agent detection from a clean slate: a reconnect — or a tmux
         // reattach to a different window — must not inherit the previous
         // shell's working/waiting reading.
-        agentMonitor.reset()
+        resetAgentDetection()
+
+        #if MESHYY
+        await stopMeshyy(endSession: false)
+        meshyyUnavailable = nil
+        if wantsMeshyy {
+            let size = currentWindowSize()
+            let result: Result<Void, MeshyyTransport.Unavailable>
+            if let existing = meshyy {
+                // Reattach keeps consumedOffset, which is what makes the daemon replay
+                // what was missed rather than showing a fresh screen. But a transport
+                // whose streams have finished — every suspend/detach and every QUIC
+                // failure seals them — must be REBUILT around the session first:
+                // reattaching the sealed one succeeds on the daemon's side and then
+                // delivers the replay into a stream nobody consumes, a terminal that
+                // never paints again under a tab that says connected.
+                let transport = existing.isFinished ? existing.rebuilt() : existing
+                meshyy = transport
+                wire(transport)
+                result = await transport.reattach(
+                    over: fresh, sshHost: server.host, cols: size.cols, rows: size.rows
+                )
+            } else {
+                result = try await openMeshyyChoosingSession(over: fresh, size: size)
+            }
+            switch result {
+            case .success:
+                if let transport = meshyy {
+                    startMeshyyPump(reading: transport)
+                    // Push the CURRENT size now that meshyy exists.
+                    //
+                    // The outbox routes a resize to meshyy if it is set and to the SSH
+                    // connection otherwise — and while the bootstrap is in flight,
+                    // meshyy is not set yet and that connection has no pty, so any
+                    // resize SwiftTerm reports in that window is thrown at a channel
+                    // that cannot take it and is swallowed. The session then keeps
+                    // whatever size the handshake carried, for good: `sizeChanged` only
+                    // fires when the size CHANGES, so nothing ever corrects it.
+                    //
+                    // The daemon applies resizes correctly — verified with `stty size`
+                    // across a resize — so this is purely about the app not losing one.
+                    await syncWindowSize()
+                    return
+                }
+            case .failure(let reason):
+                // A link that named a session the daemon no longer holds does
+                // NOT fall back: the user tapped a notification about a
+                // specific session, and opening any shell under that tap is
+                // the silent swap this refusal exists to prevent. Say so and
+                // stop.
+                if case .linkedSessionGone = reason {
+                    meshyy = nil
+                    throw SessionError.meshyyLinkGone(reason.errorDescription
+                        ?? "That session has ended.")
+                }
+                // No daemon here, or it refused. Open the SSH shell that was
+                // deliberately not opened above. A CONNECT-time decision, not a
+                // mid-session switch: still exactly one shell.
+                meshyy = nil
+                meshyyUnavailable = reason.errorDescription
+                guard let config = lastCandidateConfig else {
+                    // Cannot open a shell without the config the candidate used, and
+                    // pumping a connection that has no pty ends the session instantly —
+                    // which the user sees as being bounced straight back to the list.
+                    throw SessionError.noCredentials
+                }
+                try await fresh.openShell(config)
+            }
+        }
+        #endif
         startPump(reading: fresh)
     }
+
+    #if MESHYY
+    /// Opens meshyy for a tab that has no transport yet: ask the daemon what it holds,
+    /// let the user choose when there is a choice, then open exactly what was chosen.
+    ///
+    /// The deleted alternative computed a slot from this app's OPEN TABS. The sessions
+    /// live on the daemon and outlive both tabs and app launches, so after a force-quit
+    /// "new session" resolved to whichever old shell the app had forgotten first — the
+    /// user was silently dropped into a different session per tab, which read as
+    /// random. The daemon's table is the only truth about what exists, the daemon
+    /// itself allocates what is genuinely new, and a surviving session is only ever
+    /// entered because the user tapped it.
+    private func openMeshyyChoosingSession(
+        over fresh: SSHConnection,
+        size: (cols: Int, rows: Int)
+    ) async throws -> Result<Void, MeshyyTransport.Unavailable> {
+        // close() cannot cancel a dial already in flight; it can only mark the tab.
+        // Checking here — before the list, not just before the park — keeps a
+        // closed tab from allocating a daemon session it will immediately have to
+        // tear back down (the attemptLoop guard would catch it, but creating a
+        // shell just to kill it is work a race should not get to cause).
+        guard state != .closed else { throw CancellationError() }
+        let remote: [MeshyyTransport.RemoteSession]
+        switch await MeshyyTransport.listGroup(over: fresh, serverID: server.id) {
+        case .failure(let reason):
+            return .failure(reason)
+        case .success(let sessions):
+            remote = sessions
+        }
+
+        let survivors = MeshyyTransport.offerableSurvivors(in: remote, claimed: meshyyNamesInUse())
+
+        // A deep link named a specific session (a notification tap). It is
+        // honored or REFUSED — never silently downgraded to a fresh shell:
+        // sessions live on the daemon and outlive tabs, so a link can
+        // outlive its session, and opening something else under the user's
+        // tap is the slot bug's failure class worn as a convenience.
+        if let requested = requestedMeshyySession {
+            requestedMeshyySession = nil
+            if survivors.contains(where: { $0.name == requested }) {
+                return await openRemembered(requested, over: fresh, size: size)
+            }
+            return .failure(.linkedSessionGone(requested))
+        }
+
+        var choice: MeshyyChoice = .new
+        // The session this server was last on, if it is still sitting there
+        // detached: resume it without asking. That is what "put me back where I
+        // was" means after a relaunch, and the picker's whole purpose — not
+        // guessing which shell is the user's — is served better by a name the
+        // user's own last session wrote down than by a prompt.
+        //
+        // The picker still appears for everything else: no remembered session, a
+        // remembered one that is gone, or other survivors alongside it that the
+        // user may have meant instead.
+        if let remembered = server.lastMeshyySession,
+           survivors.count == 1, survivors[0].name == remembered {
+            return await openRemembered(remembered, over: fresh, size: size)
+        }
+        if !survivors.isEmpty {
+            // A close() can land between the SSH connect and this point. Its
+            // `.abort` resume has already come and gone, so parking NOW would wait
+            // on a continuation nobody will ever resume, holding a leaked SSH
+            // connection under a tab that no longer exists. close() sets .closed
+            // before anything else precisely so this check is race-free.
+            guard state != .closed else { throw CancellationError() }
+            meshyySurvivors = survivors
+            choice = await withCheckedContinuation { meshyyChoice = $0 }
+            meshyySurvivors = nil
+        }
+        // Two tabs can show pickers offering the same survivor; the first resolve
+        // claims it. Re-check here so the second silently gets a fresh session
+        // instead of a shared shell — and CLAIM before the awaits below, or the
+        // second tab's re-check races straight through the first tab's re-list
+        // window and both adopt one shell.
+        if case .resume(let name) = choice {
+            if meshyyNamesInUse().contains(name) {
+                choice = .new
+            } else {
+                meshyyPendingClaim = name
+            }
+        }
+        defer { meshyyPendingClaim = nil }
+        // The other device is the claim this app cannot see: an iPad can adopt the
+        // same survivor between this picker appearing and the tap. Ask the daemon
+        // once more — one exec on the open connection — and fall back to a fresh
+        // session rather than silently sharing a shell across devices.
+        if case .resume(let name) = choice {
+            if case .success(let now) = await MeshyyTransport.listGroup(
+                over: fresh, serverID: server.id
+            ), !now.contains(where: { $0.name == name && $0.isResumable }) {
+                choice = .new
+            }
+        }
+
+        let opened: Result<MeshyyTransport, MeshyyTransport.Unavailable>
+        switch choice {
+        case .abort:
+            // The tab was closed while the picker was up. NOT a transport failure:
+            // the failure path would open the fallback SSH shell — a stray login on
+            // the server under a tab that is already gone.
+            throw CancellationError()
+        case .new:
+            opened = await MeshyyTransport.bootstrapNew(
+                over: fresh, serverID: server.id,
+                sshHost: server.host, cols: size.cols, rows: size.rows
+            )
+        case .resume(let name):
+            // Already claimed above, synchronously at resolve; the transport's own
+            // name carries the claim from success onward (the defer that clears
+            // the pending claim runs after `meshyy` is set below).
+            opened = await MeshyyTransport.bootstrap(
+                resuming: name, over: fresh,
+                sshHost: server.host, cols: size.cols, rows: size.rows
+            )
+        }
+        switch opened {
+        case .success(let transport):
+            meshyy = transport
+            wire(transport)
+            // Remember it, so the next LAUNCH can come back here without asking.
+            // The tab is gone after a force-quit; this is the only thing that
+            // survives to say which of a server's sessions was the user's.
+            if server.lastMeshyySession != transport.sessionName {
+                server.lastMeshyySession = transport.sessionName
+                serverStore.update(server)
+            }
+            return .success(())
+        case .failure(let reason):
+            return .failure(reason)
+        }
+    }
+
+    /// Resumes a remembered session directly, with the same claim discipline the
+    /// picker path uses.
+    private func openRemembered(
+        _ name: String, over fresh: SSHConnection, size: (cols: Int, rows: Int)
+    ) async -> Result<Void, MeshyyTransport.Unavailable> {
+        meshyyPendingClaim = name
+        defer { meshyyPendingClaim = nil }
+        switch await MeshyyTransport.bootstrap(
+            resuming: name, over: fresh,
+            sshHost: server.host, cols: size.cols, rows: size.rows
+        ) {
+        case .success(let transport):
+            meshyy = transport
+            wire(transport)
+            return .success(())
+        case .failure(let reason):
+            return .failure(reason)
+        }
+    }
+
+    /// The picker's answer. Safe to call spuriously; only the parked connect listens.
+    func chooseMeshyySession(_ choice: MeshyyChoice) {
+        meshyyChoice?.resume(returning: choice)
+        meshyyChoice = nil
+    }
+
+    /// Tears down the meshyy transport without touching the SSH connection.
+    ///
+    /// `endSession: true` ends the remote shell too — for a tab the user closed. False
+    /// only drops the local pump, which a reconnect does before re-attaching.
+    private func stopMeshyy(endSession: Bool) async {
+        meshyyPumpTask?.cancel()
+        meshyyPumpTask = nil
+        guard endSession, let transport = meshyy else { return }
+        meshyy = nil
+        await transport.disconnect()
+    }
+
+    /// Reads pty bytes from meshyy into the emulator.
+    ///
+    /// Deliberately separate from `startPump`: an SSH channel ending means the shell
+    /// exited or the transport died, and drives reconnect. meshyy ending means the
+    /// resumable transport gave up, and there is no SSH shell behind it — that was the
+    /// point — so it is a dropped session like any other.
+    private func startMeshyyPump(reading transport: MeshyyTransport) {
+        meshyyPumpTask = Task { [weak self] in
+            for await chunk in transport.output {
+                guard let self, !Task.isCancelled else { return }
+                let bytes = [UInt8](chunk)
+                self.lastInboundBytesAt = Date()
+                self.scrollTracer?.noteInbound(byteCount: bytes.count)
+                self.terminalView.feed(byteArray: ArraySlice(bytes))
+                self.agentMonitor.observe(bytes)
+                // No noteAgentStatus here: under meshyy the daemon's agent
+                // events drive the alert funnel — feeding the heuristic too
+                // would race two readers of the same shell into double edges.
+                self.portDetector.observe(bytes)
+                self.pipInvalidate?()
+            }
+            guard let self, !Task.isCancelled, self.meshyy === transport else { return }
+            guard self.state == .connected else { return }
+            self.stopPreviewImmediately()
+            // The stream ends for two opposite reasons, and only the transport
+            // knows which: the user's shell EXITED (a finished session — close
+            // the tab, exactly like SSH's clean channel close), or the
+            // transport died under a live shell (a drop — win it back).
+            // Reconnecting after an exit bootstrapped a brand-new daemon
+            // session, so `exit` respawned instead of closing.
+            if transport.cleanExitStatus != nil {
+                self.meshyy = nil
+                // A dead session offers nothing. Leaving the palette up wires
+                // a live-looking button to a shell that no longer exists.
+                self.offeredQuickActions = []
+                // The session this name pointed at is gone; a relaunch must
+                // not try to walk back into it.
+                if self.server.lastMeshyySession != nil {
+                    self.server.lastMeshyySession = nil
+                    self.serverStore.update(self.server)
+                }
+                self.state = .closed
+                return
+            }
+            self.offeredQuickActions = []   // stale until the reattach re-offers
+            self.state = .reconnecting
+            Task { await self.reconnect(maxAttempts: 10) }
+        }
+    }
+    #endif
 
     /// Walks the server's candidate hosts in order (last winner first within
     /// this session) and returns the first connection that completes an SSH
@@ -764,7 +1681,10 @@ final class TerminalSession: Identifiable, Hashable {
     /// host, where it still aborts the walk immediately (never quietly
     /// connect elsewhere past a MITM warning). A first connect with no pinned
     /// key does TOFU on whichever candidate connects first, exactly as today.
-    private func connectBestCandidate(auth: SSHConnection.AuthMethod) async throws -> SSHConnection {
+    private func connectBestCandidate(
+        auth: SSHConnection.AuthMethod,
+        openShell: Bool
+    ) async throws -> SSHConnection {
         var candidates = server.connectionCandidates
         if let preferred = preferredCandidateHost,
            let index = candidates.firstIndex(of: preferred), index > 0 {
@@ -794,8 +1714,9 @@ final class TerminalSession: Identifiable, Hashable {
 
             let fresh = SSHConnection()
             do {
-                try await fresh.connect(config)
+                try await fresh.connect(config, openShell: openShell)
                 preferredCandidateHost = candidate
+                lastCandidateConfig = config
                 return fresh
             } catch {
                 if case SSHConnectionError.hostKeyMismatch = error {
@@ -828,8 +1749,42 @@ final class TerminalSession: Identifiable, Hashable {
     /// Replays the real window size after connecting (§4.2 SIGWINCH contract).
     private func syncWindowSize() async {
         let size = currentWindowSize()
+        #if MESHYY
+        if let meshyy {
+            // Under meshyy the SSH connection has no pty, so resizing it alone would
+            // send this nowhere — and this call's whole job is making the pty match the
+            // screen before a multiplexer draws into it.
+            await deliverResize(cols: size.cols, rows: size.rows, via: meshyy, else: connection)
+            return
+        }
+        await deliverResize(cols: size.cols, rows: size.rows, via: nil, else: connection)
+        #else
         try? await connection.resize(cols: size.cols, rows: size.rows)
+        #endif
     }
+
+    #if MESHYY
+    /// Hands a resize to the transport carrying the pty (meshyy if given,
+    /// else the SSH connection). Errors are swallowed exactly as before; the
+    /// outcome is only remembered for the scroll trace.
+    private func deliverResize(
+        cols: Int, rows: Int, via meshyy: MeshyyTransport?, else connection: SSHConnection
+    ) async {
+        var failure: String?
+        do {
+            if let meshyy {
+                try await meshyy.resize(cols: cols, rows: rows)
+            } else {
+                try await connection.resize(cols: cols, rows: rows)
+            }
+        } catch {
+            failure = String(describing: error)
+        }
+        lastPtyResize = .init(
+            cols: cols, rows: rows, via: meshyy != nil ? .meshyy : .ssh, error: failure, at: Date()
+        )
+    }
+    #endif
 
     /// Single consumer for all outbound traffic — strict FIFO per session,
     /// always targeting the current connection.
@@ -838,12 +1793,45 @@ final class TerminalSession: Identifiable, Hashable {
             guard let self else { return }
             for await item in self.outboxStream {
                 guard !Task.isCancelled else { return }
+                // Whichever transport is carrying the pty.
+                #if MESHYY
+                let meshyy = self.meshyy
+                #endif
                 let connection = self.connection
                 switch item {
                 case .data(let data):
+                    #if MESHYY
+                    if let meshyy {
+                        try? await meshyy.send(data)
+                    } else {
+                        try? await connection.send(data)
+                    }
+                    #else
                     try? await connection.send(data)
+                    #endif
+                #if MESHYY
+                case .tracedData(let data, let recordID, let enqueuedAt):
+                    var failure: String?
+                    do {
+                        if let meshyy {
+                            try await meshyy.send(data)
+                        } else {
+                            try await connection.send(data)
+                        }
+                    } catch {
+                        failure = String(describing: error)
+                    }
+                    self.scrollTracer?.noteSend(
+                        recordID: recordID, via: meshyy != nil ? .meshyy : .ssh, error: failure,
+                        enqueuedAt: enqueuedAt
+                    )
+                #endif
                 case .resize(let cols, let rows):
+                    #if MESHYY
+                    await self.deliverResize(cols: cols, rows: rows, via: meshyy, else: connection)
+                    #else
                     try? await connection.resize(cols: cols, rows: rows)
+                    #endif
                 }
             }
         }
@@ -854,8 +1842,13 @@ final class TerminalSession: Identifiable, Hashable {
             for await chunk in await connection.output {
                 guard let self, !Task.isCancelled else { return }
                 let bytes = [UInt8](chunk)
+                #if MESHYY
+                self.lastInboundBytesAt = Date()
+                self.scrollTracer?.noteInbound(byteCount: bytes.count)
+                #endif
                 self.terminalView.feed(byteArray: ArraySlice(bytes))
                 self.agentMonitor.observe(bytes)
+                self.noteAgentStatus(self.agentMonitor.status)
                 // Source A of the preview's port detection. Cheap by
                 // construction: it byte-scans for "://" and only then does
                 // any String work, so a firehose costs a memchr per chunk.
@@ -903,6 +1896,11 @@ final class TerminalSession: Identifiable, Hashable {
         /// Every candidate host failed — carries the addresses tried, in
         /// order, so the user sees exactly what was attempted.
         case allCandidatesFailed([String])
+        #if MESHYY
+        /// A deep link named a daemon session that no longer exists. Not a
+        /// connection failure — the honest message, with nothing opened.
+        case meshyyLinkGone(String)
+        #endif
 
         var errorDescription: String? {
             switch self {
@@ -912,6 +1910,10 @@ final class TerminalSession: Identifiable, Hashable {
                 return "Couldn't load the configured SSH key (\(detail)). Re-import it in Settings → Manage Keys."
             case .allCandidatesFailed(let hosts):
                 return "Tried \(hosts.joined(separator: ", ")) — none reachable."
+            #if MESHYY
+            case .meshyyLinkGone(let message):
+                return message
+            #endif
             }
         }
     }
@@ -928,11 +1930,61 @@ private final class SessionIO: TerminalViewDelegate {
 
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
         let payload = Data(data)
-        MainActor.assumeIsolated { session?.sendInput(payload) }
+        let focus = Self.focusReport(payload)
+        if let focus {
+            agentAlertLog.notice("focus-\(focus, privacy: .public) report leaving via send")
+        }
+        MainActor.assumeIsolated {
+            guard let session else { return }
+            // Focus in/out (mode 1004, sent when the terminal view gains or
+            // loses first responder — e.g. every app switch) and SwiftTerm's
+            // replies to queries are the terminal talking. Counting them as
+            // the user's answer cleared the seen-signal mute on every return
+            // to the app. Typing, paste and dictation still count, and so
+            // does a mouse report: SwiftTerm writes those through the same
+            // emulator path, but a tap on a TUI's option is the user
+            // choosing. (Wheel scrolling never gets here — ScrollBridge
+            // sends it as non-response itself.)
+            let emulatorReply = session.terminalView.isEmulatorWriting && !Self.isMouseReport(payload)
+            let machine = focus != nil || emulatorReply
+            session.sendInput(payload, countsAsResponse: !machine)
+        }
     }
 
+    /// "in"/"out" when `data` is exactly a mode-1004 focus report.
+    static func focusReport(_ data: Data) -> String? {
+        switch Array(data) {
+        case [0x1B, 0x5B, 0x49]: return "in"
+        case [0x1B, 0x5B, 0x4F]: return "out"
+        default: return nil
+        }
+    }
+
+    /// A mouse report in any encoding SwiftTerm emits: X10/UTF-8
+    /// (`ESC [ M …`), SGR (`ESC [ < …`), urxvt (`ESC [ b;x;y M`). No query
+    /// reply has those shapes (DA ends in `c`, cursor position in `R`).
+    static func isMouseReport(_ data: Data) -> Bool {
+        let bytes = Array(data)
+        guard bytes.count >= 3, bytes[0] == 0x1B, bytes[1] == 0x5B else { return false }
+        if bytes[2] == 0x4D || bytes[2] == 0x3C { return true }
+        guard bytes.last == 0x4D else { return false }
+        let body = bytes[2..<(bytes.count - 1)]
+        return body.split(separator: 0x3B, omittingEmptySubsequences: false).count == 3
+            && body.allSatisfy { $0 == 0x3B || (0x30...0x39).contains($0) }
+    }
+
+    /// SwiftTerm calls this only when cols/rows actually change — a real
+    /// resize, never the keepalive's same-size ping (that goes straight to
+    /// `TerminalSession.resize`).
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-        MainActor.assumeIsolated { session?.resize(cols: newCols, rows: newRows) }
+        agentAlertLog.notice("resize \(newCols, privacy: .public)x\(newRows, privacy: .public)")
+        MainActor.assumeIsolated {
+            #if DEBUG
+            AgentAlertProbe.shared.noteResize()
+            #endif
+            session?.noteDisruption("resize")
+            session?.resize(cols: newCols, rows: newRows)
+        }
     }
 
     func clipboardCopy(source: TerminalView, content: Data) {
@@ -962,7 +2014,13 @@ private final class SessionIO: TerminalViewDelegate {
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
     func scrolled(source: TerminalView, position: Double) {}
-    func bell(source: TerminalView) {}
+    func bell(source: TerminalView) {
+        // Claude Code with the terminal_bell channel rings when a permission
+        // prompt waits and after a finished turn. Gated like every signal: a
+        // plain shell's BEL (tab completion) never reaches the policy.
+        agentAlertLog.notice("bell")
+        MainActor.assumeIsolated { session?.noteAgentSignal(.bell) }
+    }
     func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
 }
@@ -974,6 +2032,15 @@ private final class SessionIO: TerminalViewDelegate {
 final class SessionManager {
     private(set) var sessions: [TerminalSession] = []
 
+    #if MESHYY
+    /// Daemon session names live tabs are drawing right now. What keeps two tabs from
+    /// adopting one survivor; the daemon itself keeps "new" sessions distinct.
+    private func meshyyNamesInUse() -> Set<String> {
+        Set(sessions.compactMap { $0.meshyy?.sessionName })
+            .union(sessions.compactMap(\.meshyyPendingClaim))
+    }
+    #endif
+
     private let keyStore: KeyStore
     private let serverStore: ServerStore
     private let passwords: PasswordStore
@@ -981,6 +2048,11 @@ final class SessionManager {
     private let profiles: ProfileStore
     private let activityController = SessionActivityController()
     private let diagnostics: BackgroundExitDiagnostics
+    #if MESHYY
+    /// On-device swipe trace, shared by every session (nil = not traced).
+    /// Set once by the beta-only init overload below.
+    @ObservationIgnored private var scrollTrace: ScrollTraceStore?
+    #endif
     private var graceTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
@@ -1081,8 +2153,29 @@ final class SessionManager {
         refreshActivity()
     }
 
+    #if MESHYY
+    /// Beta builds: every session this manager opens records its swipes into
+    /// `scrollTrace`. An overload rather than a defaulted parameter so App
+    /// Store candidates carry no trace type.
+    convenience init(keyStore: KeyStore, serverStore: ServerStore, passwords: PasswordStore, settings: AppSettings, profiles: ProfileStore, diagnostics: BackgroundExitDiagnostics? = nil, scrollTrace: ScrollTraceStore?) {
+        self.init(keyStore: keyStore, serverStore: serverStore, passwords: passwords, settings: settings, profiles: profiles, diagnostics: diagnostics)
+        self.scrollTrace = scrollTrace
+    }
+    #endif
+
     @discardableResult
     func open(server: Server) -> TerminalSession {
+        #if MESHYY
+        let session = TerminalSession(
+            server: server,
+            keyStore: keyStore,
+            serverStore: serverStore,
+            passwords: passwords,
+            settings: settings,
+            profiles: profiles,
+            scrollTrace: scrollTrace
+        )
+        #else
         let session = TerminalSession(
             server: server,
             keyStore: keyStore,
@@ -1091,6 +2184,33 @@ final class SessionManager {
             settings: settings,
             profiles: profiles
         )
+        #endif
+        #if MESHYY
+        session.meshyyNamesInUse = { [weak self] in self?.meshyyNamesInUse() ?? [] }
+        #endif
+        #if AGENT_NOTIFY
+        // Without AGENT_NOTIFY the seam keeps its no-op default: signals are
+        // still parsed and gated (the tests drive them), but nothing reaches
+        // AgentAlertCenter, so nothing posts.
+        session.postAgentAlert = { [weak self, weak session] trigger in
+            guard let self, let session else { return }
+            #if MESHYY
+            let daemonSessionName = session.meshyy?.sessionName
+            #else
+            let daemonSessionName: String? = nil
+            #endif
+            self.alertCenter.agentNeedsYou(
+                sessionID: session.id,
+                serverID: session.server.id,
+                serverName: session.server.name,
+                daemonSessionName: daemonSessionName,
+                agentName: session.agentMonitor.detected?.displayName,
+                trigger: trigger,
+                appIsActive: session.appIsActive(),
+                pipShowsThisSession: self.pipShowsTerminal(session.id)
+            )
+        }
+        #endif
         session.onStateChange = { [weak self, weak session] in
             self?.refreshActivity()
             // State drives the pop-out's chip too — multicast into the
@@ -1098,8 +2218,15 @@ final class SessionManager {
             session?.pipInvalidate?()
         }
         session.agentMonitor.onChange = { [weak self, weak session] in
+            session?.agentPresentationDidChange()
             self?.refreshActivity()
             session?.pipInvalidate?()
+        }
+        // A marker can name the agent without any status transition; the
+        // row icon and the Live Activity's icon must follow it anyway.
+        session.agentMonitor.onDetectedChange = { [weak self, weak session] in
+            session?.agentPresentationDidChange()
+            self?.refreshActivity()
         }
         session.onShellExit = { [weak self, weak session] in
             guard let self, let session else { return }
@@ -1127,6 +2254,7 @@ final class SessionManager {
     func close(_ session: TerminalSession) {
         sessions.removeAll { $0.id == session.id }
         Task { await session.close() }
+        alertCenter.sessionClosed(session.id)
         refreshActivity()
         pipSessionClosed?(session)
     }
@@ -1173,10 +2301,20 @@ final class SessionManager {
                         sessionState: stateString,
                         monitorStatus: monitorStatus
                     ),
-                    agentName: session.agentMonitor.detected?.displayName
+                    agentName: session.agentMonitor.detected?.displayName,
+                    // Only carried when the toggle is on: the widget renders
+                    // whatever it is handed, so the setting is enforced here.
+                    agentIconName: settings.agentMascotIcons
+                        ? session.effectiveAgentIconName : nil
                 )
             }
         activityController.update(with: summaries)
+        // Same summaries, mirrored to the App Group so the home-screen widget
+        // can show live sessions. Piggy-backing on this method rather than
+        // adding another observer means the widget can never disagree with the
+        // Live Activity: one computation, two consumers.
+        SessionSnapshotStore.write(summaries)
+        WidgetCenter.shared.reloadTimelines(ofKind: LiveSessionsWidgetKind)
     }
 
     func session(for id: UUID) -> TerminalSession? {
@@ -1201,6 +2339,15 @@ final class SessionManager {
     /// suspend sessions — live monitoring is the feature. Wired to
     /// PiPCoordinator at app init; tests override.
     @ObservationIgnored var pipKeepsProcessAlive: () -> Bool = { false }
+    /// Seam: true while an active pop-out is showing THIS session's terminal
+    /// — the user is watching that agent, so its alerts are noise. A pop-out
+    /// of another session, a preview or a VNC monitor mutes nothing: it only
+    /// keeps the app running, which is what lets those alerts arrive at all.
+    /// Wired to PiPCoordinator at app init.
+    @ObservationIgnored var pipShowsTerminal: (UUID) -> Bool = { _ in false }
+    /// Where agent alerts are decided and posted. Tests inject one that
+    /// records requests instead of handing them to iOS.
+    @ObservationIgnored var alertCenter: AgentAlertCenter = .shared
 
     func appDidEnterBackground() {
         guard sessions.contains(where: { $0.state == .connected }) else { return }
@@ -1262,6 +2409,23 @@ final class SessionManager {
         }
     }
 
+    /// The setup card is on screen: it has now been shown, for good. Any
+    /// other session that also raised it lets it go, so it shows once.
+    func notificationSetupCardAppeared(in shown: TerminalSession) {
+        settings.notificationSetupCardShown = true
+        for session in sessions where session !== shown {
+            session.showNotificationSetupCard = false
+        }
+    }
+
+    /// Every scene-phase change (.active, .inactive, .background) makes the
+    /// sessions repaint; agent signals in the next moments are not news.
+    func scenePhaseChanged(to phase: String) {
+        for session in sessions {
+            session.noteDisruption("scene-\(phase)")
+        }
+    }
+
     func appWillEnterForeground() {
         // Back within the grace window: sockets are still open, nothing to do.
         graceTask?.cancel()
@@ -1282,8 +2446,22 @@ final class SessionManager {
         // bump that bypasses that coalescing.
         refreshActivity()
         activityController.refreshStaleHorizon()
-        // Do NOT auto-reconnect: a session that was suspended in the background
-        // shows a paused card so the user picks reattach-tmux vs. fresh shell.
+
+        #if MESHYY
+        // meshyy sessions resume themselves.
+        //
+        // The paused card asks a question that only exists over SSH: the shell
+        // died with the connection, so the user must choose between reattaching a
+        // multiplexer and starting fresh. Under meshyy the daemon held THEIR shell
+        // the whole time — same scrollback, same cursor, same running command —
+        // so there is nothing to decide and a tap to make. Coming back should just
+        // put them back.
+        //
+        // SSH sessions keep the card: over there the choice is real.
+        for session in sessions where session.state == .suspended && session.usesMeshyy {
+            Task { await session.reconnect(maxAttempts: 3) }
+        }
+        #endif
     }
 
     /// Proactive wind-down, run INSIDE `graceTask` when the remaining

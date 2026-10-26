@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # test/** is for this test branch only (no PR, so nothing else runs CI
+    # on its pushes); develop and main keep [main, develop].
+    branches: [main, develop, 'test/**']
   pull_request:
 
 permissions:
@@ -20,6 +22,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+
+      - name: Network symbols stay in the audited layers
+        run: scripts/check-network-surface.sh
 
       - name: Select Xcode
         run: echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
@@ -40,3 +45,15 @@ jobs:
 
       - name: Test
         run: make test
+
+      # The App Store candidate: the same app built WITHOUT meshyy. A broken
+      # `#if MESHYY` gate fails here, not at release time. Same DerivedData
+      # and simulator as the steps above, so the packages are already built.
+      - name: Build App Store candidate (no meshyy)
+        run: make build-appstore
+
+      - name: App Store candidate Settings has no meshyy (UI test)
+        run: make test-appstore
+
+      - name: App Store candidate binary has no meshyy
+        run: make check-appstore
