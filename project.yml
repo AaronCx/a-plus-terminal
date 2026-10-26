@@ -13,23 +13,24 @@ settings:
     # identical versions or App Store Connect rejects the upload.
     CURRENT_PROJECT_VERSION: 78
     MARKETING_VERSION: "1.0.4"
-    # Agent notifications are compiled OUT on this branch: this switch is
-    # empty, and `#if AGENT_NOTIFY` removes every entry point (posting for
-    # bells / OSC 9 / 777 / 7501, the notification delegate) together with
-    # the permission ask (AgentAlertCenter.agentDetected and
-    # sendTestNotification, the only requestAuthorization calls) and the UI
-    # (the Claude Code setup card, Settings → Notifications). What stays
-    # compiled is unreachable: AgentAlertPolicy and AgentAlertCenter's
-    # posting shell, kept so the policy's unit tests still run.
-    # Setting it to AGENT_NOTIFY turns the condition on in BOTH app targets
-    # and all three test targets at once and restores develop's code (each
-    # gated hunk is develop's text); the notification work itself is
-    # preserved unchanged on branch test/agent-notifications. It is a plain build setting rather than a
+    # Agent notifications are compiled IN on develop: this switch is
+    # AGENT_NOTIFY, which turns the condition on in BOTH app targets and all
+    # three test targets at once. Emptying it compiles them out, as the 1.0.4
+    # App Store build (78, cut from test/1.0.4-duo) shipped: `#if AGENT_NOTIFY`
+    # removes every entry point (posting for bells / OSC 9 / 777 / 7501, the
+    # notification delegate) together with the permission ask
+    # (AgentAlertCenter.agentDetected and sendTestNotification, the only
+    # notification-permission requests) and the UI (the Claude Code setup
+    # card, Settings → Notifications). What then stays compiled:
+    # AgentAlertPolicy, AgentAlertCenter (its posting path, agentNeedsYou, is
+    # unreachable), the signal gates, AgentNotificationSetup's settingLine and
+    # settingsPath (the Copy text) and the setup-card state, kept for their
+    # unit tests and the compiled-out test. It is a plain build setting rather than a
     # condition here because a project-level SWIFT_ACTIVE_COMPILATION_CONDITIONS
     # would drop Debug's `DEBUG` (see the MESHYY note on the aPlusTerminal
     # target). The agent-status heuristic (badge, Live Activity, Dynamic
     # Island) and custom agents are NOT behind it.
-    AGENT_NOTIFY_CONDITION: ""
+    AGENT_NOTIFY_CONDITION: AGENT_NOTIFY
 packages:
   # Pinned for reproducible builds of a security-sensitive SSH client: `from:`
   # floats to the latest matching tag, so CI and each developer could silently
@@ -141,8 +142,8 @@ targets:
       base:
         # Target level, not project level: here `$(inherited)` picks up the
         # project's Debug `DEBUG`, which a project-level base value would drop.
-        # AGENT_NOTIFY_CONDITION: empty on this branch (agent notifications
-        # compiled out); AGENT_NOTIFY restores them — see the project settings.
+        # AGENT_NOTIFY_CONDITION: AGENT_NOTIFY on develop (agent notifications
+        # compiled in); empty compiles them out — see the project settings.
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MESHYY $(AGENT_NOTIFY_CONDITION)"
   aPlusTerminalAppStore:
     templates: [aPlusTerminalApp]
