@@ -20,7 +20,8 @@ These are compiled out of the 1.0.4 App Store build; TestFlight builds from
   re-learns the running program's input modes after an auto-resume. While
   an agent waits, a one-tap palette answers it, and tapping an agent
   notification no longer races a meshyy connect into a crash. Off by
-  default. (#131, #132, #135, #137, #138, #142, #145)
+  default. (#135, #137, #138, #142, #145; first tried in #131 and #132,
+  which #133 reverted)
 - **Agent notifications:** the phone tells you when an agent asks for
   you — only when the agent itself signals it (the terminal bell, or an
   OSC 9 / OSC 777 / OSC 7501 notification sequence), never by guessing
@@ -34,7 +35,7 @@ These are compiled out of the 1.0.4 App Store build; TestFlight builds from
   pop-out keeps it running. A pop-out of a session's terminal mutes that
   session, since you are already watching it. Claude Code's "finished"
   ring comes about a minute after a turn, so it usually arrives only while
-  a pop-out keeps the app running. (#139, #143, #145, #149, #160, #161)
+  a pop-out keeps the app running. (#139, #143, #149, #160, #161)
 
 ## 1.0.4 (build 78) — 2026-10-25
 
