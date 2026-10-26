@@ -27,9 +27,10 @@
 #  4. The archive gates of ship-testflight.sh --app-store:
 #     - ITMS-90626, dyld/@rpath (0 references), asset bundles;
 #     - check-no-meshyy.sh on the archived app;
-#     - plus no agent-notification copy when the commit's project.yml leaves
-#       AGENT_NOTIFY_CONDITION empty (notifications compiled out, as in the
-#       1.0.4 candidate); develop sets it to AGENT_NOTIFY.
+#     - plus agent-notification copy that matches the commit's project.yml
+#       switch, AGENT_NOTIFY_CONDITION: absent when it is empty (compiled
+#       out, as in the 1.0.4 candidate), present when it is AGENT_NOTIFY
+#       (develop).
 #     Its Debug-build meshyy check runs in ci.yml instead, so --app-store
 #     also requires ci.yml green on the commit (step 1).
 #  5. Upload with xcodebuild -exportArchive (Xcode 26.5 here).
@@ -95,8 +96,12 @@ remote_head=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
 git diff --quiet "$REF_COMMIT" HEAD -- '*.entitlements' \
   || die "entitlements changed since $REF_COMMIT — the reference archive's entitlements no longer apply"
 # Agent notifications follow project.yml's AGENT_NOTIFY_CONDITION switch:
-# empty compiles them out, AGENT_NOTIFY compiles them in.
-notify_switch=$(git show "$remote_head:project.yml" | sed -n 's/^ *AGENT_NOTIFY_CONDITION: *//p' | tr -d '"')
+# empty compiles them out, AGENT_NOTIFY compiles them in. Exactly one line may
+# set it, so a second (say, target-level) value can't go unnoticed.
+notify_lines=$(git show "$remote_head:project.yml" | grep '^ *AGENT_NOTIFY_CONDITION:' || true)
+[[ $(grep -c . <<<"$notify_lines") -eq 1 ]] \
+  || die "project.yml must set AGENT_NOTIFY_CONDITION on exactly one line; found: ${notify_lines:-none}"
+notify_switch=$(sed 's/^ *AGENT_NOTIFY_CONDITION: *//' <<<"$notify_lines" | tr -d '"')
 case "$notify_switch" in
   "") NOTIFY=0 ;;
   AGENT_NOTIFY) NOTIFY=1 ;;
@@ -179,16 +184,20 @@ for car in "$app_dir/Assets.car" "$widget_dir/Assets.car"; do
   [[ -z "$missing" ]] || die "asset gate: $car lacks agent icons: $missing"
 done
 "$REPO_DIR/scripts/check-no-meshyy.sh" "$app_dir" >>"$LOG" 2>&1 || die "check-no-meshyy.sh FAILED on the archive — see $LOG"
-if (( NOTIFY )); then
-  notify_gate="notifications compiled in"
-else
-  for needle in 'Send test notification' 'preferredNotifChannel' 'To get notified'; do
-    if strings -a "$app_bin" "$widget_dir/aPlusTerminalWidgets" | grep -qF "$needle"; then
-      die "agent-notification copy \"$needle\" is in the binary; this commit's AGENT_NOTIFY_CONDITION is empty, so notifications must be compiled out"
-    fi
-  done
-  notify_gate="no notification copy"
-fi
+# The notification copy must match the switch. Capture the strings once:
+# under pipefail, `strings | grep -q` reads a hit as a miss (grep exits on the
+# match and strings dies of SIGPIPE).
+copy=$(strings -a "$app_bin" "$widget_dir/aPlusTerminalWidgets") || die "strings failed on $app_bin"
+for needle in 'Send test notification' 'preferredNotifChannel' 'To get notified' \
+  'requestAuthorizationWithOptions:completionHandler:'; do
+  if grep -qF -- "$needle" <<<"$copy"; then has=1; else has=0; fi
+  if (( NOTIFY && !has )); then
+    die "agent-notification copy \"$needle\" is missing; this commit's AGENT_NOTIFY_CONDITION is AGENT_NOTIFY, so notifications must be compiled in"
+  elif (( !NOTIFY && has )); then
+    die "agent-notification copy \"$needle\" is in the binary; this commit's AGENT_NOTIFY_CONDITION is empty, so notifications must be compiled out"
+  fi
+done
+if (( NOTIFY )); then notify_gate="notification copy present"; else notify_gate="no notification copy"; fi
 echo "gates: ITMS-90626 ok, 0 @rpath, $(wc -l <<<"$icons" | tr -d ' ') agent icons in app and widget, no meshyy, $notify_gate" | tee -a "$LOG"
 
 # [5] Upload (Xcode 26.5's exportArchive re-signs with the App Store profiles).

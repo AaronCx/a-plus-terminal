@@ -51,8 +51,9 @@ the `test/**` commit its archive was built from, not a bump merge on
 (`AGENT_NOTIFY_CONDITION: ""` in `project.yml`, as `test/1.0.4-duo` did for
 1.0.4), set it back to `AGENT_NOTIFY` on `develop` after merging `main` back
 in step 5, unless notifications are meant to stay out of the next release as
-well. `ship-ci-archive.sh` reads the switch from the commit it ships and runs
-its no-notification-copy gate only when the switch is empty.
+well. `ship-ci-archive.sh` reads the switch from the commit it ships and
+checks the archive against it: notification copy must be absent when the
+switch is empty and present when it is `AGENT_NOTIFY`.
 
 `main` will contain meshyy source behind `#if MESHYY` after a release merge.
 That is expected: the approved binary did not include it.

@@ -23,8 +23,9 @@ settings:
     # notification-permission requests) and the UI (the Claude Code setup
     # card, Settings → Notifications). What then stays compiled:
     # AgentAlertPolicy, AgentAlertCenter (its posting path, agentNeedsYou, is
-    # unreachable), the signal gates and the setup-card state, kept so their
-    # unit tests still run. It is a plain build setting rather than a
+    # unreachable), the signal gates, AgentNotificationSetup's settingLine and
+    # settingsPath (the Copy text) and the setup-card state, kept for their
+    # unit tests and the compiled-out test. It is a plain build setting rather than a
     # condition here because a project-level SWIFT_ACTIVE_COMPILATION_CONDITIONS
     # would drop Debug's `DEBUG` (see the MESHYY note on the aPlusTerminal
     # target). The agent-status heuristic (badge, Live Activity, Dynamic
