@@ -5,19 +5,22 @@ unreleased work accumulates at the top.
 
 ## Unreleased
 
+These are compiled out of the 1.0.4 App Store build; TestFlight builds from
+`develop` carry them.
+
 - **Scroll trace (diagnostics):** Settings → Diagnostics → Scroll trace
   records, on this iPhone only, how each recent swipe was routed and what it
   sent, so a scroll that goes dead can be shared (share sheet or your
   server's inbox) and diagnosed. TestFlight (beta) builds only, on by
-  default there; compiled out of App Store builds along with meshyy.
+  default there; compiled out of App Store builds along with meshyy. (#155)
 - **meshyy transport (opt-in, beta):** a session can run over meshyy, a
   clean-room resumable terminal transport — a dropped connection resumes
   where it left off instead of reconnecting into a fresh shell. Typing
   `exit` closes the tab like a real terminal, and a resumed terminal
-  re-learns the running program's input modes, so tmux scrolling still
-  works after an auto-resume. While an agent waits, a one-tap palette
-  answers it, and tapping an agent notification no longer races a meshyy
-  connect into a crash. Off by default. (#131, #132, #137, #138, #142)
+  re-learns the running program's input modes after an auto-resume. While
+  an agent waits, a one-tap palette answers it, and tapping an agent
+  notification no longer races a meshyy connect into a crash. Off by
+  default. (#131, #132, #135, #137, #138, #142, #145)
 - **Agent notifications:** the phone tells you when an agent asks for
   you — only when the agent itself signals it (the terminal bell, or an
   OSC 9 / OSC 777 / OSC 7501 notification sequence), never by guessing
@@ -25,29 +28,48 @@ unreleased work accumulates at the top.
   Claude Code needs one setting on the server, which a one-time card
   (also in Settings → Notifications) shows with a Copy button; Settings
   also sends a test notification. A ring you have already seen stays
-  quiet until you answer. Notifications arrive only while a+Terminal is
-  still running: briefly after you leave it, or while a pop-out keeps it
-  running. A pop-out of a session's terminal mutes that session, since
-  you are already watching it. Claude Code's "finished" ring comes about
-  a minute after a turn, so it usually arrives only while a pop-out keeps
-  the app running. Agent status is surfaced where you are already
-  looking.
-  (#139, #140, #143, #149)
-- **Sessions widget:** a home-screen widget that lists live sessions and
-  opens exactly the session it shows. (#135, #136)
-- **Agent icons and custom agents:** agents get their real faces across the
-  app, with a hand-drawn doodle set as the default and support for custom
-  icons, sized to fit the Dynamic Island. Settings → Agents now lets you
-  create your own agent for any command-line tool, with its own icon from
-  Photos or Files: a+Terminal recognizes it from the command name or what
-  it prints when it starts, and shows it on the session, the Live Activity
-  and the Dynamic Island like a built-in; its bell or notification sequence
-  reaches your phone like a built-in's too. Agents export and import as
-  JSON; your icons stay on your device. (#143, #144, #145, #146, #148)
-- **Fixes:** returning from a preview refocuses the terminal program, and
-  the Sessions widget orders sessions correctly (#136); scrolling is
-  consistent and alerts are honest about state (#145); the session picker
-  keeps its payload and a swipe stays off the status line (#147).
+  quiet until you answer, and a custom agent's bell or notification
+  sequence reaches your phone like a built-in's. Notifications arrive only
+  while a+Terminal is still running: briefly after you leave it, or while a
+  pop-out keeps it running. A pop-out of a session's terminal mutes that
+  session, since you are already watching it. Claude Code's "finished"
+  ring comes about a minute after a turn, so it usually arrives only while
+  a pop-out keeps the app running. (#139, #143, #145, #149, #160, #161)
+
+## 1.0.4 (build 78) — 2026-10-25
+
+- **Custom agents:** Settings → Agents lets you create your own agent for
+  any command-line tool, with its own icon from Photos or Files: a+Terminal
+  recognizes it from the command name or what it prints when it starts, and
+  shows it on the session, the Live Activity and the Dynamic Island like a
+  built-in. Agents export and import as JSON; your icons stay on your
+  device. (#161)
+- **Agent icons:** agents get icons on session rows, the Live Activity and
+  the Dynamic Island, with an original doodle-style set as the default.
+  Any agent's icon can be replaced with your own image, including files
+  still in iCloud Drive, and it is sized to fit the Dynamic Island. A
+  toggle in Settings turns the icons off. (#143, #144, #145, #146, #147,
+  #148, #161)
+- **Agent status at a glance:** the session list says when an agent is
+  waiting for you, and each server shows how many are waiting. Agents are
+  recognized from what is on screen, so Claude Code is now named inside
+  tmux, and Claude Code's busy footer ("esc to interrupt") keeps a silent
+  tool call from reading as waiting. (#140, #143, #160, #161)
+- **Sessions widget:** a Home Screen widget that lists live sessions and
+  saved servers: it opens exactly the session it shows, or starts a session
+  on a saved server in one tap. (#135, #136)
+- **Live Activity order:** with several sessions open, the Live Activity
+  lists them in the order you opened them, first at the top, and tapping
+  the compact Dynamic Island opens that first session. (#135)
+- **iPhone Duo:** built with Xcode 27.1 and the iOS 27.1 SDK, which iPhone
+  Duo needs to run an app full screen; 1.0.3 was built with the iOS 26 SDK.
+  (d4f42a9, 5ddf139)
+- **Fixes:** returning from a preview refocuses the terminal program
+  (#136); a swipe near the bottom of the screen no longer switches tmux
+  windows (#147); dictation's Insert + Return, and auto-send after
+  silence, now press Return, so dictated answers submit in agent prompts
+  and other full-screen apps (#135); closing a session while it is still
+  connecting also closes the SSH connection it was opening (#135).
 
 ## 1.0.3 (build 43) — 2026-08-01
 
